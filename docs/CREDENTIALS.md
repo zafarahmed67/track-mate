@@ -9,7 +9,3 @@ https://github.com/AllAroundOz/trackmate-planner
 Github: zafarahmed67
 Pass: Zafar@174417441744
 
-OpenAI Key - 
-
-Gmaps API - API - 
-
