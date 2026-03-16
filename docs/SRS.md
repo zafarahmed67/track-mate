@@ -2,6 +2,9 @@ TrackMate MVP PRD
 1. Project Overview
 TrackMate is an AI-assisted road trip planner for Australian travellers, especially caravan and lap-style travellers. The product must be database-first: AI should never invent stops. Instead, the system should filter from a verified stop database and then use AI to turn those verified results into a structured, editable itinerary.
 The MVP will be hosted on trackmate.allaroundoz.com.au and sold through the client’s existing sales flow. Customers purchase via the current payment flow, which triggers a post-sale Fab Funnels automation. The new TrackMate app will manage its own application access, saved trips, itinerary generation, map view, refinement chat, and PDF export.
+
+
+
 2. Product Goals
 Primary goal
 Build a working MVP that allows a paying customer to:
@@ -17,6 +20,7 @@ Make the stop database reusable as an All Around Oz data asset
 Keep auth simple for non-technical users
 Support future admin maintenance of the stop dataset
 Prepare the system for future affiliate and recommendation features
+
 3. Core Product Principles
 Database-first
 AI must never invent stops, camps, caravan parks, or stay suggestions not present in the verified stop database.
