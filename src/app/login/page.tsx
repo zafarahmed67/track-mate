@@ -2,6 +2,8 @@
 
 import { useState } from "react"
 import Link from "next/link"
+import { useRouter } from "next/navigation"
+import { createClient } from "@supabase/supabase-js"
 import { Button } from "@/components/ui/button"
 import {
   Card,
@@ -13,16 +15,43 @@ import {
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_PUBLISHED_KEY!
+)
+
 export default function LoginPage() {
+  const router = useRouter()
   const [email, setEmail] = useState("")
   const [submitted, setSubmitted] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState("")
 
-  function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
+  async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault()
+    setLoading(true)
+    setError("")
 
-    // Replace with your auth action
-    console.log("Send magic link to:", email)
-    setSubmitted(true)
+    try {
+      const { error } = await supabase.auth.signInWithOtp({
+        email,
+        options: {
+          shouldCreateUser: false,
+          emailRedirectTo: `${window.location.origin}/auth/callback`,
+        },
+      })
+
+      if (error) {
+        setError(error.message)
+        return
+      }
+
+      setSubmitted(true)
+    } catch (err) {
+      setError("Failed to send magic link. Please try again.")
+    } finally {
+      setLoading(false)
+    }
   }
 
   return (
@@ -41,6 +70,11 @@ export default function LoginPage() {
         <CardContent>
           {!submitted ? (
             <form onSubmit={handleSubmit} className="space-y-5">
+              {error && (
+                <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">
+                  {error}
+                </div>
+              )}
               <div className="space-y-2">
                 <Label htmlFor="email">Email address</Label>
                 <Input
@@ -50,11 +84,12 @@ export default function LoginPage() {
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   required
+                  disabled={loading}
                 />
               </div>
 
-              <Button type="submit" className="w-full">
-                Send Magic Link
+              <Button type="submit" className="w-full" disabled={loading}>
+                {loading ? "Sending..." : "Send Magic Link"}
               </Button>
 
               <p className="text-center text-sm text-muted-foreground">

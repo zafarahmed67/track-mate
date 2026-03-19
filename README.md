@@ -122,3 +122,4 @@ Generate a complete implementation prompt that includes:
 - Required implementation steps (route fetching, polyline decoding, drawing, fetching stops, adding markers, fitBounds)
 - Expected output on map
 - Functions to implement
+
