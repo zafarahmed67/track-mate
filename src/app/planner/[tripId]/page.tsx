@@ -11,6 +11,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { toast } from "sonner"
 import { StopFilters } from "@/components/planner/stop-filters"
 import { TripPlannerUI } from "@/components/planner/trip-planner-ui"
+import { StopOptions } from "@/components/planner/stop-options"
 import type { Stop } from "@/lib/types"
 import {
   Route,
@@ -67,6 +68,7 @@ interface TripStop extends Omit<Stop, "id"> {
   stop_type?: string
   address?: string
   day_index?: number
+  routeDistance?: number
 }
 
 export default function PlannerDetailPage() {
@@ -110,6 +112,7 @@ export default function PlannerDetailPage() {
   const [deleteConfirm, setDeleteConfirm] = useState<{ show: boolean; stopId: string | null; stopName: string }>({ show: false, stopId: null, stopName: "" })
   const [showAddPlace, setShowAddPlace] = useState<number | null>(null)
   const [selectedStopForDelete, setSelectedStopForDelete] = useState<{ id: string; name: string } | null>(null)
+  const [sortingStops, setSortingStops] = useState(false)
 
   const toggleDayExpansion = async (dayIndex: number) => {
     setActiveDayTab(dayIndex)
@@ -395,6 +398,102 @@ export default function PlannerDetailPage() {
     }
   }
 
+  const handleAddStopFromOptions = async (stop: {
+    id: string
+    location_name: string
+    latitude: string
+    longitude: string
+    state: string
+    region: string
+    route_type: string
+    stay_type: string
+    pet_friendly: string
+    water: string
+    cost_band: string
+    tier: string
+  }) => {
+    const existingStop = stops.find(s => s.id === stop.id)
+    
+    if (existingStop) {
+      toast.error("This stop is already in your trip")
+      return
+    }
+
+    try {
+      const response = await fetch(`/api/trips/${tripId}/stops`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          stop_ids: [stop.id],
+          selected_by_ai: false,
+        }),
+      })
+      const result = await response.json()
+
+      if (result.success) {
+        const newStop: TripStop = {
+          id: stop.id,
+          location_name: stop.location_name,
+          latitude: stop.latitude,
+          longitude: stop.longitude,
+          state: stop.state,
+          region: stop.region,
+          route_type: stop.route_type,
+          stay_type: stop.stay_type,
+          pet_friendly: stop.pet_friendly,
+          water: stop.water,
+          cost_band: stop.cost_band,
+          tier: stop.tier,
+          nearest_town: "",
+          rig_suitability: "",
+          access_type: "",
+          dump_point: "",
+          best_season: "",
+          why_we_d_stay_again: "",
+          confidence_level: "",
+          aao_tip: "",
+          why_stop_here: "",
+          best_travel_window: "",
+          corridor: "",
+          road_suitability: "",
+          max_rig_length: "",
+          verification_status: "",
+          created_at: new Date().toISOString(),
+        }
+        
+        const updatedStops = [...stops, newStop]
+        const sortedStops = await sortStopsAlongRoute(updatedStops)
+        
+        setStops(sortedStops)
+        setFilteredStops(sortedStops)
+        toast.success(`${stop.location_name} added to trip`)
+      } else {
+        toast.error("Failed to add stop")
+      }
+    } catch (error) {
+      console.error("Error adding stop:", error)
+      toast.error("Error adding stop")
+    }
+  }
+
+  const handleRemoveStopFromOptions = async (stopId: string) => {
+    try {
+      const response = await fetch(`/api/trips/${tripId}/stops?id=${stopId}`, {
+        method: "DELETE",
+      })
+      const result = await response.json()
+      
+      if (result.success) {
+        const newStops = stops.filter((s) => s.id !== stopId)
+        setStops(newStops)
+        setFilteredStops(newStops)
+        toast.success("Stop removed from trip")
+      }
+    } catch (error) {
+      console.error("Error removing stop:", error)
+    }
+  }
+
   const handleAddPlaceToDay = async (dayIndex: number, place: { name: string; lat: number; lng: number; address: string; type: string }) => {
     const existingStop = stops.find(s => 
       s.location_name === place.name && 
@@ -456,11 +555,12 @@ export default function PlannerDetailPage() {
         }
         
         const updatedStops = [...stops, newStop as unknown as TripStop]
+        const sortedStops = await sortStopsAlongRoute(updatedStops)
         
-        setStops(updatedStops)
-        setFilteredStops(updatedStops)
+        setStops(sortedStops)
+        setFilteredStops(sortedStops)
         setActiveDayTab(dayIndex)
-        toast.success(`${place.name} added to Day ${dayIndex + 1}`)
+        toast.success(`${place.name} added to trip`)
       } else {
         console.error("Failed to add stop:", result.error)
         toast.error("Failed to add place")
@@ -470,6 +570,55 @@ export default function PlannerDetailPage() {
       toast.error("Error adding place")
     }
     setShowAddPlace(null)
+  }
+
+  const sortStopsAlongRoute = async (stopsToSort: TripStop[], routeOrigin?: { lat: number; lng: number }, routeDestination?: { lat: number; lng: number }): Promise<TripStop[]> => {
+    const origin = routeOrigin || (trip ? { lat: trip.start_lat, lng: trip.start_lng } : undefined)
+    const destination = routeDestination || (trip ? { lat: trip.destination_lat, lng: trip.destination_lng } : undefined)
+    
+    if (!origin || !destination || stopsToSort.length === 0) return stopsToSort
+
+    try {
+      const response = await fetch("/api/stops/sort", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          stops: stopsToSort.map(s => ({
+            id: s.id,
+            latitude: s.latitude,
+            longitude: s.longitude,
+            location_name: s.location_name,
+          })),
+          origin,
+          destination,
+          waypoints: stopsToSort.map(s => ({
+            lat: parseFloat(s.latitude),
+            lng: parseFloat(s.longitude),
+          })),
+          minSpacingKm: 50,
+        }),
+      })
+
+      const data = await response.json()
+      console.log("Sort API response:", data)
+
+      if (data.success && data.sortedStops && data.sortedStops.length > 0) {
+        const sortedMap = new Map<string, number>()
+        data.sortedStops.forEach((s: { id: string; order: number; routeDistance: number }) => {
+          sortedMap.set(s.id, s.order)
+        })
+        
+        return [...stopsToSort].sort((a, b) => {
+          const orderA = sortedMap.get(a.id) ?? 999
+          const orderB = sortedMap.get(b.id) ?? 999
+          return orderA - orderB
+        })
+      }
+    } catch (error) {
+      console.error("Error sorting stops along route:", error)
+    }
+
+    return stopsToSort
   }
 
   const handleReorder = async (newStops: TripStop[]) => {
@@ -617,8 +766,15 @@ export default function PlannerDetailPage() {
         }
 
         console.log("Formatted stops:", formattedStops)
-        setStops(formattedStops)
-        setFilteredStops(formattedStops)
+        
+        if (trip?.start_lat && trip?.start_lng && trip?.destination_lat && trip?.destination_lng) {
+          const sortedStops = await sortStopsAlongRoute(formattedStops)
+          setStops(sortedStops)
+          setFilteredStops(sortedStops)
+        } else {
+          setStops(formattedStops)
+          setFilteredStops(formattedStops)
+        }
       } catch (error) {
         console.error("Error fetching trip:", error)
       } finally {
@@ -812,7 +968,7 @@ export default function PlannerDetailPage() {
                             fontWeight: "bold",
                             fontSize: "11px",
                           }}
-                          title={stop.location_name}
+                          title={`${index + 1}. ${stop.location_name}`}
                         />
                       )
                     })}
@@ -904,8 +1060,31 @@ export default function PlannerDetailPage() {
 
 
         <div className="mt-8 grid grid-cols-5 gap-4 mb-4">
-          <div className="col-span-3">
+          <div className="col-span-3 space-y-3">
             <StopFilters stops={stops} onFilterChange={setFilteredStops} />
+            {stops.length > 1 && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full"
+                onClick={async () => {
+                  setSortingStops(true)
+                  const sorted = await sortStopsAlongRoute(stops)
+                  setStops(sorted)
+                  setFilteredStops(sorted)
+                  setSortingStops(false)
+                  toast.success("Stops sorted along route")
+                }}
+                disabled={sortingStops}
+              >
+                {sortingStops ? (
+                  <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <Route className="h-4 w-4 mr-2" />
+                )}
+                Sort Along Route
+              </Button>
+            )}
           </div>
           <div className="col-span-2">
             <TripPlannerUI
@@ -929,6 +1108,20 @@ export default function PlannerDetailPage() {
               fuelLoading={fuelLoading}
             />
           </div>
+        </div>
+
+        <div className="mt-8">
+          <StopOptions
+            tripId={tripId}
+            startLat={trip.start_lat ?? undefined}
+            startLng={trip.start_lng ?? undefined}
+            destLat={trip.destination_lat ?? undefined}
+            destLng={trip.destination_lng ?? undefined}
+            travelPace={trip.travel_pace || "moderate"}
+            existingStopIds={stops.map(s => s.id)}
+            onAddStop={handleAddStopFromOptions}
+            onRemoveStop={handleRemoveStopFromOptions}
+          />
         </div>
 
         {filteredStops.length > 0 && (
@@ -1045,7 +1238,14 @@ export default function PlannerDetailPage() {
                                   </PopoverTrigger>
                                   <PopoverContent className="w-48">
                                     <div className="space-y-2">
-                                      <p className="font-medium">{stop.location_name}</p>
+                                      <div className="flex items-center gap-2">
+                                        <p className="font-medium">{stop.location_name}</p>
+                                        {stop.verification_status === "custom" ? (
+                                          <Badge className="bg-orange-500 text-xs">Custom</Badge>
+                                        ) : (
+                                          <Badge className="bg-green-500 text-xs">Verified</Badge>
+                                        )}
+                                      </div>
                                       <Button
                                         variant="destructive"
                                         size="sm"

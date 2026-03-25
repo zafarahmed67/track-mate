@@ -44,6 +44,7 @@ interface TripPlannerUIProps {
     aao_tip?: string
     latitude?: string
     longitude?: string
+    verification_status?: string
   }>
   fuelStations: FuelStation[]
   onLoadFuelStations: () => void
@@ -152,6 +153,11 @@ export function TripPlannerUI({
                             )}
                           </div>
                           <div className="flex flex-wrap gap-1">
+                            {stop.verification_status === "custom" ? (
+                              <Badge className="text-xs bg-orange-500">Custom</Badge>
+                            ) : (
+                              <Badge className="text-xs bg-green-500">Verified</Badge>
+                            )}
                             {stop.tier && (
                               <Badge className="text-xs bg-yellow-500">★ Tier {stop.tier}</Badge>
                             )}
