@@ -1,12 +1,7 @@
 import { supabaseAdmin } from "@/config/supabase"
-import { supabase } from "@/lib/supabase"
 import { NextRequest, NextResponse } from "next/server"
 
-interface RouteParams {
-  params: Promise<{ tripId: string }>
-}
-
-export async function GET(req: NextRequest, { params }: RouteParams) {
+export async function GET(req: NextRequest) {
   try {
     if (!supabaseAdmin) {
       return NextResponse.json(
@@ -15,9 +10,10 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
       )
     }
 
-    const { tripId } = await params
+    const { searchParams } = new URL(req.url)
+    const trip_id = searchParams.get("trip_id")
 
-    if (!tripId) {
+    if (!trip_id) {
       return NextResponse.json(
         { success: false, error: "trip_id is required" },
         { status: 400 }
@@ -25,10 +21,10 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
     }
 
     const { data, error } = await supabaseAdmin
-      .from("trips")
+      .from("custom_stops")
       .select("*")
-      .eq("id", tripId)
-      .single()
+      .eq("trip_id", trip_id)
+      .order("day_index", { ascending: true })
 
     if (error) {
       console.error("Database error:", error)
@@ -40,7 +36,7 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
 
     return NextResponse.json({
       success: true,
-      trip: data,
+      stops: data,
     })
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Unknown error"
@@ -51,7 +47,7 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
   }
 }
 
-export async function PATCH(req: NextRequest, { params }: RouteParams) {
+export async function POST(req: NextRequest) {
   try {
     if (!supabaseAdmin) {
       return NextResponse.json(
@@ -60,23 +56,41 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
       )
     }
 
-    const { tripId } = await params
     const body = await req.json()
+    const { trip_id, location_name, latitude, longitude, address, place_type, day_index } = body
 
-    if (!tripId) {
+    if (!trip_id || !location_name || !latitude || !longitude) {
       return NextResponse.json(
-        { success: false, error: "trip_id is required" },
+        { success: false, error: "trip_id, location_name, latitude, and longitude are required" },
+        { status: 400 }
+      )
+    }
+
+    const { data: existing } = await supabaseAdmin
+      .from("custom_stops")
+      .select("id")
+      .eq("trip_id", trip_id)
+      .eq("location_name", location_name)
+      .single()
+
+    if (existing) {
+      return NextResponse.json(
+        { success: false, error: "This place is already in your trip" },
         { status: 400 }
       )
     }
 
     const { data, error } = await supabaseAdmin
-      .from("trips")
-      .update({
-        ...body,
-        updated_at: new Date().toISOString(),
+      .from("custom_stops")
+      .insert({
+        trip_id,
+        location_name,
+        latitude: latitude.toString(),
+        longitude: longitude.toString(),
+        address,
+        place_type,
+        day_index: day_index ?? 0,
       })
-      .eq("id", tripId)
       .select()
       .single()
 
@@ -90,7 +104,7 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
 
     return NextResponse.json({
       success: true,
-      trip: data,
+      stop: data,
     })
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Unknown error"
@@ -101,7 +115,7 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
   }
 }
 
-export async function DELETE(req: NextRequest, { params }: RouteParams) {
+export async function DELETE(req: NextRequest) {
   try {
     if (!supabaseAdmin) {
       return NextResponse.json(
@@ -110,19 +124,20 @@ export async function DELETE(req: NextRequest, { params }: RouteParams) {
       )
     }
 
-    const { tripId } = await params
+    const { searchParams } = new URL(req.url)
+    const id = searchParams.get("id")
 
-    if (!tripId) {
+    if (!id) {
       return NextResponse.json(
-        { success: false, error: "trip_id is required" },
+        { success: false, error: "Stop ID is required" },
         { status: 400 }
       )
     }
 
-    const { error } = await supabase
-      .from("trips")
+    const { error } = await supabaseAdmin
+      .from("custom_stops")
       .delete()
-      .eq("id", tripId)
+      .eq("id", id)
 
     if (error) {
       console.error("Database error:", error)
@@ -134,7 +149,7 @@ export async function DELETE(req: NextRequest, { params }: RouteParams) {
 
     return NextResponse.json({
       success: true,
-      message: "Trip deleted successfully",
+      message: "Custom stop removed",
     })
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Unknown error"

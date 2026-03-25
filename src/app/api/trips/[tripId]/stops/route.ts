@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "@/config/supabase"
+import { supabase } from "@/lib/supabase"
 import { NextRequest, NextResponse } from "next/server"
 
 interface RouteParams {
@@ -128,7 +129,7 @@ export async function DELETE(req: NextRequest, { params }: RouteParams) {
       )
     }
 
-    const { error } = await supabaseAdmin
+    const { error } = await supabase
       .from("trip_candidate_stops")
       .delete()
       .eq("id", id)
@@ -144,6 +145,59 @@ export async function DELETE(req: NextRequest, { params }: RouteParams) {
     return NextResponse.json({
       success: true,
       message: "Stop removed from trip",
+    })
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Unknown error"
+    return NextResponse.json(
+      { success: false, error: message },
+      { status: 500 }
+    )
+  }
+}
+
+export async function PATCH(req: NextRequest, { params }: RouteParams) {
+  try {
+    if (!supabaseAdmin) {
+      return NextResponse.json(
+        { success: false, error: "Database not configured" },
+        { status: 500 }
+      )
+    }
+
+    const { tripId } = await params
+    const body = await req.json()
+    const { stop_orders } = body
+
+    if (!tripId || !stop_orders || !Array.isArray(stop_orders)) {
+      return NextResponse.json(
+        { success: false, error: "trip_id and stop_orders array are required" },
+        { status: 400 }
+      )
+    }
+
+    const updates = stop_orders.map((item: { id: string; rank_score: number }) => ({
+      id: item.id,
+      rank_score: item.rank_score,
+    }))
+
+    for (const update of updates) {
+      const { error } = await supabaseAdmin
+        .from("trip_candidate_stops")
+        .update({ rank_score: update.rank_score })
+        .eq("id", update.id)
+
+      if (error) {
+        console.error("Database error:", error)
+        return NextResponse.json(
+          { success: false, error: error.message },
+          { status: 500 }
+        )
+      }
+    }
+
+    return NextResponse.json({
+      success: true,
+      message: "Stops reordered",
     })
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Unknown error"
