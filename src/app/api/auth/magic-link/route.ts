@@ -1,10 +1,5 @@
-import { createClient } from "@supabase/supabase-js"
 import { NextRequest, NextResponse } from "next/server"
-
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const supabaseServiceKey = process.env.NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY!
-
-const supabaseAdmin = createClient(supabaseUrl, supabaseServiceKey)
+import { supabaseAdmin } from "@/config/supabase"
 
 export async function POST(req: NextRequest) {
   try {
@@ -14,6 +9,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         { success: false, error: "Email is required" },
         { status: 400 }
+      )
+    }
+
+    if (!supabaseAdmin) {
+      return NextResponse.json(
+        { success: false, error: "Database not configured" },
+        { status: 500 }
       )
     }
 

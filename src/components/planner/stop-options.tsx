@@ -75,6 +75,7 @@ export function StopOptions({
           destLat,
           destLng,
           travelPace,
+          tripId,
         }),
       })
       const data = await response.json()

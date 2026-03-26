@@ -1,5 +1,7 @@
 import { supabaseAdmin } from "@/config/supabase"
 import { NextRequest, NextResponse } from "next/server"
+import { applySuitabilityFilter } from "@/lib/stopSuitabilityFilter"
+import type { TripPreferences } from "@/lib/stopSuitabilityFilter"
 
 function calculateDistance(lat1: number, lng1: number, lat2: number, lng2: number) {
   const R = 6371
@@ -49,7 +51,7 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json()
-    const { startLat, startLng, destLat, destLng, travelPace = "moderate" } = body
+    const { startLat, startLng, destLat, destLng, travelPace = "moderate", tripId } = body
 
     if (!startLat || !startLng || !destLat || !destLng) {
       return NextResponse.json(
@@ -95,6 +97,19 @@ export async function POST(req: NextRequest) {
       maxLng: Math.max(startLng, destLng) + 2,
     }
 
+    // Fetch trip preferences for suitability filtering (non-fatal if missing)
+    let tripPreferences: TripPreferences | null = null
+    if (tripId) {
+      const { data: tripData, error: tripError } = await supabaseAdmin
+        .from("trips")
+        .select("rig_type, rig_length_m, pet_friendly_required, avoid_gravel_roads, stay_preference, budget_preference, end_date, trip_duration_days")
+        .eq("id", tripId)
+        .single()
+      if (!tripError && tripData) {
+        tripPreferences = tripData as TripPreferences
+      }
+    }
+
     const { data: stops, error: stopsError } = await supabaseAdmin
       .from("stops")
       .select("*")
@@ -138,14 +153,14 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const stopsWithDistance = stops?.map((stop) => {
+    const routeFiltered = stops?.map((stop) => {
       const lat = parseFloat(stop.latitude)
       const lng = parseFloat(stop.longitude)
       const distFromStart = calculateDistance(startLat, startLng, lat, lng)
       const distFromDest = calculateDistance(destLat, destLng, lat, lng)
       const sumDist = distFromStart + distFromDest
       const isBetween = sumDist <= (directDistance + config.maxSpacing)
-      
+
       return {
         ...stop,
         distance_from_start_km: Math.round(distFromStart * 10) / 10,
@@ -155,6 +170,10 @@ export async function POST(req: NextRequest) {
       }
     }).filter((stop) => stop.is_between)
     .sort((a, b) => a.distance_from_start_km - b.distance_from_start_km)
+
+    const stopsWithDistance = tripPreferences
+      ? applySuitabilityFilter(routeFiltered ?? [], tripPreferences)
+      : (routeFiltered ?? [])
 
     const segments: Array<{
       startKm: number

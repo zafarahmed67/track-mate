@@ -1,5 +1,7 @@
 import { supabaseAdmin } from "@/config/supabase"
 import { NextRequest, NextResponse } from "next/server"
+import { applySuitabilityFilter } from "@/lib/stopSuitabilityFilter"
+import type { TripPreferences } from "@/lib/stopSuitabilityFilter"
 
 function calculateDistance(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6371 // km
@@ -116,6 +118,17 @@ export async function POST(req: NextRequest) {
 
     const corridor = findCorridor(startLat, startLng, destLat, destLng)
 
+    // Fetch trip preferences for suitability filtering (non-fatal if missing)
+    let tripPreferences: TripPreferences | null = null
+    const { data: tripData, error: tripError } = await supabaseAdmin
+      .from("trips")
+      .select("rig_type, rig_length_m, pet_friendly_required, avoid_gravel_roads, stay_preference, budget_preference, end_date, trip_duration_days")
+      .eq("id", tripId)
+      .single()
+    if (!tripError && tripData) {
+      tripPreferences = tripData as TripPreferences
+    }
+
     console.log("\n" + "=".repeat(60))
     console.log("🔍 FINDING STOPS ALONG ROUTE")
     console.log("=".repeat(60))
@@ -214,8 +227,12 @@ export async function POST(req: NextRequest) {
     })
     console.log("=".repeat(70))
 
-    const filtered = stopsWithDistance.filter((stop) => stop.is_between_start_and_dest)
-    console.log(`\n✅ FINAL RESULT: ${filtered.length} stops included after filtering`)
+    const routeFiltered = stopsWithDistance.filter((stop) => stop.is_between_start_and_dest)
+    const filtered = tripPreferences
+      ? applySuitabilityFilter(routeFiltered, tripPreferences)
+      : routeFiltered
+
+    console.log(`\n✅ FINAL RESULT: ${routeFiltered.length} route-filtered → ${filtered.length} after suitability filtering`)
     console.log("=".repeat(70))
     filtered.forEach((stop, index) => {
       console.log(`${index + 1}. ${stop.location_name}`)
@@ -268,7 +285,8 @@ export async function POST(req: NextRequest) {
       bounds: bounds,
       stats: {
         total_fetched: stops.length,
-        total_filtered: filtered.length,
+        total_route_filtered: routeFiltered.length,
+        total_suitability_filtered: filtered.length,
         direct_distance_km: directDistance.toFixed(1),
       }
     })
