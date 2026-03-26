@@ -1,12 +1,26 @@
 import { NextRequest, NextResponse } from "next/server"
-import { supabaseAdmin } from "@/lib/supabase"
+import { supabaseAdmin } from "@/config/supabase"
 
 export async function POST(req: NextRequest) {
     try {
+        // Shared secret validation (SRS §8.3)
+        const secret = req.headers.get("x-webhook-secret")
+        const expectedSecret = process.env.WEBHOOK_SECRET
+        if (!expectedSecret || secret !== expectedSecret) {
+            return NextResponse.json({ success: false, error: "Unauthorized" }, { status: 401 })
+        }
+
+        if (!supabaseAdmin) {
+            return NextResponse.json({ success: false, error: "Database not configured" }, { status: 500 })
+        }
+
         const body = await req.json()
+
+        console.log("Received webhook body:", body)
 
         const data = {
             contactId: body.contactId,
+            sourceOrderId: body.id || body.order?.interProductId || null,
             firstName: body.first_name,
             lastName: body.last_name,
             fullName: body.full_name,
@@ -50,6 +64,20 @@ export async function POST(req: NextRequest) {
 
         if (!data.email) {
             return NextResponse.json({ success: false, error: "Email is required" }, { status: 400 })
+        }
+
+        // Idempotency check — prevent duplicate processing of retried webhooks (SRS §8.2)
+        if (data.sourceOrderId) {
+            const { data: existingPurchase } = await supabaseAdmin
+                .from("purchases")
+                .select("id")
+                .eq("source_order_id", data.sourceOrderId)
+                .single()
+
+            if (existingPurchase) {
+                console.log("Duplicate webhook call detected for order:", data.sourceOrderId)
+                return NextResponse.json({ success: true, message: "Already processed", duplicate: true })
+            }
         }
 
         const { data: existingUser } = await supabaseAdmin
@@ -116,6 +144,18 @@ export async function POST(req: NextRequest) {
 
             userId = newUser.id
         }
+
+        // Record the purchase (SRS §10 purchases table)
+        await supabaseAdmin
+            .from("purchases")
+            .insert({
+                user_id: userId,
+                source_order_id: data.sourceOrderId,
+                source: "fabfunnels",
+                product_name: data.order.productName || "TrackMate",
+                payment_status: data.order.submissionType === "Sale" ? "paid" : data.order.submissionType || "paid",
+                processed_at: new Date().toISOString(),
+            })
 
         const { data: magicLinkData, error: magicLinkError } = await supabaseAdmin.auth.admin.generateLink({
             email: data.email,

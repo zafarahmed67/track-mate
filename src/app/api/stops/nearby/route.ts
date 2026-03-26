@@ -3,16 +3,62 @@ import { NextRequest, NextResponse } from "next/server"
 import { applySuitabilityFilter } from "@/lib/stopSuitabilityFilter"
 import type { TripPreferences } from "@/lib/stopSuitabilityFilter"
 
+// Maximum perpendicular distance a stop can be from the actual route polyline (km)
+const ROUTE_PROXIMITY_THRESHOLD_KM = 30
+
 function calculateDistance(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6371 // km
   const dLat = (lat2 - lat1) * Math.PI / 180
   const dLng = (lng2 - lng1) * Math.PI / 180
-  const a = 
+  const a =
     Math.sin(dLat/2) * Math.sin(dLat/2) +
-    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * 
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
     Math.sin(dLng/2) * Math.sin(dLng/2)
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a))
   return R * c
+}
+
+function decodePolyline(encoded: string): Array<{ lat: number; lng: number }> {
+  const poly: Array<{ lat: number; lng: number }> = []
+  let index = 0, lat = 0, lng = 0
+  while (index < encoded.length) {
+    let b, shift = 0, result = 0
+    do { b = encoded.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5 } while (b >= 0x20)
+    lat += (result & 1) !== 0 ? ~(result >> 1) : result >> 1
+    shift = 0; result = 0
+    do { b = encoded.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5 } while (b >= 0x20)
+    lng += (result & 1) !== 0 ? ~(result >> 1) : result >> 1
+    poly.push({ lat: lat / 1e5, lng: lng / 1e5 })
+  }
+  return poly
+}
+
+function distanceToPolyline(stopLat: number, stopLng: number, polyline: Array<{ lat: number; lng: number }>): { distanceKm: number; cumulativeKm: number } {
+  let minDistance = Infinity
+  let bestCumulative = 0
+  let runningDistance = 0
+  for (let i = 0; i < polyline.length; i++) {
+    const d = calculateDistance(stopLat, stopLng, polyline[i].lat, polyline[i].lng)
+    if (d < minDistance) { minDistance = d; bestCumulative = runningDistance }
+    if (i < polyline.length - 1) {
+      runningDistance += calculateDistance(polyline[i].lat, polyline[i].lng, polyline[i + 1].lat, polyline[i + 1].lng)
+    }
+  }
+  return { distanceKm: minDistance, cumulativeKm: bestCumulative }
+}
+
+async function fetchRoutePolyline(startLat: number, startLng: number, destLat: number, destLng: number): Promise<Array<{ lat: number; lng: number }> | null> {
+  const apiKey = process.env.NEXT_PUBLIC_GMAPS_API_KEY
+  if (!apiKey) return null
+  try {
+    const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${startLat},${startLng}&destination=${destLat},${destLng}&key=${apiKey}`
+    const res = await fetch(url)
+    const data = await res.json()
+    if (data.status !== "OK" || !data.routes[0]) return null
+    return decodePolyline(data.routes[0].overview_polyline.points)
+  } catch {
+    return null
+  }
 }
 
 function findCorridor(startLat: number, startLng: number, destLat: number, destLng: number): string | null {
@@ -181,48 +227,55 @@ export async function POST(req: NextRequest) {
       })
     }
 
-    console.log(`\n📋 Fetched ${stops.length} stops, filtering by distance and route proximity...`)
+    console.log(`\n📋 Fetched ${stops.length} stops, filtering by route proximity...`)
 
-    // Calculate distance from start and filter stops between start and destination
+    // Attempt to get the actual route polyline from Google Directions for precise proximity filtering
+    const polyline = await fetchRoutePolyline(startLat, startLng, destLat, destLng)
+    const usingPolyline = polyline !== null && polyline.length > 2
+    console.log(usingPolyline
+      ? `🗺️  Using actual route polyline (${polyline!.length} points) — threshold: ${ROUTE_PROXIMITY_THRESHOLD_KM}km`
+      : `⚠️  No polyline available — falling back to straight-line triangle inequality`
+    )
+
     const directDistance = calculateDistance(startLat, startLng, destLat, destLng)
-    console.log(`\n📏 Direct distance from start to destination: ${directDistance.toFixed(1)} km`)
-    console.log(`   Using 50km buffer as threshold for "between" detection\n`)
 
     const stopsWithDistance = stops
       .map((stop) => {
         const lat = parseFloat(stop.latitude)
         const lng = parseFloat(stop.longitude)
-        const distFromStart = calculateDistance(startLat, startLng, lat, lng)
-        const distFromDest = calculateDistance(destLat, destLng, lat, lng)
-        const sumDist = distFromStart + distFromDest
-        const isBetween = sumDist <= (directDistance + 50)
-        
+
+        let isBetween: boolean
+        let distanceToRoute: number
+        let cumulativeKm = 0
+
+        if (usingPolyline) {
+          const { distanceKm, cumulativeKm: cum } = distanceToPolyline(lat, lng, polyline!)
+          distanceToRoute = distanceKm
+          cumulativeKm = cum
+          isBetween = distanceKm <= ROUTE_PROXIMITY_THRESHOLD_KM
+        } else {
+          const distFromStart = calculateDistance(startLat, startLng, lat, lng)
+          const distFromDest = calculateDistance(destLat, destLng, lat, lng)
+          distanceToRoute = Math.min(distFromStart, distFromDest)
+          cumulativeKm = distFromStart
+          isBetween = (distFromStart + distFromDest) <= (directDistance + 50)
+        }
+
         return {
           ...stop,
-          distance_from_start_km: distFromStart,
-          distance_from_dest_km: distFromDest,
+          distance_from_start_km: cumulativeKm,
+          distance_to_route_km: distanceToRoute,
           is_between_start_and_dest: isBetween,
-          sum_distance: sumDist,
         }
       })
       .sort((a, b) => a.distance_from_start_km - b.distance_from_start_km)
 
-    console.log(`\n🔎 ANALYZING ALL ${stops.length} STOPS:`)
+    console.log(`\n🔎 ROUTE PROXIMITY RESULTS (${stops.length} stops):`)
     console.log("=".repeat(70))
-    stops.forEach((stop, index) => {
-      const lat = parseFloat(stop.latitude)
-      const lng = parseFloat(stop.longitude)
-      const distFromStart = calculateDistance(startLat, startLng, lat, lng)
-      const distFromDest = calculateDistance(destLat, destLng, lat, lng)
-      const sumDist = distFromStart + distFromDest
-      const isBetween = sumDist <= (directDistance + 50)
-      
-      const status = isBetween ? "✅ INCLUDED" : "❌ EXCLUDED"
+    stopsWithDistance.forEach((stop, index) => {
+      const status = stop.is_between_start_and_dest ? "✅ INCLUDED" : "❌ EXCLUDED"
       console.log(`${index + 1}. ${stop.location_name} - ${status}`)
-      console.log(`   Corridor: ${stop.corridor}`)
-      console.log(`   Coords: ${lat}, ${lng}`)
-      console.log(`   From Start: ${distFromStart.toFixed(1)}km | From Dest: ${distFromDest.toFixed(1)}km | Sum: ${sumDist.toFixed(1)}km`)
-      console.log(`   Threshold: ${(directDistance + 50).toFixed(1)}km`)
+      console.log(`   Distance to route: ${stop.distance_to_route_km.toFixed(1)}km | Cumulative along route: ${stop.distance_from_start_km.toFixed(1)}km`)
       console.log("-".repeat(70))
     })
     console.log("=".repeat(70))
@@ -248,7 +301,7 @@ export async function POST(req: NextRequest) {
         selected_by_ai: true,
         generation_version: 1,
         rank_score: 1 - (index / 30),
-        distance_to_route_km: stop.distance_from_start_km,
+        distance_to_route_km: stop.distance_to_route_km,
       }))
 
       console.log("Inserting stops:", JSON.stringify(stopsToInsert.slice(0, 2), null, 2))
@@ -288,6 +341,7 @@ export async function POST(req: NextRequest) {
         total_route_filtered: routeFiltered.length,
         total_suitability_filtered: filtered.length,
         direct_distance_km: directDistance.toFixed(1),
+        polyline_used: usingPolyline,
       }
     })
   } catch (error: unknown) {
