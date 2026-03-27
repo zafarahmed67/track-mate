@@ -13,6 +13,7 @@ import { StopFilters } from "@/components/planner/stop-filters"
 import { TripPlannerUI } from "@/components/planner/trip-planner-ui"
 import { StopOptions } from "@/components/planner/stop-options"
 import type { Stop } from "@/lib/types"
+import { getStoredUser } from "@/lib/auth"
 import {
   Route,
   MapPin,
@@ -75,6 +76,7 @@ export default function PlannerDetailPage() {
   const params = useParams()
   const router = useRouter()
   const tripId = params.tripId as string
+  const [userId, setUserId] = useState<string | null>(null)
   const [map, setMap] = useState<google.maps.Map | null>(null)
   const directionsRendererRef = useRef<google.maps.DirectionsRenderer | null>(null)
 
@@ -329,7 +331,7 @@ export default function PlannerDetailPage() {
       const response = await fetch(`/api/trips/${tripId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: "saved" }),
+        body: JSON.stringify({ status: "saved", userId }),
       })
       const result = await response.json()
 
@@ -347,7 +349,7 @@ export default function PlannerDetailPage() {
 
   const handleExportPdf = async () => {
     try {
-      const response = await fetch(`/api/trips/${tripId}/export?format=html`)
+      const response = await fetch(`/api/trips/${tripId}/export?format=html${userId ? `&user_id=${userId}` : ""}`)
       const data = await response.json()
 
       if (data.success) {
@@ -366,7 +368,7 @@ export default function PlannerDetailPage() {
   const handleDeleteTrip = async () => {
     setDeleting(true)
     try {
-      const response = await fetch(`/api/trips/${tripId}`, {
+      const response = await fetch(`/api/trips/${tripId}${userId ? `?user_id=${userId}` : ""}`, {
         method: "DELETE",
       })
       const result = await response.json()
@@ -512,6 +514,7 @@ export default function PlannerDetailPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           trip_id: tripId,
+          user_id: userId,
           location_name: place.name,
           latitude: place.lat.toString(),
           longitude: place.lng.toString(),
@@ -689,11 +692,18 @@ export default function PlannerDetailPage() {
   }, [map, trip, stops, calculateRoute])
 
   useEffect(() => {
+    const user = getStoredUser()
+    if (user) setUserId(user.id)
+  }, [])
+
+  useEffect(() => {
     async function fetchTripData() {
       if (!tripId) return
+      const storedUser = getStoredUser()
+      const uid = storedUser?.id
 
       try {
-        const response = await fetch(`/api/trips/${tripId}`)
+        const response = await fetch(`/api/trips/${tripId}${uid ? `?user_id=${uid}` : ""}`)
         const data = await response.json()
 
         if (data.success && data.trip) {
