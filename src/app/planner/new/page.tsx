@@ -116,8 +116,17 @@ export default function NewPlannerPage() {
 
   async function handleSubmitTrip() {
     setLoading(true)
-    
+
+    const stored = localStorage.getItem("trackmate_user")
+    const user = stored ? JSON.parse(stored) : null
+
+    if (!user?.id) {
+      router.replace("/login")
+      return
+    }
+
     const tripData = {
+      userId: user.id,
       title: title || `${startLocation} to ${destination}`,
       startLocation,
       destination,

@@ -1,5 +1,4 @@
 import { supabaseAdmin } from "@/config/supabase"
-import { supabase } from "@/lib/supabase"
 import { NextRequest, NextResponse } from "next/server"
 
 interface RouteParams {
@@ -16,10 +15,12 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
     }
 
     const { tripId } = await params
+    const { searchParams } = new URL(req.url)
+    const userId = searchParams.get("user_id")
 
-    if (!tripId) {
+    if (!tripId || !userId) {
       return NextResponse.json(
-        { success: false, error: "trip_id is required" },
+        { success: false, error: "trip_id and user_id are required" },
         { status: 400 }
       )
     }
@@ -28,6 +29,7 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
       .from("trips")
       .select("*")
       .eq("id", tripId)
+      .eq("user_id", userId)
       .single()
 
     if (error) {
@@ -62,10 +64,11 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
 
     const { tripId } = await params
     const body = await req.json()
+    const { userId, ...fields } = body
 
-    if (!tripId) {
+    if (!tripId || !userId) {
       return NextResponse.json(
-        { success: false, error: "trip_id is required" },
+        { success: false, error: "trip_id and userId are required" },
         { status: 400 }
       )
     }
@@ -73,10 +76,11 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
     const { data, error } = await supabaseAdmin
       .from("trips")
       .update({
-        ...body,
+        ...fields,
         updated_at: new Date().toISOString(),
       })
       .eq("id", tripId)
+      .eq("user_id", userId)
       .select()
       .single()
 
@@ -111,18 +115,21 @@ export async function DELETE(req: NextRequest, { params }: RouteParams) {
     }
 
     const { tripId } = await params
+    const { searchParams } = new URL(req.url)
+    const userId = searchParams.get("user_id")
 
-    if (!tripId) {
+    if (!tripId || !userId) {
       return NextResponse.json(
-        { success: false, error: "trip_id is required" },
+        { success: false, error: "trip_id and user_id are required" },
         { status: 400 }
       )
     }
 
-    const { error } = await supabase
+    const { error } = await supabaseAdmin
       .from("trips")
       .delete()
       .eq("id", tripId)
+      .eq("user_id", userId)
 
     if (error) {
       console.error("Database error:", error)

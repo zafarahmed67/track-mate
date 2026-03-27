@@ -13,10 +13,32 @@ export default function AuthCallbackPage() {
   const router = useRouter()
 
   useEffect(() => {
-    // Supabase magic links pass tokens in the URL hash.
-    // onAuthStateChange fires once the client parses the hash and establishes a session.
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((event) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event) => {
       if (event === "SIGNED_IN") {
+        const { data: { session } } = await supabase.auth.getSession()
+
+        if (session) {
+          // Save session to localStorage so trackmate auth helpers work
+          localStorage.setItem("trackmate_access_token", session.access_token)
+          localStorage.setItem("trackmate_refresh_token", session.refresh_token ?? "")
+          localStorage.setItem("trackmate_expires_at", String(session.expires_at))
+          localStorage.setItem("trackmate_token_type", session.token_type)
+          localStorage.setItem("trackmate_user", JSON.stringify({
+            id: session.user.id,
+            email: session.user.email,
+          }))
+
+          // Upsert user into custom users table
+          await fetch("/api/auth/callback", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              email: session.user.email,
+              userId: session.user.id,
+            }),
+          })
+        }
+
         router.replace("/planner")
       }
     })

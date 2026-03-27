@@ -57,12 +57,27 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json()
-    const { trip_id, location_name, latitude, longitude, address, place_type, day_index } = body
+    const { trip_id, user_id, location_name, latitude, longitude, address, place_type, day_index } = body
 
-    if (!trip_id || !location_name || !latitude || !longitude) {
+    if (!trip_id || !user_id || !location_name || !latitude || !longitude) {
       return NextResponse.json(
-        { success: false, error: "trip_id, location_name, latitude, and longitude are required" },
+        { success: false, error: "trip_id, user_id, location_name, latitude, and longitude are required" },
         { status: 400 }
+      )
+    }
+
+    // Verify trip belongs to this user
+    const { data: trip } = await supabaseAdmin
+      .from("trips")
+      .select("id")
+      .eq("id", trip_id)
+      .eq("user_id", user_id)
+      .single()
+
+    if (!trip) {
+      return NextResponse.json(
+        { success: false, error: "Trip not found" },
+        { status: 404 }
       )
     }
 

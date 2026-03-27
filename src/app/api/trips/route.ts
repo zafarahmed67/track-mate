@@ -57,6 +57,7 @@ export async function POST(req: NextRequest) {
     const body = await req.json()
 
     const {
+      userId,
       title,
       startLocation,
       destination,
@@ -77,9 +78,9 @@ export async function POST(req: NextRequest) {
       status = "planned",
     } = body
 
-    if (!title || !startLocation || !destination || !tripDurationDays) {
+    if (!userId || !title || !startLocation || !destination || !tripDurationDays) {
       return NextResponse.json(
-        { success: false, error: "Title, start location, destination, and duration are required" },
+        { success: false, error: "userId, title, start location, destination, and duration are required" },
         { status: 400 }
       )
     }
@@ -87,6 +88,7 @@ export async function POST(req: NextRequest) {
     const { data, error } = await supabaseAdmin
       .from("trips")
       .insert({
+        user_id: userId,
         title,
         start_location_text: startLocation,
         destination_text: destination,

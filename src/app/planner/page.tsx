@@ -35,7 +35,15 @@ export default function PlannerPage() {
   useEffect(() => {
     async function fetchTrips() {
       try {
-        const response = await fetch("/api/trips")
+        const stored = localStorage.getItem("trackmate_user")
+        const user = stored ? JSON.parse(stored) : null
+
+        if (!user?.id) {
+          router.replace("/login")
+          return
+        }
+
+        const response = await fetch(`/api/trips?user_id=${user.id}`)
         const data = await response.json()
 
         if (data.trips) {
@@ -49,7 +57,7 @@ export default function PlannerPage() {
     }
 
     fetchTrips()
-  }, [])
+  }, [router])
 
   const formatDate = (dateString: string) => {
     return new Date(dateString).toLocaleDateString("en-AU", {
