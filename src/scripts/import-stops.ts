@@ -1,7 +1,11 @@
+import { config } from "dotenv"
+import path from "path"
+
+config({ path: path.join(process.cwd(), ".env.local") })
+
 import { supabaseAdmin } from "../config/supabase"
 import { parse } from "csv-parse/sync"
 import fs from "fs"
-import path from "path"
 
 interface Stop {
   "Location Name": string

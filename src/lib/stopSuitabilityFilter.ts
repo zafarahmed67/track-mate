@@ -64,39 +64,59 @@ export function applySuitabilityFilter<T extends FilterableStop>(
     "caravan-parks": ["caravan_park"],
   }
 
-  return stops.filter((stop) => {
+  const rejectionReasons: Record<string, number> = {}
+
+  const result = stops.filter((stop) => {
     // Rule 1 — Rig suitability: non-4WD rigs cannot access 4WD-only stops
     if (trip.rig_type && trip.rig_type !== "4wd-camper") {
       const rigSuit = stop.rig_suitability?.toLowerCase()
-      if (rigSuit === "4wd") return false
+      if (rigSuit === "4wd") {
+        rejectionReasons["rig_suitability"] = (rejectionReasons["rig_suitability"] || 0) + 1
+        return false
+      }
     }
 
     // Rule 2 — Road suitability: gravel/4WD tracks excluded if avoid_gravel_roads
     if (trip.avoid_gravel_roads) {
       const roadSuit = stop.road_suitability?.toLowerCase()
-      if (roadSuit === "gravel" || roadSuit === "4wd") return false
+      if (roadSuit === "gravel" || roadSuit === "4wd") {
+        rejectionReasons["gravel_roads"] = (rejectionReasons["gravel_roads"] || 0) + 1
+        return false
+      }
     }
 
     // Rule 3 — Pet friendly: exclude non-pet-friendly stops if required
     if (trip.pet_friendly_required) {
       const pf = stop.pet_friendly?.toLowerCase()
-      if (pf && pf !== "yes") return false
+      if (pf && pf !== "yes") {
+        rejectionReasons["pet_friendly"] = (rejectionReasons["pet_friendly"] || 0) + 1
+        return false
+      }
     }
 
     // Rule 4 — Stay type: filter by stay preference
     if (trip.stay_preference && stayPreferenceMap[trip.stay_preference]) {
       const allowed = stayPreferenceMap[trip.stay_preference]
       const stopStay = stop.stay_type?.toLowerCase().replace(" ", "_")
-      if (stopStay && !allowed.includes(stopStay)) return false
+      if (stopStay && !allowed.includes(stopStay)) {
+        rejectionReasons["stay_type"] = (rejectionReasons["stay_type"] || 0) + 1
+        return false
+      }
     }
 
     // Rule 5 — Cost band: filter by budget preference
     if (trip.budget_preference === "free") {
       const cb = stop.cost_band?.toLowerCase()
-      if (cb && cb !== "budget") return false
+      if (cb && cb !== "budget") {
+        rejectionReasons["budget_free"] = (rejectionReasons["budget_free"] || 0) + 1
+        return false
+      }
     } else if (trip.budget_preference === "budget") {
       const cb = stop.cost_band?.toLowerCase()
-      if (cb === "premium") return false
+      if (cb === "premium") {
+        rejectionReasons["budget_premium"] = (rejectionReasons["budget_premium"] || 0) + 1
+        return false
+      }
     }
 
     // Rule 6 — Max rig length: exclude stops too short for the rig
@@ -104,7 +124,10 @@ export function applySuitabilityFilter<T extends FilterableStop>(
       const maxLen = stop.max_rig_length
       if (maxLen && maxLen.trim() !== "") {
         const maxLenNum = parseFloat(maxLen)
-        if (!isNaN(maxLenNum) && maxLenNum < trip.rig_length_m) return false
+        if (!isNaN(maxLenNum) && maxLenNum < trip.rig_length_m) {
+          rejectionReasons["rig_length"] = (rejectionReasons["rig_length"] || 0) + 1
+          return false
+        }
       }
     }
 
@@ -113,10 +136,30 @@ export function applySuitabilityFilter<T extends FilterableStop>(
       const bs = stop.best_season
       if (bs && bs.trim() !== "") {
         const season = parseBestSeason(bs)
-        if (season && !isMonthInSeason(travelMonth, season)) return false
+        if (season && !isMonthInSeason(travelMonth, season)) {
+          rejectionReasons["season"] = (rejectionReasons["season"] || 0) + 1
+          return false
+        }
       }
     }
 
     return true
   })
+
+  if (Object.keys(rejectionReasons).length > 0) {
+    console.log("🔍 Suitability filter rejection reasons:", JSON.stringify(rejectionReasons))
+    console.log("🔍 Trip preferences:", JSON.stringify({
+      rig_type: trip.rig_type,
+      rig_length_m: trip.rig_length_m,
+      pet_friendly_required: trip.pet_friendly_required,
+      avoid_gravel_roads: trip.avoid_gravel_roads,
+      stay_preference: trip.stay_preference,
+      budget_preference: trip.budget_preference,
+      end_date: trip.end_date,
+      trip_duration_days: trip.trip_duration_days,
+      travelMonth,
+    }))
+  }
+
+  return result
 }

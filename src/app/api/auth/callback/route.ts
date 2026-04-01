@@ -1,6 +1,18 @@
 import { supabaseAdmin } from "@/config/supabase"
 import { NextRequest, NextResponse } from "next/server"
 
+export async function GET(req: NextRequest) {
+  const url = new URL(req.url)
+  const accessToken = url.searchParams.get("access_token")
+  const type = url.searchParams.get("type")
+
+  if (type === "magiclink" && accessToken) {
+    return NextResponse.redirect(new URL("/auth/callback", req.url))
+  }
+
+  return NextResponse.redirect(new URL("/login", req.url))
+}
+
 export async function POST(req: NextRequest) {
   try {
     if (!supabaseAdmin) {

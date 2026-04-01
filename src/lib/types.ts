@@ -31,8 +31,17 @@ export interface Stop {
 export interface User {
   id: string
   email: string
-  first_name: string
-  last_name: string
+  first_name: string | null
+  last_name: string | null
+  phone: string | null
+  timezone: string | null
+  default_travel_pace: "leisurely" | "moderate" | "fast" | null
+  default_rig_type: string | null
+  default_rig_length_m: number | null
+  default_pet_friendly_required: boolean
+  default_avoid_gravel_roads: boolean
+  default_stay_preference: string | null
+  default_budget_preference: string | null
   role: "customer" | "admin"
   created_at: string
 }

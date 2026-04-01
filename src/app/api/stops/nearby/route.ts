@@ -137,6 +137,130 @@ function findCorridor(startLat: number, startLng: number, destLat: number, destL
   return bestCorridor
 }
 
+function interpolatePoint(lat1: number, lng1: number, lat2: number, lng2: number, fraction: number) {
+  return {
+    lat: lat1 + (lat2 - lat1) * fraction,
+    lng: lng1 + (lng2 - lng1) * fraction,
+  }
+}
+
+interface GoogleRelatedStop {
+  name: string
+  latitude: string
+  longitude: string
+  address: string
+  place_type: string
+}
+
+interface TripCandidateStopInsert {
+  trip_id: string
+  stop_id: string
+  selected_by_ai: boolean
+  generation_version: number
+  rank_score: number
+  distance_to_route_km: number
+}
+
+async function tripCandidateStops(stopsToInsert: TripCandidateStopInsert[]): Promise<{ success: boolean; method: "insert" | "upsert" | "none"; error?: string }> {
+  if (!supabaseAdmin) {
+    return {
+      success: false,
+      method: "none",
+      error: "Database not configured",
+    }
+  }
+
+  if (stopsToInsert.length === 0) {
+    return {
+      success: true,
+      method: "none",
+    }
+  }
+
+  const { error: insertError } = await supabaseAdmin
+    .from("trip_candidate_stops")
+    .insert(stopsToInsert)
+
+  if (!insertError) {
+    return {
+      success: true,
+      method: "insert",
+    }
+  }
+
+  console.error("❌ Error inserting candidate stops:", insertError)
+  console.log("Trying upsert as fallback...")
+
+  const { error: upsertError } = await supabaseAdmin
+    .from("trip_candidate_stops")
+    .upsert(stopsToInsert)
+
+  if (upsertError) {
+    return {
+      success: false,
+      method: "upsert",
+      error: upsertError.message,
+    }
+  }
+
+  return {
+    success: true,
+    method: "upsert",
+  }
+}
+
+async function fetchGoogleRelatedStops(startLat: number, startLng: number, destLat: number, destLng: number): Promise<GoogleRelatedStop[]> {
+  const apiKey = process.env.NEXT_PUBLIC_GMAPS_API_KEY
+  if (!apiKey) return []
+
+  const probeFractions = [0.2, 0.4, 0.6, 0.8]
+  const searchTypes = ["gas_station", "campground", "supermarket"]
+  const dedupe = new Set<string>()
+  const results: GoogleRelatedStop[] = []
+
+  for (const fraction of probeFractions) {
+    const point = interpolatePoint(startLat, startLng, destLat, destLng, fraction)
+
+    for (const type of searchTypes) {
+      try {
+        const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${point.lat},${point.lng}&radius=25000&type=${type}&key=${apiKey}`
+        const response = await fetch(url)
+        const data = await response.json()
+
+        const places = Array.isArray(data?.results) ? data.results : []
+        for (const place of places.slice(0, 5) as Array<{
+          name?: string
+          vicinity?: string
+          geometry?: { location?: { lat?: number; lng?: number } }
+          types?: string[]
+        }>) {
+          const lat = place.geometry?.location?.lat
+          const lng = place.geometry?.location?.lng
+          const name = place.name?.trim()
+          if (!name || typeof lat !== "number" || typeof lng !== "number") continue
+
+          const placeType = Array.isArray(place.types) && place.types.length > 0 ? place.types[0] : type
+          const key = `${name.toLowerCase()}::${lat.toFixed(4)}::${lng.toFixed(4)}`
+          if (dedupe.has(key)) continue
+          dedupe.add(key)
+
+          results.push({
+            name,
+            latitude: String(lat),
+            longitude: String(lng),
+            address: place.vicinity || "",
+            place_type: placeType,
+          })
+        }
+      } catch (error) {
+        console.error("Error fetching Google related stops:", error)
+      }
+    }
+  }
+
+  return results
+}
+
 export async function POST(req: NextRequest) {
   try {
     if (!supabaseAdmin) {
@@ -294,6 +418,9 @@ export async function POST(req: NextRequest) {
     })
     console.log("=".repeat(70) + "\n")
 
+    let googleRelatedFetched = 0
+    let googleRelatedInserted = 0
+
     if (filtered.length > 0) {
       const stopsToInsert = filtered.slice(0, 30).map((stop, index) => ({
         trip_id: tripId,
@@ -306,25 +433,86 @@ export async function POST(req: NextRequest) {
 
       console.log("Inserting stops:", JSON.stringify(stopsToInsert.slice(0, 2), null, 2))
 
-      const { error: insertError } = await supabaseAdmin
-        .from("trip_candidate_stops")
-        .insert(stopsToInsert)
+      const candidateStopsResult = await tripCandidateStops(stopsToInsert)
 
-      if (insertError) {
-        console.error("❌ Error inserting candidate stops:", insertError)
-        console.log("Trying upsert as fallback...")
-        
-        const { error: upsertError } = await supabaseAdmin
-          .from("trip_candidate_stops")
-          .upsert(stopsToInsert)
-        
-        if (upsertError) {
-          console.error("❌ Upsert also failed:", upsertError)
-        } else {
-          console.log(`✅ Upsert succeeded: ${stopsToInsert.length} candidate stops`)
-        }
-      } else {
+      if (!candidateStopsResult.success) {
+        console.error("❌ Failed to persist candidate stops:", candidateStopsResult.error)
+      } else if (candidateStopsResult.method === "upsert") {
+        console.log(`✅ Upsert succeeded: ${stopsToInsert.length} candidate stops`)
+      } else if (candidateStopsResult.method === "insert") {
         console.log(`✅ Insert succeeded: ${stopsToInsert.length} candidate stops`)
+      }
+
+      const googleRelatedStops = await fetchGoogleRelatedStops(startLat, startLng, destLat, destLng)
+      googleRelatedFetched = googleRelatedStops.length
+
+      if (googleRelatedStops.length > 0) {
+        const { data: existingCustom, error: existingCustomError } = await supabaseAdmin
+          .from("custom_stops")
+          .select("location_name, latitude, longitude")
+          .eq("trip_id", tripId)
+
+        if (existingCustomError) {
+          console.error("❌ Error fetching existing custom stops:", existingCustomError)
+        } else {
+          const existingKeys = new Set(
+            (existingCustom || []).map((row) => {
+              const name = String(row.location_name || "").trim().toLowerCase()
+              const lat = Number(row.latitude || 0).toFixed(4)
+              const lng = Number(row.longitude || 0).toFixed(4)
+              return `${name}::${lat}::${lng}`
+            })
+          )
+
+          const routeDistanceKm = Math.max(directDistance, filtered[filtered.length - 1]?.distance_from_start_km || 0)
+          const plannedDays = Math.max(1, Number(tripPreferences?.trip_duration_days || 14))
+          const rowsToInsert = googleRelatedStops
+            .map((stop) => {
+              const lat = Number(stop.latitude || 0)
+              const lng = Number(stop.longitude || 0)
+              if (Number.isNaN(lat) || Number.isNaN(lng) || !stop.name) return null
+
+              const key = `${stop.name.trim().toLowerCase()}::${lat.toFixed(4)}::${lng.toFixed(4)}`
+              if (existingKeys.has(key)) return null
+              existingKeys.add(key)
+
+              const progressDistance = calculateDistance(startLat, startLng, lat, lng)
+              const progress = routeDistanceKm > 0 ? Math.min(0.999, Math.max(0, progressDistance / routeDistanceKm)) : 0
+              const dayIndex = Math.min(plannedDays - 1, Math.max(0, Math.floor(progress * plannedDays)))
+
+              return {
+                trip_id: tripId,
+                location_name: stop.name,
+                latitude: stop.latitude,
+                longitude: stop.longitude,
+                address: stop.address,
+                place_type: `google_${stop.place_type}`,
+                day_index: dayIndex,
+              }
+            })
+            .filter((row): row is {
+              trip_id: string
+              location_name: string
+              latitude: string
+              longitude: string
+              address: string
+              place_type: string
+              day_index: number
+            } => row !== null)
+
+          if (rowsToInsert.length > 0) {
+            const { error: customInsertError } = await supabaseAdmin
+              .from("custom_stops")
+              .insert(rowsToInsert)
+
+            if (customInsertError) {
+              console.error("❌ Error inserting Google related custom stops:", customInsertError)
+            } else {
+              googleRelatedInserted = rowsToInsert.length
+              console.log(`✅ Inserted ${googleRelatedInserted} Google related stops into custom_stops`)
+            }
+          }
+        }
       }
     } else {
       console.log("⚠️ No filtered stops to insert")
@@ -340,6 +528,8 @@ export async function POST(req: NextRequest) {
         total_fetched: stops.length,
         total_route_filtered: routeFiltered.length,
         total_suitability_filtered: filtered.length,
+        google_related_fetched: googleRelatedFetched,
+        google_related_inserted: googleRelatedInserted,
         direct_distance_km: directDistance.toFixed(1),
         polyline_used: usingPolyline,
       }

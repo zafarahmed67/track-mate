@@ -12,6 +12,7 @@ import {
   Calendar,
   Clock,
   Route,
+  Settings,
   ArrowRight,
   ChevronRight,
 } from "lucide-react"
@@ -98,11 +99,17 @@ export default function PlannerPage() {
                 </p>
               </div>
             </div>
-            <Button onClick={() => router.push("/planner/new")} className="group">
-              <Plus className="mr-2 h-4 w-4" />
-              New Trip
-              <ArrowRight className="ml-2 h-4 w-4 transition-transform group-hover:translate-x-1" />
-            </Button>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" onClick={() => router.push("/settings")}>
+                <Settings className="mr-2 h-4 w-4" />
+                Settings
+              </Button>
+              <Button onClick={() => router.push("/planner/new")} className="group">
+                <Plus className="mr-2 h-4 w-4" />
+                New Trip
+                <ArrowRight className="ml-2 h-4 w-4 transition-transform group-hover:translate-x-1" />
+              </Button>
+            </div>
           </div>
         </div>
       </div>

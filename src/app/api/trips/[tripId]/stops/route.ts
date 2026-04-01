@@ -1,5 +1,4 @@
 import { supabaseAdmin } from "@/config/supabase"
-import { supabase } from "@/lib/supabase"
 import { NextRequest, NextResponse } from "next/server"
 
 interface RouteParams {
@@ -119,26 +118,35 @@ export async function DELETE(req: NextRequest, { params }: RouteParams) {
       )
     }
 
+    const { tripId } = await params
     const { searchParams } = new URL(req.url)
     const id = searchParams.get("id")
 
-    if (!id) {
+    if (!tripId || !id) {
       return NextResponse.json(
-        { success: false, error: "Stop ID is required" },
+        { success: false, error: "trip_id and stop id are required" },
         { status: 400 }
       )
     }
 
-    const { error } = await supabase
+    const { count, error } = await supabaseAdmin
       .from("trip_candidate_stops")
-      .delete()
-      .eq("id", id)
+      .delete({ count: "exact" })
+      .eq("trip_id", tripId)
+      .or(`id.eq.${id},stop_id.eq.${id}`)
 
     if (error) {
       console.error("Database error:", error)
       return NextResponse.json(
         { success: false, error: error.message },
         { status: 500 }
+      )
+    }
+
+    if (!count) {
+      return NextResponse.json(
+        { success: false, error: "Stop not found in this trip" },
+        { status: 404 }
       )
     }
 
@@ -180,11 +188,21 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
       rank_score: item.rank_score,
     }))
 
+    console.log("hello stops reorder request", {
+      tripId,
+      updatesCount: updates.length,
+      updateIds: updates.map((item) => item.id),
+    })
+
+    const unmatchedIds: string[] = []
+
     for (const update of updates) {
-      const { error } = await supabaseAdmin
+      const { data, error } = await supabaseAdmin
         .from("trip_candidate_stops")
         .update({ rank_score: update.rank_score })
-        .eq("id", update.id)
+        .eq("trip_id", tripId)
+        .or(`id.eq.${update.id},stop_id.eq.${update.id}`)
+        .select("id")
 
       if (error) {
         console.error("Database error:", error)
@@ -193,6 +211,90 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
           { status: 500 }
         )
       }
+
+      if (!data || data.length === 0) {
+        unmatchedIds.push(update.id)
+      }
+    }
+
+    if (unmatchedIds.length > 0) {
+      console.warn("Reorder ids not found in trip_candidate_stops, attempting auto-insert", {
+        tripId,
+        unmatchedIds,
+      })
+
+      const rowsToInsert = unmatchedIds.map((stopId) => ({
+        trip_id: tripId,
+        stop_id: stopId,
+        selected_by_ai: false,
+        generation_version: 1,
+      }))
+
+      const { error: insertError } = await supabaseAdmin
+        .from("trip_candidate_stops")
+        .upsert(rowsToInsert, {
+          onConflict: "trip_id,stop_id,generation_version",
+        })
+
+      if (insertError) {
+        console.error("Failed to auto-insert unmatched stops for reorder", {
+          tripId,
+          unmatchedIds,
+          error: insertError,
+        })
+
+        return NextResponse.json(
+          {
+            success: false,
+            error: "Failed to add missing stops before reorder",
+            unmatchedIds,
+          },
+          { status: 400 }
+        )
+      }
+
+      const stillUnmatchedIds: string[] = []
+      for (const update of updates) {
+        const { data, error } = await supabaseAdmin
+          .from("trip_candidate_stops")
+          .update({ rank_score: update.rank_score })
+          .eq("trip_id", tripId)
+          .or(`id.eq.${update.id},stop_id.eq.${update.id}`)
+          .select("id")
+
+        if (error) {
+          console.error("Database error during reorder retry:", error)
+          return NextResponse.json(
+            { success: false, error: error.message },
+            { status: 500 }
+          )
+        }
+
+        if (!data || data.length === 0) {
+          stillUnmatchedIds.push(update.id)
+        }
+      }
+
+      if (stillUnmatchedIds.length > 0) {
+        console.error("Reorder ids still unmatched after auto-insert", {
+          tripId,
+          stillUnmatchedIds,
+        })
+
+        return NextResponse.json(
+          {
+            success: false,
+            error: "Some stop ids could not be matched for reorder",
+            unmatchedIds: stillUnmatchedIds,
+          },
+          { status: 400 }
+        )
+      }
+
+      console.log("hello stops reorder auto-inserted unmatched ids", {
+        tripId,
+        insertedIds: unmatchedIds,
+      })
     }
 
     return NextResponse.json({

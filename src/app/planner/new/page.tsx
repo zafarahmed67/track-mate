@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { LoadScript, GoogleMap, Marker, Polyline } from "@react-google-maps/api"
 import { Button } from "@/components/ui/button"
@@ -22,7 +22,6 @@ import {
     SelectTrigger,
     SelectValue,
 } from "@/components/ui/select"
-import { TripStops } from "@/components/planner/trip-stops"
 import type { Stop } from "@/lib/types"
 
 const mapContainerStyle = {
@@ -37,7 +36,7 @@ interface LocationCoords {
 
 export default function NewPlannerPage() {
   const router = useRouter()
-  const [step, setStep] = useState<"initial" | "details" | "complete">("initial")
+  const [step, setStep] = useState<"initial" | "details">("initial")
   const [loading, setLoading] = useState(false)
   const [geocoding, setGeocoding] = useState(false)
   
@@ -47,7 +46,6 @@ export default function NewPlannerPage() {
   const [startCoords, setStartCoords] = useState<LocationCoords>({ lat: 0, lng: 0 })
   const [destCoords, setDestCoords] = useState<LocationCoords>({ lat: 0, lng: 0 })
   const [stops, setStops] = useState<Stop[]>([])
-  const [tripId, setTripId] = useState<string | null>(null)
   const [routeCoords, setRouteCoords] = useState<LocationCoords[]>([])
   
   const [petFriendly, setPetFriendly] = useState(false)
@@ -60,6 +58,81 @@ export default function NewPlannerPage() {
   const [budgetPreference, setBudgetPreference] = useState("")
   const [endDate, setEndDate] = useState("")
   const [notes, setNotes] = useState("")
+
+  useEffect(() => {
+    async function loadDefaults() {
+      try {
+        const stored = localStorage.getItem("trackmate_user")
+        const user = stored ? JSON.parse(stored) : null
+
+        if (!user?.id) return
+
+        let hasLoadedDefaults = false
+
+        const response = await fetch(`/api/user/settings?user_id=${user.id}`)
+        const data = await response.json()
+
+        if (response.ok && data.success && data.settings) {
+          const settings = data.settings
+
+          if (settings.default_travel_pace) {
+            setTravelPace(settings.default_travel_pace)
+            hasLoadedDefaults = true
+          }
+          if (settings.default_rig_type) {
+            setRigType(settings.default_rig_type)
+            hasLoadedDefaults = true
+          }
+          if (settings.default_rig_length_m !== null && settings.default_rig_length_m !== undefined) {
+            setRigLengthM(String(settings.default_rig_length_m))
+            hasLoadedDefaults = true
+          }
+          if (settings.default_stay_preference) {
+            setStayPreference(settings.default_stay_preference)
+            hasLoadedDefaults = true
+          }
+          if (settings.default_budget_preference) {
+            setBudgetPreference(settings.default_budget_preference)
+            hasLoadedDefaults = true
+          }
+          if (settings.default_pet_friendly_required !== null && settings.default_pet_friendly_required !== undefined) {
+            setPetFriendly(Boolean(settings.default_pet_friendly_required))
+            hasLoadedDefaults = true
+          }
+          if (settings.default_avoid_gravel_roads !== null && settings.default_avoid_gravel_roads !== undefined) {
+            setAvoidGravel(Boolean(settings.default_avoid_gravel_roads))
+            hasLoadedDefaults = true
+          }
+        }
+
+        if (!hasLoadedDefaults) {
+          const tripsResponse = await fetch(`/api/trips?user_id=${user.id}`)
+          const tripsData = await tripsResponse.json()
+          const latestTrip = tripsData?.trips?.[0]
+
+          if (latestTrip) {
+            if (latestTrip.travel_pace) setTravelPace(latestTrip.travel_pace)
+            if (latestTrip.rig_type) setRigType(latestTrip.rig_type)
+            if (latestTrip.rig_length_m !== null && latestTrip.rig_length_m !== undefined) {
+              setRigLengthM(String(latestTrip.rig_length_m))
+            }
+            if (latestTrip.stay_preference) setStayPreference(latestTrip.stay_preference)
+            if (latestTrip.budget_preference) setBudgetPreference(latestTrip.budget_preference)
+            if (latestTrip.pet_friendly_required !== null && latestTrip.pet_friendly_required !== undefined) {
+              setPetFriendly(Boolean(latestTrip.pet_friendly_required))
+            }
+            if (latestTrip.avoid_gravel_roads !== null && latestTrip.avoid_gravel_roads !== undefined) {
+              setAvoidGravel(Boolean(latestTrip.avoid_gravel_roads))
+            }
+          }
+        }
+      } catch (error) {
+        console.error("Error loading user defaults:", error)
+      }
+    }
+
+    loadDefaults()
+  }, [])
 
   const mapCenter = startCoords.lat !== 0 && startCoords.lng !== 0 
     ? startCoords 
@@ -96,16 +169,51 @@ export default function NewPlannerPage() {
     }
   }
 
-  async function fetchGeocode(address: string) {
-    try {
-      const response = await fetch(
-        `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${process.env.NEXT_PUBLIC_GMAPS_API_KEY}`
+  async function fetchGeocode(address: string): Promise<{ lat: number; lng: number } | null> {
+    const pickBestResult = (results: Array<{ address_components?: Array<{ short_name?: string; types?: string[] }>; geometry?: { location?: { lat?: number; lng?: number } } }>) => {
+      if (!Array.isArray(results) || results.length === 0) return null
+
+      const auResult = results.find((result) =>
+        (result.address_components || []).some((component) =>
+          component.types?.includes("country") && component.short_name === "AU"
+        )
       )
-      const data = await response.json()
-      if (data.results && data.results[0]) {
+
+      return auResult || results[0]
+    }
+
+    try {
+      const geocodeBase = "https://maps.googleapis.com/maps/api/geocode/json"
+      const primaryUrl = `${geocodeBase}?address=${encodeURIComponent(address)}&components=country:AU&region=au&key=${process.env.NEXT_PUBLIC_GMAPS_API_KEY}`
+      const fallbackUrl = `${geocodeBase}?address=${encodeURIComponent(address)}&key=${process.env.NEXT_PUBLIC_GMAPS_API_KEY}`
+
+      const primaryResponse = await fetch(primaryUrl)
+      const primaryData = await primaryResponse.json()
+
+      const bestPrimary = pickBestResult(primaryData.results || [])
+      if (bestPrimary?.geometry?.location) {
+        const lat = Number(bestPrimary.geometry.location.lat)
+        const lng = Number(bestPrimary.geometry.location.lng)
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null
+
         return {
-          lat: data.results[0].geometry.location.lat,
-          lng: data.results[0].geometry.location.lng,
+          lat,
+          lng,
+        }
+      }
+
+      // Fallback for edge cases where AU-restricted geocoding returns no result.
+      const fallbackResponse = await fetch(fallbackUrl)
+      const fallbackData = await fallbackResponse.json()
+      const bestFallback = pickBestResult(fallbackData.results || [])
+      if (bestFallback?.geometry?.location) {
+        const lat = Number(bestFallback.geometry.location.lat)
+        const lng = Number(bestFallback.geometry.location.lng)
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null
+
+        return {
+          lat,
+          lng,
         }
       }
     } catch (error) {
@@ -157,11 +265,7 @@ export default function NewPlannerPage() {
       if (response.ok) {
         const data = await response.json()
         if (data.tripId) {
-          setTripId(data.tripId)
-          
-          const datas = await fetchNearbyStops(data.tripId, startCoords, destCoords)
-          console.log("Nearby stops fetched:", datas)
-          setStep("complete")
+          router.push(`/planner/${data.tripId}`)
         }
       } else {
         const error = await response.json()
@@ -171,67 +275,6 @@ export default function NewPlannerPage() {
       console.error("Error generating route:", error)
     } finally {
       setLoading(false)
-    }
-  }
-
-  async function fetchNearbyStops(tripId: string, start: LocationCoords, dest: LocationCoords) {
-    try {
-      const response = await fetch("/api/stops/nearby", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          tripId,
-          startLat: start.lat,
-          startLng: start.lng,
-          destLat: dest.lat,
-          destLng: dest.lng,
-          startLocationText: startLocation,
-          destLocationText: destination,
-        }),
-      })
-
-      if (response.ok) {
-        const data = await response.json()
-        console.log("=== NEARBY STOPS API RESPONSE ===")
-        console.log("success:", data.success)
-        console.log("stops:", data.stops)
-        console.log("stops count:", data.stops?.length || 0)
-        console.log("route:", data.route)
-        console.log("route count:", data.route?.length || 0)
-        
-        if (data.stops && data.stops.length > 0) {
-          console.log("First stop sample:", {
-            id: data.stops[0].id,
-            location_name: data.stops[0].location_name,
-            latitude: data.stops[0].latitude,
-            longitude: data.stops[0].longitude
-          })
-          setStops(data.stops)
-        }
-        
-        if (data.route && data.route.length > 0) {
-          const coords = data.route.map((c: [number, number]) => ({
-            lat: c[0],
-            lng: c[1]
-          }))
-          console.log("First 3 route points:", coords.slice(0, 3))
-          console.log("Setting route coords, count:", coords.length)
-          setRouteCoords(coords)
-        } else {
-          console.log("No route in response!")
-        }
-      } else {
-        const error = await response.json()
-        console.error("API error:", error)
-      }
-    } catch (error) {
-      console.error("Error fetching nearby stops:", error)
-    }
-  }
-
-  function handleViewTrip() {
-    if (tripId) {
-      router.push(`/planner/${tripId}`)
     }
   }
 
@@ -245,7 +288,6 @@ export default function NewPlannerPage() {
               <CardDescription>
                 {step === "initial" && "Enter your trip details to find verified stops along your route."}
                 {step === "details" && "Customize your trip preferences."}
-                {step === "complete" && "Your trip has been created!"}
               </CardDescription>
             </CardHeader>
 
@@ -489,17 +531,6 @@ export default function NewPlannerPage() {
                 </>
               )}
 
-              {step === "complete" && (
-                <div className="text-center py-8">
-                  <h3 className="text-xl font-semibold mb-2">Trip Created Successfully!</h3>
-                  <p className="text-muted-foreground mb-4">
-                    Found {stops.length} stops along your route.
-                  </p>
-                  <Button onClick={handleViewTrip}>
-                    View Trip Details
-                  </Button>
-                </div>
-              )}
             </CardContent>
           </Card>
 
@@ -509,7 +540,6 @@ export default function NewPlannerPage() {
               <CardDescription>
                 {step === "initial" && "Enter locations to see preview"}
                 {step === "details" && "Review your route"}
-                {step === "complete" && "Your planned route"}
               </CardDescription>
             </CardHeader>
 
@@ -553,11 +583,6 @@ export default function NewPlannerPage() {
           </Card>
         </div>
 
-        {step === "complete" && stops.length > 0 && (
-          <div className="mt-6">
-            <TripStops stops={stops} />
-          </div>
-        )}
       </div>
     </main>
   )

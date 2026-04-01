@@ -149,9 +149,9 @@ export async function DELETE(req: NextRequest) {
       )
     }
 
-    const { error } = await supabaseAdmin
+    const { count, error } = await supabaseAdmin
       .from("custom_stops")
-      .delete()
+      .delete({ count: "exact" })
       .eq("id", id)
 
     if (error) {
@@ -159,6 +159,13 @@ export async function DELETE(req: NextRequest) {
       return NextResponse.json(
         { success: false, error: error.message },
         { status: 500 }
+      )
+    }
+
+    if (!count) {
+      return NextResponse.json(
+        { success: false, error: "Custom stop not found" },
+        { status: 404 }
       )
     }
 
