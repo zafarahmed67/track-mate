@@ -61,6 +61,7 @@ interface TripStop extends Omit<Stop, "id"> {
   id: string
   stop_id?: string
   distance_to_route_km?: number
+  distance_from_start_km?: number
   stop?: Stop
   stop_type?: string
   address?: string
@@ -467,7 +468,16 @@ export default function PlannerDetailPage() {
     }))
 
   const savedRouteStopsCount = stops.filter((stop) => stop.verification_status !== "custom").length
-  const effectiveDayCount = Math.max(1, Math.min(allDaySegments.length, savedRouteStopsCount + 1))
+  const maxCustomDayIndex = stops
+    .filter((s) => s.verification_status === "custom" && typeof s.day_index === "number")
+    .reduce((max, s) => Math.max(max, s.day_index as number), -1)
+  const effectiveDayCount = Math.max(
+    1,
+    Math.min(
+      allDaySegments.length,
+      Math.max(savedRouteStopsCount + 1, maxCustomDayIndex >= 0 ? maxCustomDayIndex + 1 : 0)
+    )
+  )
   const daySegments = allDaySegments.slice(0, effectiveDayCount)
 
   const totalRouteDistanceKm = routeMeta.drivingInfo?.totalDistanceKm || 0
@@ -1752,6 +1762,26 @@ export default function PlannerDetailPage() {
           console.error("Error fetching custom stops:", err)
         }
 
+        // Sort stops by distance from trip start so map markers and waypoints are in route order
+        if (data.trip?.start_lat && data.trip?.start_lng) {
+          const startLat = data.trip.start_lat as number
+          const startLng = data.trip.start_lng as number
+          const toRad = (d: number) => (d * Math.PI) / 180
+          const distFromStart = (lat: number, lng: number) => {
+            const dLat = toRad(lat - startLat)
+            const dLng = toRad(lng - startLng)
+            const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(startLat)) * Math.cos(toRad(lat)) * Math.sin(dLng / 2) ** 2
+            return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+          }
+          formattedStops.sort((a, b) => {
+            const latA = parseFloat(a.latitude), lngA = parseFloat(a.longitude)
+            const latB = parseFloat(b.latitude), lngB = parseFloat(b.longitude)
+            if (isNaN(latA) || isNaN(lngA)) return 1
+            if (isNaN(latB) || isNaN(lngB)) return -1
+            return distFromStart(latA, lngA) - distFromStart(latB, lngB)
+          })
+        }
+
         console.log("Formatted stops:", formattedStops)
 
         setStops(formattedStops)
@@ -2260,7 +2290,10 @@ export default function PlannerDetailPage() {
                     .map((stop) => stop.stop_id || stop.id)
                 )
                 const persistedStopsForSegment = overnightStopsSorted.filter((stop) => persistedStopIds.has(stop.id))
-                const routeStops = getOrderedRouteStops(index, persistedStopsForSegment)
+                const routeStops = getOrderedRouteStops(
+                  index,
+                  persistedStopsForSegment.length > 0 ? persistedStopsForSegment : allStops.slice(0, 1)
+                )
                 const customStopsForDay = stops.filter(
                   (stop) => stop.verification_status === "custom" && stop.day_index === index
                 )
@@ -2279,9 +2312,8 @@ export default function PlannerDetailPage() {
                   return count
                 }
                 
-                const maxCustomStopsToShow = daySegments.length <= 1 ? 2 : 3
-                const visibleCustomStopsForDay = sortedCustomStopsForDay.slice(0, maxCustomStopsToShow)
-                const hiddenCustomStopsCount = Math.max(0, sortedCustomStopsForDay.length - visibleCustomStopsForDay.length)
+                const visibleCustomStopsForDay = sortedCustomStopsForDay
+                const hiddenCustomStopsCount = 0
                 const routeStopIds = new Set(routeStops.map((stop) => stop.id))
                 const alternateStops = allStops.filter((stop) => !routeStopIds.has(stop.id))
                 const optionsToShow = expandedSegmentOptions.has(index)
