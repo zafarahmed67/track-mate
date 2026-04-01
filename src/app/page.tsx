@@ -8,6 +8,7 @@ import { Card, CardContent } from "@/components/ui/card"
 import { isAuthenticated, getStoredUser, logout } from "@/lib/auth"
 import { MapPin, Navigation, Settings, ArrowRight, Truck, Clock, Shield, Sparkles } from "lucide-react"
 
+
 export default function LandingPage() {
   const router = useRouter()
   
