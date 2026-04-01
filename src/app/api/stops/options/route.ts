@@ -97,6 +97,16 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value))
 }
 
+const HARD_FUEL_GAP_KM = 350
+
+function getFuelSafetyConfig(northWeight: number, isRemote: boolean) {
+  const riskWeight = clamp(Math.max(northWeight, isRemote ? 0.65 : 0), 0, 1)
+  const fuelSafeKm = clamp(230 - riskWeight * 120, 90, 230)
+  const leadKm = clamp(45 + riskWeight * 60, 45, 120)
+
+  return { fuelSafeKm, leadKm }
+}
+
 function buildAdaptiveBoundaries(
   totalDistanceKm: number,
   baseTargetKm: number,
@@ -114,9 +124,9 @@ function buildAdaptiveBoundaries(
     const progress = totalDistanceKm > 0 ? current / totalDistanceKm : 0
     const northWeight = northbound ? clamp((progress - 0.55) * 2.2, 0, 1) : 0
 
-    const targetKm = baseTargetKm + northWeight * 35
-    const minKm = clamp(baseMinKm + northWeight * 20, 140, 260)
-    const maxKm = clamp(baseMaxKm + northWeight * 90, 220, 430)
+    const targetKm = baseTargetKm - northWeight * 25
+    const minKm = clamp(baseMinKm - northWeight * 10, 100, 260)
+    const maxKm = clamp(baseMaxKm + northWeight * 40, 220, 380)
 
     const remaining = totalDistanceKm - current
     if (remaining <= maxKm * 1.15) {
@@ -136,7 +146,7 @@ function buildAdaptiveBoundaries(
       }, null as number | null)
       endKm = clamp(nearestToTarget ?? endKm, windowStart, windowEnd)
     } else {
-      const extraStretch = northWeight > 0.2 ? 90 : 45
+      const extraStretch = northWeight > 0.2 ? 45 : 30
       endKm = clamp(current + maxKm + extraStretch, current + minKm, totalDistanceKm)
     }
 
@@ -151,12 +161,19 @@ function buildAdaptiveBoundaries(
   return boundaries
 }
 
-function rankStops(stops: RouteStopCandidate[], segmentMidKm: number, preferredCount: number) {
+function rankStops(
+  stops: RouteStopCandidate[],
+  segmentMidKm: number,
+  preferredCount: number,
+  preferVerified?: boolean
+) {
   return stops
     .slice()
     .sort((a, b) => {
-      const aScore = Math.abs(a.distance_from_start_km - segmentMidKm) + (a.stay_type ? 0 : 25)
-      const bScore = Math.abs(b.distance_from_start_km - segmentMidKm) + (b.stay_type ? 0 : 25)
+      const aVerifiedBonus = preferVerified && a.is_verified ? -50 : 0
+      const bVerifiedBonus = preferVerified && b.is_verified ? -50 : 0
+      const aScore = Math.abs(a.distance_from_start_km - segmentMidKm) + (a.stay_type ? 0 : 25) + aVerifiedBonus
+      const bScore = Math.abs(b.distance_from_start_km - segmentMidKm) + (b.stay_type ? 0 : 25) + bVerifiedBonus
       return aScore - bScore
     })
     .slice(0, preferredCount)
@@ -172,7 +189,18 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json()
-    const { startLat, startLng, destLat, destLng, travelPace = "moderate", tripId } = body
+    const {
+      startLat,
+      startLng,
+      destLat,
+      destLng,
+      travelPace = "moderate",
+      tripId,
+      preferredLegKm,
+      avoidLongDays,
+      preferVerified,
+      includeFreeCamps,
+    } = body
 
     if (!startLat || !startLng || !destLat || !destLng) {
       return NextResponse.json(
@@ -287,10 +315,20 @@ export async function POST(req: NextRequest) {
     const planningDays = requestedTripDays && requestedTripDays > 0
       ? Math.min(requestedTripDays, suggestedDays)
       : suggestedDays
-    const targetLegKm = clamp(config.kmPerDay, 150, 250)
-    const minLegKm = clamp(targetLegKm - 50, 140, 220)
-    const maxLegKm = clamp(targetLegKm + 50, 220, 340)
     const northbound = destLat > startLat
+    const latSpan = Math.abs(destLat - startLat)
+    const remoteMultiplier = northbound && latSpan > 5 ? 0.75 : 1.0
+    const targetLegKm = clamp(
+      (preferredLegKm ?? config.kmPerDay) * remoteMultiplier,
+      100,
+      avoidLongDays ? 280 : 400
+    )
+    const minLegKm = clamp(targetLegKm - 50, 140, 220)
+    const maxLegKm = clamp(
+      targetLegKm + 50,
+      220,
+      avoidLongDays ? 340 : 450
+    )
     const stopDistances = stopsWithDistance.map((s) => s.distance_from_start_km)
 
     let boundaries = buildAdaptiveBoundaries(
@@ -326,47 +364,107 @@ export async function POST(req: NextRequest) {
       const progress = totalDistanceKm > 0 ? midKm / totalDistanceKm : 0
       const northWeight = northbound ? clamp((progress - 0.55) * 2.2, 0, 1) : 0
 
+      const MIN_STOPS_PER_SEGMENT = 2
+      const TARGET_STOPS_PER_SEGMENT = 3
+
       const inRange = stopsWithDistance.filter(
         (s) => s.distance_from_start_km >= (startKm - 35) && s.distance_from_start_km <= (endKm + 35)
       )
 
+      const expandedInRange = stopsWithDistance.filter(
+        (s) => s.distance_from_start_km >= (startKm - 75) && s.distance_from_start_km <= (endKm + 75)
+      )
+
       const inRangeUnused = inRange.filter((s) => !usedStopIds.has(s.id))
+
+      const expandedUnused = expandedInRange.filter((s) => !usedStopIds.has(s.id))
+
+      const canIncludeAsOther = (s: RouteStopCandidate) => s.is_verified || includeFreeCamps || s.cost_band !== "Free"
+
+      const nearestUnusedBySegment = rankStops(
+        expandedUnused.filter((s) => canIncludeAsOther(s)),
+        midKm,
+        14,
+        preferVerified
+      )
 
       let verifiedInSegment = rankStops(
         inRangeUnused.filter((s) => s.is_verified),
         midKm,
-        4
+        6,
+        preferVerified
       )
       let otherInSegment = rankStops(
-        inRangeUnused.filter((s) => !s.is_verified),
+        inRangeUnused.filter((s) => !s.is_verified && canIncludeAsOther(s)),
         midKm,
-        5
+        8
       )
 
       let degradedMode = false
 
-      if (verifiedInSegment.length < 2) {
+      const totalCandidates = () => verifiedInSegment.length + otherInSegment.length
+
+      const appendCandidates = (candidates: RouteStopCandidate[]) => {
+        for (const candidate of candidates) {
+          if (verifiedInSegment.some((v) => v.id === candidate.id) || otherInSegment.some((o) => o.id === candidate.id)) {
+            continue
+          }
+          if (candidate.is_verified) {
+            verifiedInSegment.push(candidate)
+          } else if (canIncludeAsOther(candidate)) {
+            otherInSegment.push(candidate)
+          }
+          if (totalCandidates() >= TARGET_STOPS_PER_SEGMENT) {
+            break
+          }
+        }
+      }
+
+      if (verifiedInSegment.length < 1) {
         const fallbackVerified = rankStops(
-          stopsWithDistance.filter((s) => s.is_verified && !usedStopIds.has(s.id)),
+          expandedUnused.filter((s) => s.is_verified),
           midKm,
-          4
+          12,
+          preferVerified
         ).filter((s) => !verifiedInSegment.some((v) => v.id === s.id))
-        verifiedInSegment = [...verifiedInSegment, ...fallbackVerified].slice(0, 4)
+        verifiedInSegment = [...verifiedInSegment, ...fallbackVerified].slice(0, 6)
       }
 
-      if ((verifiedInSegment.length + otherInSegment.length) < 3) {
-        const fallbackOthers = rankStops(stopsWithDistance, midKm, 6).filter(
-          (s) =>
-            !usedStopIds.has(s.id) &&
-            !verifiedInSegment.some((v) => v.id === s.id) &&
-            !otherInSegment.some((o) => o.id === s.id)
+      // Trigger fallback earlier to keep 2-3 options available for each segment.
+      if (totalCandidates() < TARGET_STOPS_PER_SEGMENT) {
+        appendCandidates(nearestUnusedBySegment)
+      }
+
+      if (totalCandidates() < MIN_STOPS_PER_SEGMENT) {
+        const nearestGlobalUnused = rankStops(
+          stopsWithDistance.filter((s) => !usedStopIds.has(s.id) && canIncludeAsOther(s)),
+          midKm,
+          20,
+          preferVerified
         )
-        otherInSegment = [...otherInSegment, ...fallbackOthers].slice(0, 6)
+        appendCandidates(nearestGlobalUnused)
       }
 
-      if ((verifiedInSegment.length + otherInSegment.length) === 0) {
+      if (totalCandidates() < MIN_STOPS_PER_SEGMENT) {
+        const nearestGlobal = rankStops(
+          stopsWithDistance.filter((s) => canIncludeAsOther(s)),
+          midKm,
+          20,
+          preferVerified
+        )
+        appendCandidates(nearestGlobal)
+      }
+
+      if (totalCandidates() === 0) {
         degradedMode = true
         otherInSegment = rankStops(stopsWithDistance, midKm, 3)
+      }
+
+      if (verifiedInSegment.length > 6) {
+        verifiedInSegment = verifiedInSegment.slice(0, 6)
+      }
+      if (otherInSegment.length > 8) {
+        otherInSegment = otherInSegment.slice(0, 8)
       }
 
       const overnightAnchor = verifiedInSegment[0] || otherInSegment[0]
@@ -377,7 +475,7 @@ export async function POST(req: NextRequest) {
       const segmentDistance = Math.max(0, endKm - startKm)
       const remoteByDistance = segmentDistance > (maxLegKm + 30)
       const remoteByNorth = northbound && northWeight > 0.42
-      const remoteBySparseStops = (verifiedInSegment.length + otherInSegment.length) < 2
+      const remoteBySparseStops = (verifiedInSegment.length + otherInSegment.length) < MIN_STOPS_PER_SEGMENT
 
       segments.push({
         startKm,
@@ -469,9 +567,7 @@ export async function POST(req: NextRequest) {
         const midKm = (segment.startKm + segment.endKm) / 2
         const progress = totalDistanceKm > 0 ? midKm / totalDistanceKm : 0
         const northWeight = northbound ? clamp((progress - 0.55) * 2.2, 0, 1) : 0
-
-        const fuelSafeKm = clamp(230 - northWeight * 70, 150, 230)
-        const leadKm = clamp(45 + northWeight * 35, 40, 90)
+        const { fuelSafeKm, leadKm } = getFuelSafetyConfig(northWeight, segment.isRemote)
         const targetFuelKm = clamp(segment.endKm - leadKm, segment.startKm + 15, segment.endKm - 10)
 
         const bandStart = segment.startKm - 15
@@ -574,8 +670,7 @@ export async function POST(req: NextRequest) {
           const midKm = (segment.startKm + segment.endKm) / 2
           const progress = totalDistanceKm > 0 ? midKm / totalDistanceKm : 0
           const northWeight = northbound ? clamp((progress - 0.55) * 2.2, 0, 1) : 0
-          const fuelSafeKm = clamp(230 - northWeight * 70, 150, 230)
-          const leadKm = clamp(45 + northWeight * 35, 40, 90)
+          const { fuelSafeKm, leadKm } = getFuelSafetyConfig(northWeight, segment.isRemote)
           const targetFuelKm = clamp(segment.endKm - leadKm, segment.startKm + 15, segment.endKm - 10)
 
           const bandStart = segment.startKm - 15
@@ -617,10 +712,9 @@ export async function POST(req: NextRequest) {
 
       for (let i = 0; i < segments.length; i++) {
         const segment = segments[i]
-        const segmentDistance = Math.max(0, segment.endKm - segment.startKm)
         const progress = totalDistanceKm > 0 ? (segment.startKm + segment.endKm) / 2 / totalDistanceKm : 0
         const northWeight = northbound ? clamp((progress - 0.55) * 2.2, 0, 1) : 0
-        const fuelSafeKm = clamp(230 - northWeight * 70, 150, 230)
+        const { fuelSafeKm } = getFuelSafetyConfig(northWeight, segment.isRemote)
 
         if (segment.primaryFuelSuggestion) {
           const currentFuelKm = segment.primaryFuelSuggestion.distanceFromStartKm
@@ -636,7 +730,10 @@ export async function POST(req: NextRequest) {
           const parts: string[] = []
 
           if (segment.gapFromLastFuelKm !== undefined) {
-            if (segment.gapFromLastFuelKm > fuelSafeKm) {
+            if (segment.gapFromLastFuelKm > HARD_FUEL_GAP_KM) {
+              parts.push(`CRITICAL ${segment.gapFromLastFuelKm} km since last fuel — DANGEROUS GAP`)
+              segment.fuelCritical = true
+            } else if (segment.gapFromLastFuelKm > fuelSafeKm) {
               parts.push(`${segment.gapFromLastFuelKm} km since last fuel — fill up here`)
             } else {
               parts.push(`${segment.gapFromLastFuelKm} km since last fuel`)
@@ -644,7 +741,10 @@ export async function POST(req: NextRequest) {
           }
 
           if (segment.gapToNextFuelKm !== undefined) {
-            if (segment.gapToNextFuelKm > fuelSafeKm) {
+            if (segment.gapToNextFuelKm > HARD_FUEL_GAP_KM) {
+              parts.push(`CRITICAL next fuel ${segment.gapToNextFuelKm} km away — DANGEROUS GAP`)
+              segment.fuelCritical = true
+            } else if (segment.gapToNextFuelKm > fuelSafeKm) {
               parts.push(`Next fuel ${segment.gapToNextFuelKm} km away — long gap ahead`)
             } else {
               parts.push(`Next fuel ${segment.gapToNextFuelKm} km away`)
@@ -661,7 +761,10 @@ export async function POST(req: NextRequest) {
           if (lastFuelKm !== null) {
             const gapToLast = Math.round(segment.endKm - lastFuelKm)
             segment.gapFromLastFuelKm = gapToLast
-            if (gapToLast > fuelSafeKm) {
+            if (gapToLast > HARD_FUEL_GAP_KM) {
+              segment.fuelWarning = `CRITICAL ${gapToLast} km since last fuel — DANGEROUS GAP`
+              segment.fuelCritical = true
+            } else if (gapToLast > fuelSafeKm) {
               segment.fuelWarning = `${gapToLast} km since last fuel — fuel-critical leg`
             } else {
               segment.fuelWarning = `${gapToLast} km since last fuel`

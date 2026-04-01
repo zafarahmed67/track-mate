@@ -234,6 +234,8 @@ export default function PlannerDetailPage() {
   const [showFuelOverlay, setShowFuelOverlay] = useState(false)
   const [showOvernightOverlay, setShowOvernightOverlay] = useState(false)
   const [showRemoteOverlay, setShowRemoteOverlay] = useState(false)
+  const [editWarnings, setEditWarnings] = useState<string[]>([])
+  const [showEditWarningBanner, setShowEditWarningBanner] = useState(false)
   const dragSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }))
 
   const applyDraggedOrderToTripStops = (tripStops: TripStop[], orderedStopIds: string[]) => {
@@ -471,13 +473,17 @@ export default function PlannerDetailPage() {
   const maxCustomDayIndex = stops
     .filter((s) => s.verification_status === "custom" && typeof s.day_index === "number")
     .reduce((max, s) => Math.max(max, s.day_index as number), -1)
-  const effectiveDayCount = Math.max(
-    1,
-    Math.min(
-      allDaySegments.length,
-      Math.max(savedRouteStopsCount + 1, maxCustomDayIndex >= 0 ? maxCustomDayIndex + 1 : 0)
-    )
-  )
+
+  const plannedDays = allDaySegments.length
+  const effectiveDayCount = savedRouteStopsCount === 0
+    ? plannedDays
+    : Math.max(
+        1,
+        Math.min(
+          plannedDays,
+          Math.max(savedRouteStopsCount + 1, maxCustomDayIndex >= 0 ? maxCustomDayIndex + 1 : 0)
+        )
+      )
   const daySegments = allDaySegments.slice(0, effectiveDayCount)
 
   const totalRouteDistanceKm = routeMeta.drivingInfo?.totalDistanceKm || 0
@@ -622,6 +628,8 @@ export default function PlannerDetailPage() {
         toast.error(result.error || "Failed to remove stop")
         return
       }
+
+      validateFuelAfterEdit(selectedStopForDelete.id, selectedStopForDelete.name)
 
       const newStops = stops.filter((s) => s.id !== selectedStopForDelete.id)
       setStops(newStops)
@@ -1069,6 +1077,9 @@ export default function PlannerDetailPage() {
 
   const handleRemoveStopFromOptions = async (stopId: string) => {
     try {
+      const stopToRemove = stops.find((s) => s.id === stopId)
+      const stopName = stopToRemove?.location_name || "Unknown stop"
+
       const tripResponse = await fetch(`/api/trips/${tripId}/stops?id=${stopId}`, {
         method: "DELETE",
       })
@@ -1081,18 +1092,17 @@ export default function PlannerDetailPage() {
         })).json()
 
       if (result.success) {
+        validateFuelAfterEdit(stopId, stopName)
         const newStops = stops.filter((s) => s.id !== stopId)
         setStops(newStops)
         setFilteredStops(newStops)
         await loadRouteOptions()
         toast.success("Stop removed from trip")
       } else {
-        console.error("Failed to remove stop from options:", result.error)
         toast.error(result.error || "Failed to remove stop")
       }
     } catch (error) {
-      console.error("Error removing stop:", error)
-      toast.error("Error removing stop")
+        toast.error("Error removing stop")
     }
   }
 
@@ -1597,6 +1607,61 @@ export default function PlannerDetailPage() {
     return Math.max(min, Math.min(max, value))
   }
 
+  const validateFuelAfterEdit = useCallback((removedStopId: string, removedStopName: string) => {
+    if (!includeFuelPlanning) return
+
+    const warnings: string[] = []
+    const totalKm = routeMeta.drivingInfo?.totalDistanceKm ?? 0
+
+    const removedStop = stops.find((s) => s.id === removedStopId)
+    const removedStopDistance = removedStop?.distance_from_start_km ?? 0
+
+    for (let i = 0; i < daySegments.length; i++) {
+      const segment = daySegments[i]
+      const segmentDistance = segment.endKm - segment.startKm
+      const progress = totalKm > 0 ? (segment.startKm + segment.endKm) / 2 / totalKm : 0
+      const northbound = (trip?.destination_lat ?? 0) > (trip?.start_lat ?? 0)
+      const northWeight = northbound ? clamp((progress - 0.55) * 2.2, 0, 1) : 0
+      const fuelSafeKm = clamp(230 - northWeight * 70, 150, 230)
+
+      const gapFromLast = segment.gapFromLastFuelKm
+      const gapToNext = segment.gapToNextFuelKm
+
+      const isAffectedByRemoval =
+        removedStopDistance >= segment.startKm - 40 &&
+        removedStopDistance <= segment.endKm + 40
+
+      if (segment.isRemote || segment.fuelCritical || isAffectedByRemoval) {
+        if (gapFromLast !== undefined && gapFromLast > fuelSafeKm) {
+          warnings.push(
+            `Day ${i + 1}: ${Math.round(gapFromLast)} km since last fuel${isAffectedByRemoval ? ` — removing "${removedStopName}" may worsen this gap` : ""}`
+          )
+        }
+        if (gapToNext !== undefined && gapToNext > fuelSafeKm) {
+          warnings.push(
+            `Day ${i + 1}: Next fuel ${Math.round(gapToNext)} km away${isAffectedByRemoval ? ` — "${removedStopName}" removal leaves a larger gap ahead` : ""}`
+          )
+        }
+        if (segment.fuelCritical && (!segment.fuelSuggestions || segment.fuelSuggestions.length === 0)) {
+          warnings.push(
+            `Day ${i + 1}: Fuel-critical leg with no fuel suggestions${isAffectedByRemoval ? ` — removing "${removedStopName}" is not recommended` : ""}`
+          )
+        }
+      }
+    }
+
+    if (warnings.length > 0) {
+      setEditWarnings(warnings)
+      setShowEditWarningBanner(true)
+      toast.warning("Fuel gap warning — check details before confirming", { duration: 5000 })
+    }
+  }, [daySegments, routeMeta.drivingInfo, trip?.destination_lat, trip?.start_lat, includeFuelPlanning, stops, clamp])
+
+  const dismissEditWarning = () => {
+    setShowEditWarningBanner(false)
+    setEditWarnings([])
+  }
+
   const fuelStationCount = () => {
     return routeMeta.fuelStations?.length ?? 0
   }
@@ -1618,6 +1683,10 @@ export default function PlannerDetailPage() {
           destLng: trip.destination_lng,
           travelPace: trip.travel_pace || "moderate",
           tripId,
+          preferredLegKm: preferredLegLengthKm,
+          avoidLongDays,
+          preferVerified: preferVerifiedStops,
+          includeFreeCamps,
         }),
       })
       const data = await response.json()
@@ -1920,17 +1989,38 @@ export default function PlannerDetailPage() {
         <div className="mb-6 grid gap-4 lg:grid-cols-[1.8fr_1fr]">
           <Card className="border">
             <CardHeader className="pb-3">
-              <CardTitle className="text-lg">Route Overview</CardTitle>
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-lg">Route Overview</CardTitle>
+                {routeMeta.corridor && (
+                  <Badge variant="secondary" className="rounded-full px-3 py-1 text-sm">
+                    {routeMeta.corridor}
+                  </Badge>
+                )}
+              </div>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div>
-                  <div className="text-sm text-muted-foreground mb-1">Start</div>
-                  <div className="font-medium">{trip.start_location_text}</div>
+              <div className="rounded-2xl bg-gradient-to-r from-primary/5 to-primary/10 p-4 border border-primary/10">
+                <div className="flex items-center gap-3 mb-3">
+                  <MapPin className="h-5 w-5 text-primary" />
+                  <div className="flex items-center gap-2 text-sm">
+                    <span className="font-semibold">{trip.start_location_text}</span>
+                    <span className="text-muted-foreground">→</span>
+                    <span className="font-semibold">{trip.destination_text}</span>
+                  </div>
                 </div>
-                <div>
-                  <div className="text-sm text-muted-foreground mb-1">Destination</div>
-                  <div className="font-medium">{trip.destination_text}</div>
+                <div className="grid grid-cols-3 gap-4 text-center">
+                  <div>
+                    <div className="text-xs text-muted-foreground">Distance</div>
+                    <div className="text-lg font-bold">{routeMeta.drivingInfo ? formatDistance(routeMeta.drivingInfo.totalDistanceKm) : "—"}</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-muted-foreground">Drive time</div>
+                    <div className="text-lg font-bold">{routeMeta.drivingInfo ? formatDuration(routeMeta.drivingInfo.totalDurationMinutes) : "—"}</div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-muted-foreground">Suggested days</div>
+                    <div className="text-lg font-bold">{routeMeta.drivingInfo ? `${computeEstimatedDays()}` : `${trip.trip_duration_days}`}</div>
+                  </div>
                 </div>
               </div>
               <div className="grid gap-3 sm:grid-cols-2">
@@ -1943,22 +2033,9 @@ export default function PlannerDetailPage() {
                   <div className="font-medium">{capitalize(trip.travel_pace) || "Moderate"}</div>
                 </div>
               </div>
-              <div className="grid gap-3 sm:grid-cols-3">
-                <div>
-                  <div className="text-sm text-muted-foreground mb-1">Total distance</div>
-                  <div className="font-semibold">{routeMeta.drivingInfo ? formatDistance(routeMeta.drivingInfo.totalDistanceKm) : "—"}</div>
-                </div>
-                <div>
-                  <div className="text-sm text-muted-foreground mb-1">Estimated drive time</div>
-                  <div className="font-semibold">{routeMeta.drivingInfo ? formatDuration(routeMeta.drivingInfo.totalDurationMinutes) : "—"}</div>
-                </div>
-                <div>
-                  <div className="text-sm text-muted-foreground mb-1">Suggested days</div>
-                  <div className="font-semibold">{routeMeta.drivingInfo ? `${computeEstimatedDays()} days` : `${trip.trip_duration_days} days`}</div>
-                </div>
-              </div>
-              <div className="rounded-2xl bg-muted/5 p-4 text-sm text-muted-foreground">
-                {getRouteDescription()}
+              <div className="rounded-2xl bg-muted/5 p-4 text-sm">
+                <div className="font-medium text-foreground mb-1">Route description</div>
+                <p className="text-muted-foreground">{getRouteDescription()}</p>
               </div>
               <div>
                 <div className="text-sm text-muted-foreground mb-2">Why this plan works</div>
@@ -1994,6 +2071,36 @@ export default function PlannerDetailPage() {
             </CardContent>
           </Card>
         </div>
+
+        {showEditWarningBanner && editWarnings.length > 0 && (
+          <Card className="border-amber-500/40 bg-amber-500/5 mb-4">
+            <CardHeader className="pb-2">
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-lg flex items-center gap-2">
+                  <Fuel className="h-5 w-5 text-amber-600" />
+                  Fuel Gap Warning
+                </CardTitle>
+                <Button variant="ghost" size="sm" onClick={dismissEditWarning}>Dismiss</Button>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-2 text-sm">
+              <p className="text-amber-800 font-medium">
+                Removing stops may create fuel gaps in remote sections. Review before confirming:
+              </p>
+              <ul className="space-y-1">
+                {editWarnings.map((warning, index) => (
+                  <li key={index} className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-amber-800">
+                    {warning}
+                  </li>
+                ))}
+              </ul>
+              <p className="text-xs text-muted-foreground mt-2">
+                You can still proceed, but consider adding an alternate fuel stop or shortening this leg.
+              </p>
+            </CardContent>
+          </Card>
+        )}
+
         <div className="mb-4">
           <Card className="overflow-hidden border py-0 relative">
             <div className="absolute right-4 top-4 z-20 flex flex-col gap-2">
@@ -2214,7 +2321,14 @@ export default function PlannerDetailPage() {
           <div className="space-y-6">
             <Card className="border">
               <CardHeader className="pb-3">
-                <CardTitle className="text-lg">Route overview</CardTitle>
+                <div className="flex items-center justify-between">
+                  <CardTitle className="text-lg">Route overview</CardTitle>
+                  {routeMeta.corridor && (
+                    <Badge variant="outline" className="text-xs">
+                      {routeMeta.corridor}
+                    </Badge>
+                  )}
+                </div>
               </CardHeader>
               {routeMeta.planningMode === "degraded-valid" && (
                 <div className="px-6 pb-2">
@@ -2496,12 +2610,7 @@ export default function PlannerDetailPage() {
                                           <p className="mt-2 text-sm text-muted-foreground">
                                             Suggested area stop for this leg. Confirm your exact overnight place, booking, and access before travel.
                                           </p>
-                                          <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">
-                                            {option.pet_friendly && <span className="rounded-full bg-muted/20 px-2 py-1">Pet friendly</span>}
-                                            {option.water && <span className="rounded-full bg-muted/20 px-2 py-1">Water</span>}
-                                            {option.cost_band && <span className="rounded-full bg-muted/20 px-2 py-1">{option.cost_band}</span>}
-                                          </div>
-                                          <div className="mt-4 flex flex-wrap gap-2">
+                                          <div className="mt-3 flex flex-wrap gap-2">
                                             <Button variant={getSelectedOption(segment, index)?.id === option.id ? "secondary" : "outline"} size="sm" onClick={() => handleChooseSegmentOption(segment, index, option)}>
                                               {getSelectedOption(segment, index)?.id === option.id ? "Selected" : "Choose this stop"}
                                             </Button>
