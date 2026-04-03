@@ -86,6 +86,24 @@ function findCorridor(lat1: number, lng1: number, lat2: number, lng2: number): s
   return closestCorridor
 }
 
+function normalizeCorridorName(value: string | null | undefined): string {
+  return (value || "")
+    .toLowerCase()
+    .replace(/highway|hwy|road|route/g, "")
+    .replace(/[^a-z0-9]/g, "")
+}
+
+function corridorMatchesStop(stopCorridor: string | null | undefined, detectedCorridor: string): boolean {
+  if (!detectedCorridor || detectedCorridor === "Unknown") return true
+  if (!stopCorridor) return true
+
+  const detected = normalizeCorridorName(detectedCorridor)
+  const stop = normalizeCorridorName(stopCorridor)
+  if (!detected || !stop) return true
+
+  return stop === detected || stop.includes(detected) || detected.includes(stop)
+}
+
 function interpolatePoint(lat1: number, lng1: number, lat2: number, lng2: number, fraction: number) {
   return {
     lat: lat1 + (lat2 - lat1) * fraction,
@@ -301,9 +319,11 @@ export async function POST(req: NextRequest) {
     }).filter((stop) => stop.is_between)
     .sort((a, b) => a.distance_from_start_km - b.distance_from_start_km)
 
+    const corridorFiltered = (routeFiltered ?? []).filter((stop) => corridorMatchesStop(stop.corridor, corridor))
+
     const stopsWithDistance = (tripPreferences
-      ? applySuitabilityFilter(routeFiltered ?? [], tripPreferences)
-      : (routeFiltered ?? [])) as RouteStopCandidate[]
+      ? applySuitabilityFilter(corridorFiltered, tripPreferences)
+      : corridorFiltered) as RouteStopCandidate[]
 
     const fuelStationMap = new Map<string, FuelStationOption>()
 
