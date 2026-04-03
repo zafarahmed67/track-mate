@@ -47,15 +47,98 @@ function distanceToPolyline(stopLat: number, stopLng: number, polyline: Array<{ 
   return { distanceKm: minDistance, cumulativeKm: bestCumulative }
 }
 
-async function fetchRoutePolyline(startLat: number, startLng: number, destLat: number, destLng: number): Promise<Array<{ lat: number; lng: number }> | null> {
+function buildDirectionsUrl(params: {
+  startLat: number
+  startLng: number
+  destLat: number
+  destLng: number
+  apiKey: string
+  rigType?: string | null
+  avoidGravelRoads?: boolean
+}) {
+  const urlParams = new URLSearchParams({
+    origin: `${params.startLat},${params.startLng}`,
+    destination: `${params.destLat},${params.destLng}`,
+    mode: "driving",
+    key: params.apiKey,
+  })
+
+  const normalizedRig = (params.rigType || "").toLowerCase()
+  if (["caravan", "motorhome", "campervan"].includes(normalizedRig)) {
+    urlParams.append("avoid", "ferries")
+  }
+
+  if (params.avoidGravelRoads) {
+    urlParams.append("alternatives", "true")
+  }
+
+  return `https://maps.googleapis.com/maps/api/directions/json?${urlParams.toString()}`
+}
+
+function selectBestDirectionsRoute(
+  routes: Array<{ summary?: string; overview_polyline?: { points: string }; legs: Array<{ distance: { value: number } }> }>,
+  threshold = 1.1
+) {
+  if (routes.length <= 1) {
+    return routes[0]
+  }
+
+  const sortedByDistance = routes
+    .filter((route) => route.legs?.[0]?.distance?.value)
+    .slice()
+    .sort((a, b) => a.legs[0].distance.value - b.legs[0].distance.value)
+
+  if (sortedByDistance.length === 0) {
+    return routes[0]
+  }
+
+  const shortestDistance = sortedByDistance[0].legs[0].distance.value
+
+  const highwayPreferred = sortedByDistance.find((route) => {
+    const summary = (route.summary || "").toLowerCase()
+    const isHighway = summary.includes("highway") || summary.includes("hwy") || summary.includes("freeway") || summary.includes("motorway")
+    if (!isHighway) return false
+
+    const ratio = route.legs[0].distance.value / shortestDistance
+    return ratio <= threshold
+  })
+
+  return highwayPreferred || sortedByDistance[0]
+}
+
+async function fetchRoutePolylineWithPreferences(
+  startLat: number,
+  startLng: number,
+  destLat: number,
+  destLng: number,
+  preferences?: Pick<TripPreferences, "rig_type" | "avoid_gravel_roads"> | null
+): Promise<Array<{ lat: number; lng: number }> | null> {
   const apiKey = process.env.NEXT_PUBLIC_GMAPS_API_KEY
   if (!apiKey) return null
+
   try {
-    const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${startLat},${startLng}&destination=${destLat},${destLng}&key=${apiKey}`
+    const url = buildDirectionsUrl({
+      startLat,
+      startLng,
+      destLat,
+      destLng,
+      apiKey,
+      rigType: preferences?.rig_type,
+      avoidGravelRoads: preferences?.avoid_gravel_roads,
+    })
     const res = await fetch(url)
     const data = await res.json()
-    if (data.status !== "OK" || !data.routes[0]) return null
-    return decodePolyline(data.routes[0].overview_polyline.points)
+
+    if (data.status !== "OK" || !data.routes?.length) {
+      return null
+    }
+
+    const selectedRoute = selectBestDirectionsRoute(data.routes)
+    if (!selectedRoute?.overview_polyline?.points) {
+      return null
+    }
+
+    return decodePolyline(selectedRoute.overview_polyline.points)
   } catch {
     return null
   }
@@ -372,7 +455,7 @@ export async function POST(req: NextRequest) {
     console.log(`\n📋 Fetched ${stops.length} stops, filtering by route proximity...`)
 
     // Attempt to get the actual route polyline from Google Directions for precise proximity filtering
-    const polyline = await fetchRoutePolyline(startLat, startLng, destLat, destLng)
+    const polyline = await fetchRoutePolylineWithPreferences(startLat, startLng, destLat, destLng, tripPreferences)
     const usingPolyline = polyline !== null && polyline.length > 2
     console.log(usingPolyline
       ? `🗺️  Using actual route polyline (${polyline!.length} points) — threshold: ${ROUTE_PROXIMITY_THRESHOLD_KM}km`
