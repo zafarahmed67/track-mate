@@ -1706,6 +1706,7 @@ export default function PlannerDetailPage() {
           avoidLongDays,
           preferVerified: preferVerifiedStops,
           includeFreeCamps,
+          includeAlternatives: true,
         }),
       })
       const data = await response.json()
@@ -1999,7 +2000,7 @@ export default function PlannerDetailPage() {
                 <Trash2 className="mr-2 h-4 w-4" />
                 Delete
               </Button>
-              <Button variant="secondary" size="sm" onClick={() => toast("Edit trip mode")}>
+              <Button variant="secondary" size="sm" onClick={() => router.push(`/planner/${tripId}/edit`)}>
                 <Edit className="mr-2 h-4 w-4" />
                 Edit Trip
               </Button>

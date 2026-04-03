@@ -1,5 +1,42 @@
 import { NextRequest, NextResponse } from "next/server"
 
+interface GoogleDirectionsRoute {
+  summary?: string
+  overview_polyline: { points: string }
+  waypoint_order?: number[]
+  legs: Array<{
+    distance: { value: number }
+  }>
+}
+
+function selectBestDirectionsRoute(routes: GoogleDirectionsRoute[], threshold = 1.1) {
+  if (routes.length <= 1) {
+    return routes[0]
+  }
+
+  const sortedByDistance = routes
+    .filter((route) => route.legs?.[0]?.distance?.value)
+    .slice()
+    .sort((a, b) => a.legs[0].distance.value - b.legs[0].distance.value)
+
+  if (sortedByDistance.length === 0) {
+    return routes[0]
+  }
+
+  const shortestDistance = sortedByDistance[0].legs[0].distance.value
+
+  const highwayPreferred = sortedByDistance.find((route) => {
+    const summary = (route.summary || "").toLowerCase()
+    const isHighway = summary.includes("highway") || summary.includes("hwy") || summary.includes("freeway") || summary.includes("motorway")
+    if (!isHighway) return false
+
+    const ratio = route.legs[0].distance.value / shortestDistance
+    return ratio <= threshold
+  })
+
+  return highwayPreferred || sortedByDistance[0]
+}
+
 function calculateDistance(lat1: number, lng1: number, lat2: number, lng2: number) {
   const R = 6371
   const dLat = (lat2 - lat1) * Math.PI / 180
@@ -95,7 +132,7 @@ function decodePolyline(encoded: string): Array<{ lat: number; lng: number }> {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json()
-    const { stops, origin, destination, waypoints, minSpacingKm = 50 } = body
+    const { stops, origin, destination, waypoints, minSpacingKm = 50, rigType, avoidGravelRoads } = body
 
     if (!stops || !Array.isArray(stops) || stops.length === 0) {
       return NextResponse.json({
@@ -122,22 +159,44 @@ export async function POST(req: NextRequest) {
         waypointStr = `waypoints=optimize:true|${waypoints.map((w: { lat: number; lng: number }) => `${w.lat},${w.lng}`).join("|")}`
       }
 
-      const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${origin.lat},${origin.lng}&destination=${destination.lat},${destination.lng}&${waypointStr}&key=${apiKey}`
+      const urlParams = new URLSearchParams({
+        origin: `${origin.lat},${origin.lng}`,
+        destination: `${destination.lat},${destination.lng}`,
+        mode: "driving",
+        key: apiKey,
+      })
+
+      const normalizedRig = String(rigType || "").toLowerCase()
+      if (["caravan", "motorhome", "campervan"].includes(normalizedRig)) {
+        urlParams.append("avoid", "ferries")
+      }
+
+      if (avoidGravelRoads === true && (!waypoints || waypoints.length === 0)) {
+        urlParams.append("alternatives", "true")
+      }
+
+      if (waypointStr) {
+        const waypointValue = waypointStr.replace(/^waypoints=/, "")
+        urlParams.append("waypoints", waypointValue)
+      }
+
+      const url = `https://maps.googleapis.com/maps/api/directions/json?${urlParams.toString()}`
 
       const response = await fetch(url)
       const data = await response.json()
 
-      if (data.status !== "OK" || !data.routes[0]) {
+      if (data.status !== "OK" || !data.routes?.length) {
         return NextResponse.json(
           { success: false, error: "Failed to get route directions" },
           { status: 500 }
         )
       }
 
-      const encodedPolyline = data.routes[0].overview_polyline.points
+      const selectedRoute = selectBestDirectionsRoute(data.routes as GoogleDirectionsRoute[])
+      const encodedPolyline = selectedRoute.overview_polyline.points
       polylinePoints = decodePolyline(encodedPolyline)
 
-      const waypointOrder = data.routes[0].waypoint_order || []
+      const waypointOrder = selectedRoute.waypoint_order || []
 
       const stopsWithRouteDistance = stops.map((stop, index) => {
         const stopLat = parseFloat(stop.latitude)
@@ -147,7 +206,7 @@ export async function POST(req: NextRequest) {
         let distanceFromRoute = calculateDistance(origin.lat, origin.lng, stopLat, stopLng)
 
         if (polylinePoints.length > 2) {
-          const { nearestPoint, distance, cumulativeDistance: cumDist } = findNearestPointOnPolyline(
+          const { distance, cumulativeDistance: cumDist } = findNearestPointOnPolyline(
             stopLat,
             stopLng,
             polylinePoints

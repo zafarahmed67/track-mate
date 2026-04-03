@@ -1,10 +1,54 @@
 import { NextRequest, NextResponse } from "next/server"
 
+interface GoogleDirectionsRoute {
+  summary?: string
+  overview_polyline: { points: string }
+  legs: Array<{
+    distance?: { text: string }
+    duration?: { text: string }
+    steps: Array<{
+      end_location: { lat: number; lng: number }
+    }>
+  }>
+}
+
+function selectBestDirectionsRoute(routes: GoogleDirectionsRoute[], threshold = 1.1) {
+  if (routes.length <= 1) {
+    return routes[0]
+  }
+
+  const sortedByDistance = routes
+    .filter((route) => route.legs?.[0]?.distance?.text)
+    .slice()
+    .sort((a, b) => {
+      const aKm = Number(String(a.legs[0].distance?.text || "0").replace(/[^0-9.]/g, ""))
+      const bKm = Number(String(b.legs[0].distance?.text || "0").replace(/[^0-9.]/g, ""))
+      return aKm - bKm
+    })
+
+  if (sortedByDistance.length === 0) {
+    return routes[0]
+  }
+
+  const shortestKm = Number(String(sortedByDistance[0].legs[0].distance?.text || "0").replace(/[^0-9.]/g, "")) || 1
+  const highwayPreferred = sortedByDistance.find((route) => {
+    const summary = (route.summary || "").toLowerCase()
+    const isHighway = summary.includes("highway") || summary.includes("hwy") || summary.includes("freeway") || summary.includes("motorway")
+    if (!isHighway) return false
+    const distanceKm = Number(String(route.legs[0].distance?.text || "0").replace(/[^0-9.]/g, ""))
+    return (distanceKm / shortestKm) <= threshold
+  })
+
+  return highwayPreferred || sortedByDistance[0]
+}
+
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url)
     const origin = searchParams.get("origin")
     const destination = searchParams.get("destination")
+    const rigType = searchParams.get("rigType")
+    const avoidGravelRoads = searchParams.get("avoidGravelRoads") === "true"
 
     if (!origin || !destination) {
       return NextResponse.json(
@@ -22,7 +66,23 @@ export async function GET(req: NextRequest) {
       )
     }
 
-    const directionsUrl = `https://maps.googleapis.com/maps/api/directions/json?origin=${origin}&destination=${destination}&mode=driving&key=${apiKey}`
+    const urlParams = new URLSearchParams({
+      origin,
+      destination,
+      mode: "driving",
+      key: apiKey,
+    })
+
+    const normalizedRig = (rigType || "").toLowerCase()
+    if (["caravan", "motorhome", "campervan"].includes(normalizedRig)) {
+      urlParams.append("avoid", "ferries")
+    }
+
+    if (avoidGravelRoads) {
+      urlParams.append("alternatives", "true")
+    }
+
+    const directionsUrl = `https://maps.googleapis.com/maps/api/directions/json?${urlParams.toString()}`
     
     const directionsResponse = await fetch(directionsUrl)
     const directionsData = await directionsResponse.json()
@@ -34,8 +94,8 @@ export async function GET(req: NextRequest) {
       )
     }
 
-    const encodedPolyline = directionsData.routes[0].overview_polyline.points
-    const steps = directionsData.routes[0].legs[0].steps
+    const selectedRoute = selectBestDirectionsRoute(directionsData.routes as GoogleDirectionsRoute[])
+    const steps = selectedRoute.legs[0].steps
     
     const coordinates: Array<{lat: number, lng: number}> = []
     for (const step of steps) {
@@ -118,8 +178,8 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({
       success: true,
       fuelStations: uniqueStations.slice(0, 15),
-      routeDistance: directionsData.routes[0].legs[0].distance?.text,
-      routeDuration: directionsData.routes[0].legs[0].duration?.text,
+      routeDistance: selectedRoute.legs[0].distance?.text,
+      routeDuration: selectedRoute.legs[0].duration?.text,
     })
   } catch (error) {
     console.error("Error fetching fuel stations along route:", error)

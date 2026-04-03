@@ -19,6 +19,7 @@ interface RouteStopCandidate {
   location_name: string
   latitude: string
   longitude: string
+  corridor?: string | null
   state?: string
   region?: string
   route_type?: string
@@ -28,8 +29,19 @@ interface RouteStopCandidate {
   cost_band?: string
   tier?: string
   is_verified: boolean
+  is_alternative?: boolean
   distance_from_start_km: number
   distance_from_dest_km: number
+}
+
+interface GoogleDirectionsRoute {
+  summary?: string
+  overview_polyline?: { points: string }
+  waypoint_order?: number[]
+  legs: Array<{
+    distance: { value: number }
+    duration: { value: number }
+  }>
 }
 
 interface PlannedSegment {
@@ -102,6 +114,62 @@ function corridorMatchesStop(stopCorridor: string | null | undefined, detectedCo
   if (!detected || !stop) return true
 
   return stop === detected || stop.includes(detected) || detected.includes(stop)
+}
+
+function buildDirectionsUrl(params: {
+  startLat: number
+  startLng: number
+  destLat: number
+  destLng: number
+  apiKey: string
+  rigType?: string | null
+  avoidGravelRoads?: boolean
+}) {
+  const urlParams = new URLSearchParams({
+    origin: `${params.startLat},${params.startLng}`,
+    destination: `${params.destLat},${params.destLng}`,
+    mode: "driving",
+    key: params.apiKey,
+  })
+
+  const normalizedRig = (params.rigType || "").toLowerCase()
+  if (["caravan", "motorhome", "campervan"].includes(normalizedRig)) {
+    urlParams.append("avoid", "ferries")
+  }
+
+  if (params.avoidGravelRoads) {
+    urlParams.append("alternatives", "true")
+  }
+
+  return `https://maps.googleapis.com/maps/api/directions/json?${urlParams.toString()}`
+}
+
+function selectBestDirectionsRoute(routes: GoogleDirectionsRoute[], threshold = 1.1) {
+  if (routes.length <= 1) {
+    return routes[0]
+  }
+
+  const sortedByDistance = routes
+    .filter((route) => route.legs?.[0]?.distance?.value)
+    .slice()
+    .sort((a, b) => a.legs[0].distance.value - b.legs[0].distance.value)
+
+  if (sortedByDistance.length === 0) {
+    return routes[0]
+  }
+
+  const shortestDistance = sortedByDistance[0].legs[0].distance.value
+
+  const highwayPreferred = sortedByDistance.find((route) => {
+    const summary = (route.summary || "").toLowerCase()
+    const isHighway = summary.includes("highway") || summary.includes("hwy") || summary.includes("freeway") || summary.includes("motorway")
+    if (!isHighway) return false
+
+    const ratio = route.legs[0].distance.value / shortestDistance
+    return ratio <= threshold
+  })
+
+  return highwayPreferred || sortedByDistance[0]
 }
 
 function interpolatePoint(lat1: number, lng1: number, lat2: number, lng2: number, fraction: number) {
@@ -218,6 +286,7 @@ export async function POST(req: NextRequest) {
       avoidLongDays,
       preferVerified,
       includeFreeCamps,
+      includeAlternatives,
     } = body
 
     if (!startLat || !startLng || !destLat || !destLng) {
@@ -236,17 +305,45 @@ export async function POST(req: NextRequest) {
     const config = paceConfig[travelPace as keyof typeof paceConfig] || paceConfig.moderate
     const corridor = findCorridor(startLat, startLng, destLat, destLng)
 
+    // Fetch trip preferences for suitability filtering and route selection (non-fatal if missing)
+    let tripPreferences: TripPreferences | null = null
+    let requestedTripDays: number | null = null
+    if (tripId) {
+      const { data: tripData, error: tripError } = await supabaseAdmin
+        .from("trips")
+        .select("rig_type, rig_length_m, pet_friendly_required, avoid_gravel_roads, stay_preference, budget_preference, end_date, trip_duration_days")
+        .eq("id", tripId)
+        .single()
+      if (!tripError && tripData) {
+        tripPreferences = tripData as TripPreferences
+        const days = Number((tripData as { trip_duration_days?: number | null }).trip_duration_days ?? 0)
+        requestedTripDays = Number.isFinite(days) && days > 0 ? Math.round(days) : null
+      }
+    }
+
     const apiKey = process.env.NEXT_PUBLIC_GMAPS_API_KEY
     let drivingInfo: { totalDistanceKm: number; totalDurationMinutes: number } | null = null
 
     if (apiKey) {
       try {
-        const directionsUrl = `https://maps.googleapis.com/maps/api/directions/json?origin=${startLat},${startLng}&destination=${destLat},${destLng}&key=${apiKey}`
+        const directionsUrl = buildDirectionsUrl({
+          startLat,
+          startLng,
+          destLat,
+          destLng,
+          apiKey,
+          rigType: tripPreferences?.rig_type,
+          avoidGravelRoads: tripPreferences?.avoid_gravel_roads,
+        })
         const directionsResponse = await fetch(directionsUrl)
         const directionsData = await directionsResponse.json()
 
-        if (directionsData.status === "OK" && directionsData.routes[0]) {
-          const route = directionsData.routes[0].legs[0]
+        if (directionsData.status === "OK" && directionsData.routes?.length > 0) {
+          const selectedRoute = selectBestDirectionsRoute(directionsData.routes as GoogleDirectionsRoute[])
+          const route = selectedRoute?.legs?.[0]
+          if (!route) {
+            throw new Error("No route leg data returned")
+          }
           drivingInfo = {
             totalDistanceKm: route.distance.value / 1000,
             totalDurationMinutes: route.duration.value / 60,
@@ -270,22 +367,6 @@ export async function POST(req: NextRequest) {
       maxLng: Math.max(startLng, destLng) + bufferDeg,
     }
 
-    // Fetch trip preferences for suitability filtering (non-fatal if missing)
-    let tripPreferences: TripPreferences | null = null
-    let requestedTripDays: number | null = null
-    if (tripId) {
-      const { data: tripData, error: tripError } = await supabaseAdmin
-        .from("trips")
-        .select("rig_type, rig_length_m, pet_friendly_required, avoid_gravel_roads, stay_preference, budget_preference, end_date, trip_duration_days")
-        .eq("id", tripId)
-        .single()
-      if (!tripError && tripData) {
-        tripPreferences = tripData as TripPreferences
-        const days = Number((tripData as { trip_duration_days?: number | null }).trip_duration_days ?? 0)
-        requestedTripDays = Number.isFinite(days) && days > 0 ? Math.round(days) : null
-      }
-    }
-
     const { data: stops, error: stopsError } = await supabaseAdmin
       .from("stops")
       .select("*")
@@ -301,7 +382,43 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    const routeFiltered = stops?.map((stop) => {
+    const includeAlternativeStops = includeAlternatives !== false
+    let customStops: Array<Record<string, unknown>> = []
+
+    if (includeAlternativeStops && tripId) {
+      const { data: customStopsData, error: customStopsError } = await supabaseAdmin
+        .from("custom_stops")
+        .select("*")
+        .eq("trip_id", tripId)
+        .gte("latitude", bounds.minLat.toString())
+        .lte("latitude", bounds.maxLat.toString())
+        .gte("longitude", bounds.minLng.toString())
+        .lte("longitude", bounds.maxLng.toString())
+
+      if (customStopsError) {
+        console.error("Error fetching custom stops:", customStopsError)
+      } else {
+        customStops = (customStopsData || []).map((stop) => ({
+          ...stop,
+          id: `custom-${String(stop.id)}`,
+          corridor: null,
+          state: "",
+          region: "",
+          route_type: String(stop.place_type || "custom"),
+          stay_type: "",
+          pet_friendly: "",
+          water: "",
+          cost_band: "",
+          tier: "",
+          verification_status: "custom",
+          is_alternative: true,
+        }))
+      }
+    }
+
+    const allStops = [...(stops || []), ...customStops]
+
+    const routeFiltered = allStops.map((stop) => {
       const lat = parseFloat(stop.latitude)
       const lng = parseFloat(stop.longitude)
       const distFromStart = calculateDistance(startLat, startLng, lat, lng)
@@ -314,7 +431,7 @@ export async function POST(req: NextRequest) {
         distance_from_start_km: Math.round(distFromStart * 10) / 10,
         distance_from_dest_km: Math.round(distFromDest * 10) / 10,
         is_between: isBetween,
-        is_verified: stop.verification_status && stop.verification_status !== "custom",
+        is_verified: Boolean(stop.verification_status && stop.verification_status !== "custom"),
       }
     }).filter((stop) => stop.is_between)
     .sort((a, b) => a.distance_from_start_km - b.distance_from_start_km)
@@ -399,7 +516,7 @@ export async function POST(req: NextRequest) {
 
       const expandedUnused = expandedInRange.filter((s) => !usedStopIds.has(s.id))
 
-      const canIncludeAsOther = (s: RouteStopCandidate) => s.is_verified || includeFreeCamps || s.cost_band !== "Free"
+      const canIncludeAsOther = (s: RouteStopCandidate) => s.is_verified || includeFreeCamps !== false || s.cost_band !== "Free"
 
       const nearestUnusedBySegment = rankStops(
         expandedUnused.filter((s) => canIncludeAsOther(s)),
@@ -819,6 +936,7 @@ export async function POST(req: NextRequest) {
           tier: stop.tier || "",
           distance_from_start_km: stop.distance_from_start_km,
           is_verified: stop.is_verified,
+          is_alternative: Boolean(stop.is_alternative),
         })),
         fuelStations: allFuelStations.slice(0, 20),
         corridor,
@@ -844,6 +962,7 @@ export async function POST(req: NextRequest) {
       tier: stop.tier || "",
       distance_from_start_km: stop.distance_from_start_km,
       is_verified: stop.is_verified,
+      is_alternative: Boolean(stop.is_alternative),
     })) || []
 
     return NextResponse.json({
