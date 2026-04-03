@@ -143,6 +143,13 @@ export async function POST(req: NextRequest) {
             }
 
             userId = newUser.id
+
+            // Send invite email for new users — creates Supabase auth account + sends magic-link email
+            const { error: inviteError } = await supabaseAdmin.auth.admin.inviteUserByEmail(data.email)
+            if (inviteError) {
+                console.error("Error sending invite email (non-fatal):", inviteError.message)
+                // Non-fatal: user is saved in DB. Fall through to generate link for webhook response.
+            }
         }
 
         // Record the purchase (SRS §10 purchases table)

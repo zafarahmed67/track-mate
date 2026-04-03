@@ -32,6 +32,8 @@ import {
   Droplets,
   ShoppingCart,
   GripVertical,
+  Sparkles,
+  Loader2,
 } from "lucide-react"
 
 const mapContainerStyle = {
@@ -55,6 +57,7 @@ interface TripData {
   travel_pace: string
   created_at: string
   notes: string | null
+  route_data_json?: Record<string, unknown> | null
 }
 
 interface TripStop extends Omit<Stop, "id"> {
@@ -107,6 +110,9 @@ interface RouteStopOption {
   tier?: string
   is_verified?: boolean
   distance_from_start_km?: number
+  aao_tip?: string
+  why_stop_here?: string
+  why_we_d_stay_again?: string
 }
 
 interface RouteSegment {
@@ -132,6 +138,19 @@ interface RouteMeta {
   segments?: RouteSegment[]
   fuelStations?: FuelStation[]
   planningMode?: "standard" | "degraded-valid"
+}
+
+interface DayNarrative {
+  dayNumber: number
+  narrative: string
+  aaoTips: string[]
+  gapNote: string | null
+}
+
+interface TripNarrative {
+  overview: string
+  days: DayNarrative[]
+  generatedAt: string
 }
 
 function SortableRouteStopItem({
@@ -237,6 +256,8 @@ export default function PlannerDetailPage() {
   const [editWarnings, setEditWarnings] = useState<string[]>([])
   const [showEditWarningBanner, setShowEditWarningBanner] = useState(false)
   const dragSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }))
+  const [tripNarrative, setTripNarrative] = useState<TripNarrative | null>(null)
+  const [narrativeLoading, setNarrativeLoading] = useState(false)
 
   const applyDraggedOrderToTripStops = (tripStops: TripStop[], orderedStopIds: string[]) => {
     if (orderedStopIds.length === 0) return tripStops
@@ -469,21 +490,8 @@ export default function PlannerDetailPage() {
       fuelWarning: undefined,
     }))
 
-  const savedRouteStopsCount = stops.filter((stop) => stop.verification_status !== "custom").length
-  const maxCustomDayIndex = stops
-    .filter((s) => s.verification_status === "custom" && typeof s.day_index === "number")
-    .reduce((max, s) => Math.max(max, s.day_index as number), -1)
-
   const plannedDays = allDaySegments.length
-  const effectiveDayCount = savedRouteStopsCount === 0
-    ? plannedDays
-    : Math.max(
-        1,
-        Math.min(
-          plannedDays,
-          Math.max(savedRouteStopsCount + 1, maxCustomDayIndex >= 0 ? maxCustomDayIndex + 1 : 0)
-        )
-      )
+  const effectiveDayCount = Math.max(1, plannedDays)
   const daySegments = allDaySegments.slice(0, effectiveDayCount)
 
   const totalRouteDistanceKm = routeMeta.drivingInfo?.totalDistanceKm || 0
@@ -901,6 +909,7 @@ export default function PlannerDetailPage() {
   }
 
   const handleRebuildPlan = async () => {
+    setTripNarrative(null)
     setRouteOptionsLoading(true)
     try {
       await loadRouteOptions()
@@ -945,19 +954,29 @@ export default function PlannerDetailPage() {
 
   const handleExportPdf = async () => {
     try {
-      const response = await fetch(`/api/trips/${tripId}/export?format=html${userId ? `&user_id=${userId}` : ""}`)
-      const data = await response.json()
+      const response = await fetch(
+        `/api/trips/${tripId}/export?format=pdf${userId ? `&user_id=${userId}` : ""}`
+      )
 
-      if (data.success) {
-        const printWindow = window.open("", "_blank")
-        if (printWindow) {
-          printWindow.document.write(data.data)
-          printWindow.document.close()
-          printWindow.print()
-        }
+      if (!response.ok) {
+        toast.error("Failed to export PDF")
+        return
       }
+
+      const blob = await response.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement("a")
+      const disposition = response.headers.get("Content-Disposition") ?? ""
+      const match = disposition.match(/filename="([^"]+)"/)
+      a.href = url
+      a.download = match ? match[1] : "trip.pdf"
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
     } catch (error) {
       console.error("Error exporting trip:", error)
+      toast.error("Error exporting PDF")
     }
   }
 
@@ -1764,6 +1783,10 @@ export default function PlannerDetailPage() {
 
         if (data.success && data.trip) {
           setTrip(data.trip)
+          const savedNarrative = (data.trip as TripData).route_data_json?.narrative as TripNarrative | undefined
+          if (savedNarrative?.days?.length) {
+            setTripNarrative(savedNarrative)
+          }
         }
 
         const stopsResponse = await fetch(`/api/trips/${tripId}/stops`)
@@ -2528,9 +2551,15 @@ export default function PlannerDetailPage() {
                               )}
 
                               {routeStops.length === 0 && customStopsForDay.length === 0 && (
-                                <div className="rounded-2xl border border-dashed border-muted/30 bg-muted/10 p-3 text-xs text-muted-foreground">
-                                  No saved route stops for this day yet. Pick from Options to add stops.
-                                </div>
+                                segment.verifiedStops.length === 0 ? (
+                                  <div className="rounded-2xl border border-dashed border-amber-400/40 bg-amber-50/5 p-3 text-xs text-amber-700 dark:text-amber-400">
+                                    No AAO verified stop on this stretch. This leg has no database-verified overnight options — check nearby alternatives below or add a custom stop.
+                                  </div>
+                                ) : (
+                                  <div className="rounded-2xl border border-dashed border-muted/30 bg-muted/10 p-3 text-xs text-muted-foreground">
+                                    No saved route stops for this day yet. Pick from Options to add stops.
+                                  </div>
+                                )
                               )}
 
                               {customStopsForDay.length > 0 && (
@@ -2765,8 +2794,8 @@ export default function PlannerDetailPage() {
                                   {segment.fuelCritical && !segment.fuelWarning?.includes("fuel-critical") && (
                                     <div className="rounded-2xl bg-destructive/10 p-3 text-sm text-destructive">
                                       {hasFuelOptions
-                                        ? `Fuel-critical leg: fuel exists, but gap risk remains${gapInfo.gapToNext ? ` (next fuel ~${Math.round(gapInfo.gapToNext)} km)` : ""}. Keep extra reserve.`
-                                        : "Fuel-critical leg: refuel before leaving and avoid stretching beyond your safe range."}
+                                        ? `Fuel-critical leg: verified fuel options exist but the distance between them is long. Keep extra reserve and fill up at every opportunity.`
+                                        : `Fuel-critical leg: no verified fuel stops on this stretch. Refuel before leaving and plan for fuel at the next town.`}
                                     </div>
                                   )}
                                 </div>

@@ -728,11 +728,12 @@ export async function POST(req: NextRequest) {
           segment.gapToNextFuelKm = nextFuel !== undefined ? Math.round(nextFuel - currentFuelKm) : undefined
 
           const parts: string[] = []
+          let gapBasedCritical = false
 
           if (segment.gapFromLastFuelKm !== undefined) {
             if (segment.gapFromLastFuelKm > HARD_FUEL_GAP_KM) {
               parts.push(`CRITICAL ${segment.gapFromLastFuelKm} km since last fuel — DANGEROUS GAP`)
-              segment.fuelCritical = true
+              gapBasedCritical = true
             } else if (segment.gapFromLastFuelKm > fuelSafeKm) {
               parts.push(`${segment.gapFromLastFuelKm} km since last fuel — fill up here`)
             } else {
@@ -743,7 +744,7 @@ export async function POST(req: NextRequest) {
           if (segment.gapToNextFuelKm !== undefined) {
             if (segment.gapToNextFuelKm > HARD_FUEL_GAP_KM) {
               parts.push(`CRITICAL next fuel ${segment.gapToNextFuelKm} km away — DANGEROUS GAP`)
-              segment.fuelCritical = true
+              gapBasedCritical = true
             } else if (segment.gapToNextFuelKm > fuelSafeKm) {
               parts.push(`Next fuel ${segment.gapToNextFuelKm} km away — long gap ahead`)
             } else {
@@ -756,6 +757,7 @@ export async function POST(req: NextRequest) {
           }
 
           segment.fuelWarning = parts.length > 0 ? parts.join(" • ") : undefined
+          segment.fuelCritical = gapBasedCritical
           lastFuelKm = currentFuelKm
         } else {
           if (lastFuelKm !== null) {
@@ -765,12 +767,15 @@ export async function POST(req: NextRequest) {
               segment.fuelWarning = `CRITICAL ${gapToLast} km since last fuel — DANGEROUS GAP`
               segment.fuelCritical = true
             } else if (gapToLast > fuelSafeKm) {
-              segment.fuelWarning = `${gapToLast} km since last fuel — fuel-critical leg`
+              segment.fuelWarning = `${gapToLast} km since last fuel — long gap since last fuel`
+              segment.fuelCritical = true
             } else {
               segment.fuelWarning = `${gapToLast} km since last fuel`
+              segment.fuelCritical = false
             }
           } else {
             segment.fuelWarning = "No fuel data available for this section"
+            segment.fuelCritical = false
           }
         }
       }

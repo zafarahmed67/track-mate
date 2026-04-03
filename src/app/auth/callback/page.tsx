@@ -43,7 +43,7 @@ function AuthCallbackContent() {
         const accessToken = hashParams.get("access_token") || searchParams.get("access_token")
         const type = hashParams.get("type") || searchParams.get("type")
 
-        if (accessToken && type === "magiclink") {
+        if (accessToken && (type === "magiclink" || type === "invite")) {
           const { data: { session }, error: sessionError } = await supabase.auth.setSession({
             access_token: accessToken,
             refresh_token: hashParams.get("refresh_token") || "",
