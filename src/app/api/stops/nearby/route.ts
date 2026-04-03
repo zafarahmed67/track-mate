@@ -137,6 +137,24 @@ function findCorridor(startLat: number, startLng: number, destLat: number, destL
   return bestCorridor
 }
 
+function normalizeCorridorName(value: string | null | undefined): string {
+  return (value || "")
+    .toLowerCase()
+    .replace(/highway|hwy|road|route/g, "")
+    .replace(/[^a-z0-9]/g, "")
+}
+
+function corridorMatchesStop(stopCorridor: string | null | undefined, detectedCorridor: string | null): boolean {
+  if (!detectedCorridor || detectedCorridor === "Unknown") return true
+  if (!stopCorridor) return true
+
+  const detected = normalizeCorridorName(detectedCorridor)
+  const stop = normalizeCorridorName(stopCorridor)
+  if (!detected || !stop) return true
+
+  return stop === detected || stop.includes(detected) || detected.includes(stop)
+}
+
 function interpolatePoint(lat1: number, lng1: number, lat2: number, lng2: number, fraction: number) {
   return {
     lat: lat1 + (lat2 - lat1) * fraction,
@@ -405,11 +423,12 @@ export async function POST(req: NextRequest) {
     console.log("=".repeat(70))
 
     const routeFiltered = stopsWithDistance.filter((stop) => stop.is_between_start_and_dest)
+    const corridorFiltered = routeFiltered.filter((stop) => corridorMatchesStop(stop.corridor, corridor))
     const filtered = tripPreferences
-      ? applySuitabilityFilter(routeFiltered, tripPreferences)
-      : routeFiltered
+      ? applySuitabilityFilter(corridorFiltered, tripPreferences)
+      : corridorFiltered
 
-    console.log(`\n✅ FINAL RESULT: ${routeFiltered.length} route-filtered → ${filtered.length} after suitability filtering`)
+    console.log(`\n✅ FINAL RESULT: ${routeFiltered.length} route-filtered → ${corridorFiltered.length} corridor-matched → ${filtered.length} after suitability filtering`)
     console.log("=".repeat(70))
     filtered.forEach((stop, index) => {
       console.log(`${index + 1}. ${stop.location_name}`)

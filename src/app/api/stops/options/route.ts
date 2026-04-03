@@ -86,6 +86,24 @@ function findCorridor(lat1: number, lng1: number, lat2: number, lng2: number): s
   return closestCorridor
 }
 
+function normalizeCorridorName(value: string | null | undefined): string {
+  return (value || "")
+    .toLowerCase()
+    .replace(/highway|hwy|road|route/g, "")
+    .replace(/[^a-z0-9]/g, "")
+}
+
+function corridorMatchesStop(stopCorridor: string | null | undefined, detectedCorridor: string): boolean {
+  if (!detectedCorridor || detectedCorridor === "Unknown") return true
+  if (!stopCorridor) return true
+
+  const detected = normalizeCorridorName(detectedCorridor)
+  const stop = normalizeCorridorName(stopCorridor)
+  if (!detected || !stop) return true
+
+  return stop === detected || stop.includes(detected) || detected.includes(stop)
+}
+
 function interpolatePoint(lat1: number, lng1: number, lat2: number, lng2: number, fraction: number) {
   return {
     lat: lat1 + (lat2 - lat1) * fraction,
@@ -301,9 +319,11 @@ export async function POST(req: NextRequest) {
     }).filter((stop) => stop.is_between)
     .sort((a, b) => a.distance_from_start_km - b.distance_from_start_km)
 
+    const corridorFiltered = (routeFiltered ?? []).filter((stop) => corridorMatchesStop(stop.corridor, corridor))
+
     const stopsWithDistance = (tripPreferences
-      ? applySuitabilityFilter(routeFiltered ?? [], tripPreferences)
-      : (routeFiltered ?? [])) as RouteStopCandidate[]
+      ? applySuitabilityFilter(corridorFiltered, tripPreferences)
+      : corridorFiltered) as RouteStopCandidate[]
 
     const fuelStationMap = new Map<string, FuelStationOption>()
 
@@ -728,11 +748,12 @@ export async function POST(req: NextRequest) {
           segment.gapToNextFuelKm = nextFuel !== undefined ? Math.round(nextFuel - currentFuelKm) : undefined
 
           const parts: string[] = []
+          let gapBasedCritical = false
 
           if (segment.gapFromLastFuelKm !== undefined) {
             if (segment.gapFromLastFuelKm > HARD_FUEL_GAP_KM) {
               parts.push(`CRITICAL ${segment.gapFromLastFuelKm} km since last fuel — DANGEROUS GAP`)
-              segment.fuelCritical = true
+              gapBasedCritical = true
             } else if (segment.gapFromLastFuelKm > fuelSafeKm) {
               parts.push(`${segment.gapFromLastFuelKm} km since last fuel — fill up here`)
             } else {
@@ -743,7 +764,7 @@ export async function POST(req: NextRequest) {
           if (segment.gapToNextFuelKm !== undefined) {
             if (segment.gapToNextFuelKm > HARD_FUEL_GAP_KM) {
               parts.push(`CRITICAL next fuel ${segment.gapToNextFuelKm} km away — DANGEROUS GAP`)
-              segment.fuelCritical = true
+              gapBasedCritical = true
             } else if (segment.gapToNextFuelKm > fuelSafeKm) {
               parts.push(`Next fuel ${segment.gapToNextFuelKm} km away — long gap ahead`)
             } else {
@@ -756,6 +777,7 @@ export async function POST(req: NextRequest) {
           }
 
           segment.fuelWarning = parts.length > 0 ? parts.join(" • ") : undefined
+          segment.fuelCritical = gapBasedCritical
           lastFuelKm = currentFuelKm
         } else {
           if (lastFuelKm !== null) {
@@ -765,12 +787,15 @@ export async function POST(req: NextRequest) {
               segment.fuelWarning = `CRITICAL ${gapToLast} km since last fuel — DANGEROUS GAP`
               segment.fuelCritical = true
             } else if (gapToLast > fuelSafeKm) {
-              segment.fuelWarning = `${gapToLast} km since last fuel — fuel-critical leg`
+              segment.fuelWarning = `${gapToLast} km since last fuel — long gap since last fuel`
+              segment.fuelCritical = true
             } else {
               segment.fuelWarning = `${gapToLast} km since last fuel`
+              segment.fuelCritical = false
             }
           } else {
             segment.fuelWarning = "No fuel data available for this section"
+            segment.fuelCritical = false
           }
         }
       }

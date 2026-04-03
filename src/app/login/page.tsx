@@ -42,7 +42,13 @@ export default function LoginPage() {
       })
 
       if (error) {
-        setError(error.message)
+        // Supabase returns a generic rate-limit message when the user doesn't exist
+        // (shouldCreateUser: false). Show a clearer message for purchasers.
+        if (error.message.toLowerCase().includes("user") || error.status === 422) {
+          setError("No account found for this email. If you recently purchased, check your inbox for an invite email or contact support.")
+        } else {
+          setError(error.message)
+        }
         return
       }
 

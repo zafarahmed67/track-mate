@@ -1,5 +1,8 @@
 import { supabaseAdmin } from "@/config/supabase"
 import { NextRequest, NextResponse } from "next/server"
+import { renderToBuffer, type DocumentProps } from "@react-pdf/renderer"
+import { createElement, type ReactElement, type JSXElementConstructor } from "react"
+import { TripPdfDocument, type PdfTrip } from "@/lib/trip-pdf"
 
 interface RouteParams {
   params: Promise<{ tripId: string }>
@@ -69,6 +72,57 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
         })),
       },
       exportedAt: new Date().toISOString(),
+    }
+
+    if (format === "pdf") {
+      const pdfTrip: PdfTrip = {
+        title: trip.title,
+        start_location_text: trip.start_location_text,
+        destination_text: trip.destination_text,
+        trip_duration_days: trip.trip_duration_days,
+        travel_pace: trip.travel_pace,
+        rig_type: trip.rig_type ?? null,
+        rig_length_m: trip.rig_length_m ?? null,
+        pet_friendly_required: trip.pet_friendly_required ?? false,
+        avoid_gravel_roads: trip.avoid_gravel_roads ?? false,
+        stay_preference: trip.stay_preference ?? null,
+        budget_preference: trip.budget_preference ?? null,
+        notes: trip.notes ?? null,
+        stops: stops.map((s) => ({
+          id: s.id,
+          location_name: s.stop?.location_name ?? "",
+          state: s.stop?.state,
+          nearest_town: s.stop?.nearest_town,
+          stay_type: s.stop?.stay_type,
+          why_stop_here: s.stop?.why_stop_here,
+          aao_tip: s.stop?.aao_tip,
+          road_suitability: s.stop?.road_suitability,
+          pet_friendly: s.stop?.pet_friendly,
+          cost_band: s.stop?.cost_band,
+          water: s.stop?.water,
+          distance_to_route_km: s.distance_to_route_km,
+        })),
+        exportedAt: new Date().toISOString(),
+      }
+
+      const element = createElement(TripPdfDocument, { trip: pdfTrip }) as ReactElement<
+        DocumentProps,
+        string | JSXElementConstructor<unknown>
+      >
+      const buffer = await renderToBuffer(element)
+      const uint8 = new Uint8Array(buffer)
+
+      const slug = (trip.title || "trip")
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/(^-|-$)/g, "")
+
+      return new NextResponse(uint8, {
+        headers: {
+          "Content-Type": "application/pdf",
+          "Content-Disposition": `attachment; filename="${slug}.pdf"`,
+        },
+      })
     }
 
     if (format === "html") {
