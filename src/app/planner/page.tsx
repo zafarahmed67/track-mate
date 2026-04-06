@@ -16,6 +16,7 @@ import {
   ArrowRight,
   ChevronRight,
 } from "lucide-react"
+import { hasAccess } from "@/lib/auth"
 
 interface Trip {
   id: string
@@ -28,10 +29,14 @@ interface Trip {
   created_at: string
 }
 
+const STATUS_FILTERS = ["all", "saved", "active", "draft"] as const
+type StatusFilter = (typeof STATUS_FILTERS)[number]
+
 export default function PlannerPage() {
   const router = useRouter()
   const [trips, setTrips] = useState<Trip[]>([])
   const [loading, setLoading] = useState(true)
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all")
 
   useEffect(() => {
     async function fetchTrips() {
@@ -41,6 +46,11 @@ export default function PlannerPage() {
 
         if (!user?.id) {
           router.replace("/login")
+          return
+        }
+
+        if (!hasAccess()) {
+          router.replace("/no-access")
           return
         }
 
@@ -145,8 +155,44 @@ export default function PlannerPage() {
             </Button>
           </div>
         ) : (
+          <>
+            {/* Status filter tabs */}
+            <div className="flex items-center gap-1 mb-6 border-b">
+              {STATUS_FILTERS.map((f) => {
+                const count = f === "all" ? trips.length : trips.filter((t) => t.status === f).length
+                return (
+                  <button
+                    key={f}
+                    onClick={() => setStatusFilter(f)}
+                    className={`px-4 py-2 text-sm font-medium capitalize border-b-2 transition-colors ${
+                      statusFilter === f
+                        ? "border-primary text-primary"
+                        : "border-transparent text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {f}
+                    {count > 0 && (
+                      <span className={`ml-1.5 rounded-full px-1.5 py-0.5 text-xs ${statusFilter === f ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground"}`}>
+                        {count}
+                      </span>
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+
+          {(() => {
+            const visible = statusFilter === "all" ? trips : trips.filter((t) => t.status === statusFilter)
+            if (visible.length === 0) {
+              return (
+                <div className="py-16 text-center">
+                  <p className="text-muted-foreground text-sm">No {statusFilter} trips yet.</p>
+                </div>
+              )
+            }
+            return (
           <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-            {trips.map((trip) => {
+            {visible.map((trip) => {
               const pace = getPaceIcon(trip.travel_pace)
               return (
                 <Link key={trip.id} href={`/planner/${trip.id}`} className="group">
@@ -223,6 +269,9 @@ export default function PlannerPage() {
               )
             })}
           </div>
+            )
+          })()}
+          </>
         )}
       </div>
     </main>

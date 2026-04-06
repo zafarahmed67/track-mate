@@ -80,11 +80,22 @@ export async function POST(req: NextRequest) {
             }
         }
 
-        const { data: existingUser } = await supabaseAdmin
+        // Try to find user by contact_id first, then fall back to email.
+        // Users who logged in via magic link before purchasing have no contact_id set yet.
+        let { data: existingUser } = await supabaseAdmin
             .from("users")
             .select("id")
             .eq("contact_id", data.contactId)
             .single()
+
+        if (!existingUser && data.email) {
+            const { data: emailUser } = await supabaseAdmin
+                .from("users")
+                .select("id")
+                .eq("email", data.email)
+                .single()
+            existingUser = emailUser
+        }
 
         let userId: string
 
@@ -104,6 +115,7 @@ export async function POST(req: NextRequest) {
                     location: data.location,
                     order_data: data.order,
                     workflow: data.workflow,
+                    access_status: "active",
                     updated_at: new Date().toISOString(),
                 })
                 .eq("id", existingUser.id)
@@ -133,6 +145,7 @@ export async function POST(req: NextRequest) {
                     location: data.location,
                     order_data: data.order,
                     workflow: data.workflow,
+                    access_status: "active",
                 })
                 .select("id")
                 .single()

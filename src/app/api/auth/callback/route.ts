@@ -34,40 +34,36 @@ export async function POST(req: NextRequest) {
     // Check if user already exists
     const { data: existingUser } = await supabaseAdmin
       .from("users")
-      .select("*")
+      .select("id, role, access_status")
       .eq("email", email)
       .single()
 
     if (existingUser) {
-      // Update existing user
-      const { error: updateError } = await supabaseAdmin
+      await supabaseAdmin
         .from("users")
-        .update({
-          updated_at: new Date().toISOString(),
-        })
+        .update({ updated_at: new Date().toISOString() })
         .eq("id", existingUser.id)
-
-      if (updateError) {
-        console.error("Error updating user:", updateError)
-      }
 
       return NextResponse.json({
         success: true,
         message: "User updated",
         userId: existingUser.id,
+        role: existingUser.role ?? "customer",
+        access_status: existingUser.access_status ?? "inactive",
       })
     }
 
-    // Create new user
+    // Create new user — no purchase yet so access is inactive until webhook fires
     const { data: newUser, error: insertError } = await supabaseAdmin
       .from("users")
       .insert({
         id: userId || crypto.randomUUID(),
         email: email,
         role: "customer",
+        access_status: "inactive",
         created_at: new Date().toISOString(),
       })
-      .select()
+      .select("id, role, access_status")
       .single()
 
     if (insertError) {
@@ -82,6 +78,8 @@ export async function POST(req: NextRequest) {
       success: true,
       message: "User created",
       userId: newUser?.id,
+      role: newUser?.role ?? "customer",
+      access_status: newUser?.access_status ?? "inactive",
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error"

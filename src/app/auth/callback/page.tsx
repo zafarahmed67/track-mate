@@ -16,7 +16,13 @@ const supabase = createClient(
   }
 )
 
-async function ensureUserInDatabase(email: string, userId: string): Promise<boolean> {
+interface UserRecord {
+  userId: string
+  role: string
+  access_status: string
+}
+
+async function ensureUserInDatabase(email: string, userId: string): Promise<UserRecord | null> {
   try {
     const response = await fetch("/api/auth/callback", {
       method: "POST",
@@ -24,9 +30,14 @@ async function ensureUserInDatabase(email: string, userId: string): Promise<bool
       body: JSON.stringify({ email, userId }),
     })
     const result = await response.json()
-    return result.success === true
+    if (!result.success) return null
+    return {
+      userId: result.userId,
+      role: result.role ?? "customer",
+      access_status: result.access_status ?? "inactive",
+    }
   } catch {
-    return false
+    return null
   }
 }
 
@@ -57,9 +68,9 @@ function AuthCallbackContent() {
           }
 
           if (session) {
-            const userCreated = await ensureUserInDatabase(session.user.email!, session.user.id)
-            
-            if (!userCreated) {
+            const userRecord = await ensureUserInDatabase(session.user.email!, session.user.id)
+
+            if (!userRecord) {
               setRedirecting(true)
               router.replace("/login?error=user_not_found")
               return
@@ -72,9 +83,11 @@ function AuthCallbackContent() {
             localStorage.setItem("trackmate_user", JSON.stringify({
               id: session.user.id,
               email: session.user.email,
+              role: userRecord.role,
+              access_status: userRecord.access_status,
             }))
 
-            router.replace("/planner")
+            router.replace(userRecord.access_status === "active" || userRecord.role === "admin" ? "/planner" : "/no-access")
             return
           }
         }
@@ -82,9 +95,9 @@ function AuthCallbackContent() {
         const { data: { session } } = await supabase.auth.getSession()
 
         if (session) {
-          const userCreated = await ensureUserInDatabase(session.user.email!, session.user.id)
-          
-          if (!userCreated) {
+          const userRecord = await ensureUserInDatabase(session.user.email!, session.user.id)
+
+          if (!userRecord) {
             setRedirecting(true)
             router.replace("/login?error=user_not_found")
             return
@@ -97,9 +110,11 @@ function AuthCallbackContent() {
           localStorage.setItem("trackmate_user", JSON.stringify({
             id: session.user.id,
             email: session.user.email,
+            role: userRecord.role,
+            access_status: userRecord.access_status,
           }))
 
-          router.replace("/planner")
+          router.replace(userRecord.access_status === "active" || userRecord.role === "admin" ? "/planner" : "/no-access")
           return
         }
 
@@ -108,9 +123,9 @@ function AuthCallbackContent() {
             const { data: { session } } = await supabase.auth.getSession()
 
             if (session) {
-              const userCreated = await ensureUserInDatabase(session.user.email!, session.user.id)
-              
-              if (!userCreated) {
+              const userRecord = await ensureUserInDatabase(session.user.email!, session.user.id)
+
+              if (!userRecord) {
                 setRedirecting(true)
                 router.replace("/login?error=user_not_found")
                 return
@@ -123,9 +138,11 @@ function AuthCallbackContent() {
               localStorage.setItem("trackmate_user", JSON.stringify({
                 id: session.user.id,
                 email: session.user.email,
+                role: userRecord.role,
+                access_status: userRecord.access_status,
               }))
 
-              router.replace("/planner")
+              router.replace(userRecord.access_status === "active" || userRecord.role === "admin" ? "/planner" : "/no-access")
             }
           }
         })

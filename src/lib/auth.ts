@@ -5,7 +5,7 @@ export function getStoredToken(): string | null {
   return localStorage.getItem("trackmate_access_token")
 }
 
-export function getStoredUser(): { id: string; email: string } | null {
+export function getStoredUser(): { id: string; email: string; role?: string; access_status?: string } | null {
   if (typeof window === "undefined") return null
   const userStr = localStorage.getItem("trackmate_user")
   if (!userStr) return null
@@ -14,6 +14,13 @@ export function getStoredUser(): { id: string; email: string } | null {
   } catch {
     return null
   }
+}
+
+export function hasAccess(): boolean {
+  const user = getStoredUser()
+  if (!user) return false
+  if (user.role === "admin") return true
+  return user.access_status === "active"
 }
 
 export function isAuthenticated(): boolean {
@@ -51,16 +58,20 @@ export async function refreshSession(): Promise<boolean> {
         localStorage.setItem("trackmate_refresh_token", newSession.refresh_token ?? "")
         localStorage.setItem("trackmate_expires_at", String(newSession.expires_at))
         localStorage.setItem("trackmate_token_type", newSession.token_type)
+        const existingUser = getStoredUser()
         localStorage.setItem("trackmate_user", JSON.stringify({
           id: newSession.user.id,
           email: newSession.user.email,
+          role: existingUser?.role,
+          access_status: existingUser?.access_status,
         }))
         return true
       }
     }
     return false
   }
-  
+
+  const existingUser = getStoredUser()
   localStorage.setItem("trackmate_access_token", session.access_token)
   localStorage.setItem("trackmate_refresh_token", session.refresh_token ?? "")
   localStorage.setItem("trackmate_expires_at", String(session.expires_at))
@@ -68,6 +79,8 @@ export async function refreshSession(): Promise<boolean> {
   localStorage.setItem("trackmate_user", JSON.stringify({
     id: session.user.id,
     email: session.user.email,
+    role: existingUser?.role,
+    access_status: existingUser?.access_status,
   }))
   return true
 }

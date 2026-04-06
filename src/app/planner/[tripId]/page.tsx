@@ -12,7 +12,7 @@ import { Badge } from "@/components/ui/badge"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { toast } from "sonner"
 import type { Stop } from "@/lib/types"
-import { getStoredUser } from "@/lib/auth"
+import { getStoredUser, hasAccess } from "@/lib/auth"
 import {
   Route,
   MapPin,
@@ -34,6 +34,14 @@ import {
   GripVertical,
   Sparkles,
   Loader2,
+  MessageSquare,
+  Send,
+  RefreshCw,
+  ChevronRight,
+  History,
+  RotateCcw,
+  AlertTriangle,
+  X,
 } from "lucide-react"
 
 const mapContainerStyle = {
@@ -143,13 +151,25 @@ interface RouteMeta {
 interface DayNarrative {
   dayNumber: number
   narrative: string
+  suggestedStay: {
+    name: string
+    stopType: string
+    whyStopHere: string
+    aaoTip: string
+  } | null
   aaoTips: string[]
   gapNote: string | null
+  fuelNote: string | null
 }
 
 interface TripNarrative {
   overview: string
   days: DayNarrative[]
+  tripNotes: {
+    fuelGuidance: string | null
+    remoteWarnings: string | null
+    roadConditions: string | null
+  } | null
   generatedAt: string
 }
 
@@ -258,6 +278,16 @@ export default function PlannerDetailPage() {
   const dragSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }))
   const [tripNarrative, setTripNarrative] = useState<TripNarrative | null>(null)
   const [narrativeLoading, setNarrativeLoading] = useState(false)
+  const [itineraryVersions, setItineraryVersions] = useState<Array<{ id: string; version: number; status: string; model_name: string | null; created_at: string }>>([])
+  const [itineraryVersionsLoaded, setItineraryVersionsLoaded] = useState(false)
+  const [showVersionHistory, setShowVersionHistory] = useState(false)
+  const [restoringVersion, setRestoringVersion] = useState<string | null>(null)
+  const [chatMessages, setChatMessages] = useState<Array<{ id?: string; role: string; message_text: string; created_at?: string }>>([])
+  const [chatInput, setChatInput] = useState("")
+  const [chatLoading, setChatLoading] = useState(false)
+  const [chatMessagesLoaded, setChatMessagesLoaded] = useState(false)
+  const [refilterBanner, setRefilterBanner] = useState<{ preferenceHint: string | null } | null>(null)
+  const chatEndRef = useRef<HTMLDivElement | null>(null)
 
   const applyDraggedOrderToTripStops = (tripStops: TripStop[], orderedStopIds: string[]) => {
     if (orderedStopIds.length === 0) return tripStops
@@ -924,6 +954,177 @@ export default function PlannerDetailPage() {
       toast.error("Failed to rebuild plan")
     } finally {
       setRouteOptionsLoading(false)
+    }
+  }
+
+  const handleGenerateNarrative = async () => {
+    if (!trip || !userId) return
+    setNarrativeLoading(true)
+    try {
+      const daysPayload = daySegments.map((segment, index) => {
+        const verifiedStops = segment.verifiedStops.map((s) => ({
+          location_name: s.location_name,
+          stay_type: s.stay_type ?? null,
+          route_type: s.route_type ?? null,
+          aao_tip: s.aao_tip ?? null,
+          why_stop_here: s.why_stop_here ?? null,
+          why_we_d_stay_again: s.why_we_d_stay_again ?? null,
+        }))
+
+        return {
+          dayNumber: index + 1,
+          fromLocation: index === 0
+            ? trip.start_location_text
+            : (getSelectedOption(daySegments[index - 1], index - 1)?.location_name ?? null),
+          toLocation: index === daySegments.length - 1
+            ? trip.destination_text
+            : (getSelectedOption(segment, index)?.location_name ?? null),
+          distanceKm: estimateSegmentDistance(segment),
+          driveTimeMinutes: estimateSegmentDuration(segment),
+          verifiedStops,
+          // Explicit list for AI enforcement — AI must only pick from these names
+          allowedStopNames: verifiedStops.map((s) => s.location_name),
+          // Fuel data
+          fuelCritical: segment.fuelCritical ?? false,
+          isRemote: segment.isRemote ?? false,
+          fuelWarning: segment.fuelWarning ?? null,
+          primaryFuelStop: segment.primaryFuelSuggestion
+            ? { name: segment.primaryFuelSuggestion.name, distanceFromStartKm: segment.primaryFuelSuggestion.distanceFromStartKm ?? null }
+            : null,
+          gapFromLastFuelKm: segment.gapFromLastFuelKm ?? null,
+          gapToNextFuelKm: segment.gapToNextFuelKm ?? null,
+          degradedMode: segment.degradedMode ?? false,
+        }
+      })
+
+      // Top-level fuel summary across all segments
+      const fuelSummary = {
+        totalFuelStations: routeMeta.fuelStations?.length ?? 0,
+        fuelCriticalDays: daySegments.filter((s) => s.fuelCritical).length,
+        remoteDays: daySegments.filter((s) => s.isRemote).length,
+        planningMode: routeMeta.planningMode ?? "standard",
+      }
+
+      const response = await fetch(`/api/trips/${tripId}/narrative`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId,
+          trip: { title: trip.title, travel_pace: trip.travel_pace, trip_duration_days: trip.trip_duration_days },
+          corridor: routeMeta.corridor,
+          totalDistanceKm: routeMeta.drivingInfo?.totalDistanceKm,
+          fuelSummary,
+          days: daysPayload,
+        }),
+      })
+      const result = await response.json()
+      if (result.success) {
+        setTripNarrative(result.narrative)
+        toast.success("AI narrative generated and saved")
+        // Refresh version history after new generation
+        if (userId) {
+          fetch(`/api/trips/${tripId}/itineraries?user_id=${userId}`)
+            .then((r) => r.json())
+            .then((d) => { if (d.success) { setItineraryVersions(d.itineraries); setItineraryVersionsLoaded(true) } })
+            .catch(() => {})
+        }
+      } else {
+        toast.error(result.error ?? "Failed to generate narrative")
+      }
+    } catch (error) {
+      console.error("Error generating narrative:", error)
+      toast.error("Error generating narrative")
+    } finally {
+      setNarrativeLoading(false)
+    }
+  }
+
+  const loadItineraryVersions = async () => {
+    if (!userId || itineraryVersionsLoaded) return
+    try {
+      const response = await fetch(`/api/trips/${tripId}/itineraries?user_id=${userId}`)
+      const data = await response.json()
+      if (data.success) {
+        setItineraryVersions(data.itineraries)
+        setItineraryVersionsLoaded(true)
+      }
+    } catch (error) {
+      console.error("Error loading itinerary versions:", error)
+    }
+  }
+
+  const handleRestoreVersion = async (itineraryId: string) => {
+    if (!userId || restoringVersion) return
+    setRestoringVersion(itineraryId)
+    try {
+      const response = await fetch(`/api/trips/${tripId}/itineraries`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId, itineraryId }),
+      })
+      const result = await response.json()
+      if (result.success) {
+        setTripNarrative(result.narrative as TripNarrative)
+        setItineraryVersions((prev) =>
+          prev.map((v) => ({ ...v, status: v.id === itineraryId ? "active" : "superseded" }))
+        )
+        setShowVersionHistory(false)
+        toast.success("Narrative version restored")
+      } else {
+        toast.error(result.error ?? "Failed to restore version")
+      }
+    } catch (error) {
+      console.error("Error restoring version:", error)
+      toast.error("Error restoring version")
+    } finally {
+      setRestoringVersion(null)
+    }
+  }
+
+  const loadChatMessages = async () => {
+    if (!userId || chatMessagesLoaded) return
+    try {
+      const response = await fetch(`/api/trips/${tripId}/messages?user_id=${userId}`)
+      const data = await response.json()
+      if (data.success) {
+        setChatMessages(data.messages)
+        setChatMessagesLoaded(true)
+      }
+    } catch (error) {
+      console.error("Error loading chat messages:", error)
+    }
+  }
+
+  const handleSendMessage = async () => {
+    if (!chatInput.trim() || !userId || chatLoading) return
+    const text = chatInput.trim()
+    setChatInput("")
+    setChatMessages((prev) => [...prev, { role: "user", message_text: text }])
+    setChatLoading(true)
+    try {
+      const response = await fetch(`/api/trips/${tripId}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId,
+          message_text: text,
+          tripContext: tripNarrative
+            ? { overview: tripNarrative.overview, corridor: routeMeta.corridor, days: tripNarrative.days.length }
+            : { title: trip?.title, corridor: routeMeta.corridor },
+        }),
+      })
+      const result = await response.json()
+      if (result.success && result.message) {
+        setChatMessages((prev) => [...prev, result.message])
+        if (result.action?.type === "refilter") {
+          setRefilterBanner({ preferenceHint: result.action.preferenceHint ?? null })
+        }
+      }
+    } catch (error) {
+      console.error("Error sending message:", error)
+      toast.error("Failed to send message")
+    } finally {
+      setChatLoading(false)
     }
   }
 
@@ -1778,6 +1979,9 @@ export default function PlannerDetailPage() {
       const storedUser = getStoredUser()
       const uid = storedUser?.id
 
+      if (!uid) { router.replace("/login"); return }
+      if (!hasAccess()) { router.replace("/no-access"); return }
+
       try {
         const response = await fetch(`/api/trips/${tripId}${uid ? `?user_id=${uid}` : ""}`)
         const data = await response.json()
@@ -1788,6 +1992,29 @@ export default function PlannerDetailPage() {
           if (savedNarrative?.days?.length) {
             setTripNarrative(savedNarrative)
           }
+        }
+
+        // Load itinerary versions + chat history in parallel with stops
+        if (uid) {
+          fetch(`/api/trips/${tripId}/itineraries?user_id=${uid}`)
+            .then((r) => r.json())
+            .then((d) => {
+              if (d.success) {
+                setItineraryVersions(d.itineraries)
+                setItineraryVersionsLoaded(true)
+              }
+            })
+            .catch(() => {})
+
+          fetch(`/api/trips/${tripId}/messages?user_id=${uid}`)
+            .then((r) => r.json())
+            .then((d) => {
+              if (d.success) {
+                setChatMessages(d.messages)
+                setChatMessagesLoaded(true)
+              }
+            })
+            .catch(() => {})
         }
 
         const stopsResponse = await fetch(`/api/trips/${tripId}/stops`)
@@ -1889,6 +2116,10 @@ export default function PlannerDetailPage() {
     fetchTripData()
   }, [tripId])
 
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" })
+  }, [chatMessages])
+
   const mapCenter = useMemo(() => {
     if (trip?.start_lat && trip?.start_lng) {
       return { lat: trip.start_lat, lng: trip.start_lng }
@@ -1988,6 +2219,19 @@ export default function PlannerDetailPage() {
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleGenerateNarrative}
+                disabled={narrativeLoading || !routeMeta.segments?.length}
+              >
+                {narrativeLoading ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <Sparkles className="mr-2 h-4 w-4" />
+                )}
+                {narrativeLoading ? "Generating..." : tripNarrative ? "Regenerate" : "AI Narrative"}
+              </Button>
               <Button variant="outline" size="sm" onClick={handleSaveTrip} disabled={saving}>
                 <Save className="mr-2 h-4 w-4" />
                 {saving ? "Saving..." : "Save"}
@@ -2851,6 +3095,206 @@ export default function PlannerDetailPage() {
                 </div>
               </CardContent>
             </Card>
+
+            {/* AI Narrative Card */}
+            <Card className="border">
+              <CardHeader className="pb-3">
+                <div className="flex items-center justify-between">
+                  <CardTitle className="text-lg flex items-center gap-2">
+                    <Sparkles className="h-5 w-5 text-primary" />
+                    AI Narrative
+                    {itineraryVersions.length > 0 && (
+                      <span className="text-xs font-normal text-muted-foreground">
+                        v{itineraryVersions.find((v) => v.status === "active")?.version ?? itineraryVersions[0]?.version}
+                      </span>
+                    )}
+                  </CardTitle>
+                  <div className="flex items-center gap-2">
+                    {itineraryVersions.length > 1 && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setShowVersionHistory((prev) => !prev)}
+                        title="View version history"
+                      >
+                        <History className="h-4 w-4" />
+                        <span className="ml-1 text-xs">{itineraryVersions.length}</span>
+                      </Button>
+                    )}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleGenerateNarrative}
+                      disabled={narrativeLoading || !routeMeta.segments?.length}
+                    >
+                      {narrativeLoading ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <RefreshCw className="h-4 w-4" />
+                      )}
+                      <span className="ml-2">{narrativeLoading ? "Generating..." : tripNarrative ? "Regenerate" : "Generate"}</span>
+                    </Button>
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {/* Version history panel */}
+                {showVersionHistory && itineraryVersions.length > 0 && (
+                  <div className="rounded-2xl border border-muted/30 bg-muted/5 p-3 space-y-2">
+                    <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Version History</p>
+                    {itineraryVersions.map((v) => (
+                      <div
+                        key={v.id}
+                        className={`flex items-center justify-between rounded-xl px-3 py-2 text-sm ${
+                          v.status === "active"
+                            ? "bg-primary/10 border border-primary/20"
+                            : "bg-background border border-muted/20"
+                        }`}
+                      >
+                        <div>
+                          <span className="font-medium">v{v.version}</span>
+                          <span className="ml-2 text-xs text-muted-foreground">
+                            {new Date(v.created_at).toLocaleString("en-AU", { dateStyle: "short", timeStyle: "short" })}
+                          </span>
+                          {v.status === "active" && (
+                            <span className="ml-2 text-xs text-primary font-medium">active</span>
+                          )}
+                        </div>
+                        {v.status !== "active" && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => handleRestoreVersion(v.id)}
+                            disabled={restoringVersion === v.id}
+                            className="h-7 px-2 text-xs"
+                          >
+                            {restoringVersion === v.id ? (
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                            ) : (
+                              <RotateCcw className="h-3 w-3" />
+                            )}
+                            <span className="ml-1">Restore</span>
+                          </Button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {!tripNarrative && !narrativeLoading && (
+                  <div className="rounded-2xl bg-muted/5 p-6 text-center text-sm text-muted-foreground border border-dashed">
+                    <Sparkles className="h-8 w-8 mx-auto mb-2 text-primary/40" />
+                    <p className="font-medium mb-1">No narrative yet</p>
+                    <p>Generate an AI-written overview of your trip with day-by-day highlights and tips.</p>
+                  </div>
+                )}
+                {narrativeLoading && (
+                  <div className="space-y-3">
+                    {Array.from({ length: 3 }).map((_, i) => (
+                      <div key={i} className="rounded-2xl bg-muted/10 h-20 animate-pulse" />
+                    ))}
+                  </div>
+                )}
+                {tripNarrative && !narrativeLoading && (
+                  <div className="space-y-4">
+                    {/* Overview */}
+                    <div className="rounded-2xl bg-primary/5 border border-primary/10 p-4">
+                      <p className="text-sm font-medium text-primary mb-1">Overview</p>
+                      <p className="text-sm">{tripNarrative.overview}</p>
+                    </div>
+
+                    {/* Day-by-day */}
+                    {tripNarrative.days.map((day) => (
+                      <div key={day.dayNumber} className="rounded-2xl bg-muted/5 border border-muted/20 p-4 space-y-3">
+                        <div className="flex items-center gap-2">
+                          <div className="flex h-6 w-6 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">
+                            {day.dayNumber}
+                          </div>
+                          <span className="text-sm font-semibold">Day {day.dayNumber}</span>
+                        </div>
+
+                        <p className="text-sm text-muted-foreground">{day.narrative}</p>
+
+                        {/* Suggested stay — structured fields */}
+                        {day.suggestedStay ? (
+                          <div className="rounded-xl bg-background border border-muted/30 p-3 space-y-1">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-sm font-medium">{day.suggestedStay.name}</span>
+                              {day.suggestedStay.stopType && (
+                                <span className="text-xs text-muted-foreground bg-muted/30 px-2 py-0.5 rounded-full capitalize">
+                                  {day.suggestedStay.stopType}
+                                </span>
+                              )}
+                            </div>
+                            {day.suggestedStay.whyStopHere && (
+                              <p className="text-xs text-muted-foreground">{day.suggestedStay.whyStopHere}</p>
+                            )}
+                            {day.suggestedStay.aaoTip && (
+                              <p className="text-xs text-primary/80 italic">"{day.suggestedStay.aaoTip}"</p>
+                            )}
+                          </div>
+                        ) : (
+                          day.gapNote && (
+                            <div className="rounded-lg bg-amber-500/10 border border-amber-500/20 px-3 py-2 text-xs text-amber-800">
+                              {day.gapNote}
+                            </div>
+                          )
+                        )}
+
+                        {/* Extra AAO tips */}
+                        {day.aaoTips.length > 0 && (
+                          <ul className="space-y-1">
+                            {day.aaoTips.map((tip, i) => (
+                              <li key={i} className="flex items-start gap-2 text-xs text-muted-foreground">
+                                <ChevronRight className="h-3 w-3 mt-0.5 shrink-0 text-primary" />
+                                {tip}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+
+                        {/* Fuel note */}
+                        {day.fuelNote && (
+                          <div className="rounded-lg bg-orange-500/10 border border-orange-500/20 px-3 py-2 text-xs text-orange-800 flex items-start gap-2">
+                            <Fuel className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                            {day.fuelNote}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+
+                    {/* Trip notes */}
+                    {tripNarrative.tripNotes && (tripNarrative.tripNotes.fuelGuidance || tripNarrative.tripNotes.remoteWarnings || tripNarrative.tripNotes.roadConditions) && (
+                      <div className="rounded-2xl bg-muted/5 border border-muted/20 p-4 space-y-2">
+                        <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Trip Notes</p>
+                        {tripNarrative.tripNotes.fuelGuidance && (
+                          <p className="text-xs text-muted-foreground flex items-start gap-2">
+                            <Fuel className="h-3.5 w-3.5 mt-0.5 shrink-0 text-orange-500" />
+                            {tripNarrative.tripNotes.fuelGuidance}
+                          </p>
+                        )}
+                        {tripNarrative.tripNotes.remoteWarnings && (
+                          <p className="text-xs text-muted-foreground flex items-start gap-2">
+                            <Route className="h-3.5 w-3.5 mt-0.5 shrink-0 text-amber-500" />
+                            {tripNarrative.tripNotes.remoteWarnings}
+                          </p>
+                        )}
+                        {tripNarrative.tripNotes.roadConditions && (
+                          <p className="text-xs text-muted-foreground flex items-start gap-2">
+                            <Caravan className="h-3.5 w-3.5 mt-0.5 shrink-0 text-muted-foreground" />
+                            {tripNarrative.tripNotes.roadConditions}
+                          </p>
+                        )}
+                      </div>
+                    )}
+
+                    <p className="text-xs text-muted-foreground text-right">
+                      Generated {new Date(tripNarrative.generatedAt).toLocaleString("en-AU")}
+                    </p>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
           </div>
 
           <div className="space-y-5">
@@ -2991,6 +3435,105 @@ export default function PlannerDetailPage() {
                   Remote travel ahead, limited stop density north of Laura, and fuel reliance are part of this route. Booking is recommended for busy coastal and northern holiday areas.
                 </div>
                 <p className="text-muted-foreground">This note is separate from planning alerts and provides general route guidance for the trip.</p>
+              </CardContent>
+            </Card>
+
+            {/* AI Chat Card */}
+            <Card className="border">
+              <CardHeader className="pb-3">
+                <div className="flex items-center justify-between">
+                  <CardTitle className="text-lg flex items-center gap-2">
+                    <MessageSquare className="h-5 w-5 text-primary" />
+                    Ask AI
+                    {chatMessages.length > 0 && (
+                      <span className="text-xs font-normal text-muted-foreground">{chatMessages.length} messages</span>
+                    )}
+                  </CardTitle>
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                {chatMessages.length > 0 && (
+                  <div className="max-h-72 overflow-y-auto space-y-3 pr-1">
+                    {chatMessages.map((msg, i) => (
+                      <div
+                        key={msg.id ?? i}
+                        className={`rounded-2xl px-3 py-2 text-sm ${
+                          msg.role === "user"
+                            ? "bg-primary text-primary-foreground ml-4"
+                            : "bg-muted/10 border border-muted/20 mr-4"
+                        }`}
+                      >
+                        {msg.message_text}
+                      </div>
+                    ))}
+                    {chatLoading && (
+                      <div className="bg-muted/10 border border-muted/20 rounded-2xl px-3 py-2 mr-4 flex items-center gap-2 text-sm text-muted-foreground">
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                        Thinking...
+                      </div>
+                    )}
+                    <div ref={chatEndRef} />
+                  </div>
+                )}
+                {chatMessages.length === 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    Ask anything about your trip — stops, fuel, best time to drive, what to expect.
+                  </p>
+                )}
+                {refilterBanner && (
+                  <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-start gap-2">
+                        <AlertTriangle className="h-3.5 w-3.5 text-amber-600 mt-0.5 shrink-0" />
+                        <div>
+                          <p className="font-medium text-amber-800">Stop re-filter needed</p>
+                          <p className="text-amber-700 mt-0.5">
+                            Your request changes{refilterBanner.preferenceHint ? ` your ${refilterBanner.preferenceHint}` : " stop preferences"}. Use <strong>Edit Trip</strong> to update preferences, then <strong>Rebuild plan</strong> and <strong>Regenerate</strong> narrative.
+                          </p>
+                        </div>
+                      </div>
+                      <button onClick={() => setRefilterBanner(null)} className="shrink-0 text-amber-600 hover:text-amber-800">
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                    <div className="flex gap-2 mt-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-6 px-2 text-xs border-amber-500/40 text-amber-800"
+                        onClick={() => { router.push(`/planner/${tripId}/edit`); setRefilterBanner(null) }}
+                      >
+                        Edit Trip
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-6 px-2 text-xs text-amber-700"
+                        onClick={() => setRefilterBanner(null)}
+                      >
+                        Dismiss
+                      </Button>
+                    </div>
+                  </div>
+                )}
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSendMessage()}
+                    placeholder="Ask about your route..."
+                    disabled={chatLoading}
+                    className="flex-1 rounded-xl border bg-background px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-primary disabled:opacity-50"
+                  />
+                  <Button
+                    size="icon"
+                    onClick={handleSendMessage}
+                    disabled={chatLoading || !chatInput.trim()}
+                  >
+                    {chatLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                  </Button>
+                </div>
               </CardContent>
             </Card>
           </div>

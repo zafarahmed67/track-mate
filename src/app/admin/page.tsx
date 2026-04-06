@@ -17,6 +17,7 @@ import {
   ArrowRight,
   ClipboardList,
   RefreshCw,
+  FlaskConical,
 } from "lucide-react"
 
 interface Stats {
@@ -32,10 +33,23 @@ interface Stats {
   }>
 }
 
+interface TestWebhookResult {
+  success: boolean
+  testOrderId?: string
+  webhookStatus?: number
+  webhookResult?: { success: boolean; userId?: string; magicLink?: string; duplicate?: boolean; error?: string }
+  error?: string
+}
+
 export default function AdminDashboard() {
   const router = useRouter()
   const [stats, setStats] = useState<Stats | null>(null)
   const [loading, setLoading] = useState(true)
+  const [testEmail, setTestEmail] = useState("")
+  const [testFirstName, setTestFirstName] = useState("")
+  const [testLastName, setTestLastName] = useState("")
+  const [testRunning, setTestRunning] = useState(false)
+  const [testResult, setTestResult] = useState<TestWebhookResult | null>(null)
 
   useEffect(() => {
     const user = getStoredUser()
@@ -60,6 +74,31 @@ export default function AdminDashboard() {
       if (data.success) setStats(data)
     } finally {
       setLoading(false)
+    }
+  }
+
+  async function runTestPurchase() {
+    if (!testEmail.trim()) return
+    setTestRunning(true)
+    setTestResult(null)
+    try {
+      const user = getStoredUser() as { id: string } | null
+      const res = await fetch("/api/admin/test-webhook", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          adminUserId: user?.id,
+          email: testEmail.trim(),
+          firstName: testFirstName.trim() || undefined,
+          lastName: testLastName.trim() || undefined,
+        }),
+      })
+      const data = await res.json()
+      setTestResult(data)
+    } catch (err) {
+      setTestResult({ success: false, error: String(err) })
+    } finally {
+      setTestRunning(false)
     }
   }
 
@@ -244,6 +283,110 @@ export default function AdminDashboard() {
               )}
             </CardContent>
           </Card>
+        {/* Test Purchase Flow */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <FlaskConical className="h-4 w-4 text-purple-600" />
+              Test Purchase Flow
+            </CardTitle>
+            <p className="text-sm text-gray-500 mt-1">
+              Simulate a Fab Funnels purchase webhook without a real payment. Creates a user + sends a magic-link access email.
+            </p>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div>
+                <label className="text-xs font-medium text-gray-600 block mb-1">Email <span className="text-red-500">*</span></label>
+                <input
+                  type="email"
+                  value={testEmail}
+                  onChange={(e) => setTestEmail(e.target.value)}
+                  placeholder="test@example.com"
+                  className="w-full rounded-lg border bg-background px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-purple-500"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-gray-600 block mb-1">First name</label>
+                <input
+                  type="text"
+                  value={testFirstName}
+                  onChange={(e) => setTestFirstName(e.target.value)}
+                  placeholder="Jane"
+                  className="w-full rounded-lg border bg-background px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-purple-500"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-gray-600 block mb-1">Last name</label>
+                <input
+                  type="text"
+                  value={testLastName}
+                  onChange={(e) => setTestLastName(e.target.value)}
+                  placeholder="Smith"
+                  className="w-full rounded-lg border bg-background px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-purple-500"
+                />
+              </div>
+            </div>
+
+            <Button
+              onClick={runTestPurchase}
+              disabled={testRunning || !testEmail.trim()}
+              className="bg-purple-600 hover:bg-purple-700 text-white"
+            >
+              {testRunning ? (
+                <>
+                  <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+                  Running...
+                </>
+              ) : (
+                <>
+                  <FlaskConical className="h-4 w-4 mr-2" />
+                  Run Test Purchase
+                </>
+              )}
+            </Button>
+
+            {testResult && (
+              <div className={`rounded-xl border p-4 text-sm space-y-2 ${testResult.success ? "border-green-200 bg-green-50" : "border-red-200 bg-red-50"}`}>
+                <div className="flex items-center gap-2 font-medium">
+                  {testResult.success ? (
+                    <CheckCircle2 className="h-4 w-4 text-green-600" />
+                  ) : (
+                    <AlertCircle className="h-4 w-4 text-red-600" />
+                  )}
+                  <span className={testResult.success ? "text-green-800" : "text-red-800"}>
+                    {testResult.success ? "Test purchase succeeded" : "Test purchase failed"}
+                  </span>
+                  {testResult.webhookResult?.duplicate && (
+                    <Badge variant="outline" className="text-xs">duplicate — already processed</Badge>
+                  )}
+                </div>
+                {testResult.testOrderId && (
+                  <p className="text-gray-600">Order ID: <code className="bg-gray-100 px-1 rounded text-xs">{testResult.testOrderId}</code></p>
+                )}
+                {testResult.webhookResult?.userId && (
+                  <p className="text-gray-600">User ID: <code className="bg-gray-100 px-1 rounded text-xs">{testResult.webhookResult.userId}</code></p>
+                )}
+                {testResult.webhookResult?.magicLink && (
+                  <div>
+                    <p className="text-gray-600 mb-1">Magic link generated:</p>
+                    <a
+                      href={testResult.webhookResult.magicLink}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs text-purple-700 underline break-all"
+                    >
+                      {testResult.webhookResult.magicLink}
+                    </a>
+                  </div>
+                )}
+                {(testResult.error || testResult.webhookResult?.error) && (
+                  <p className="text-red-700">{testResult.error || testResult.webhookResult?.error}</p>
+                )}
+              </div>
+            )}
+          </CardContent>
+        </Card>
         </div>
       </div>
     </div>
