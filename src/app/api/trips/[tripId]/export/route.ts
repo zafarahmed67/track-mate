@@ -61,6 +61,29 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
       )
     }
 
+    // Fetch the active AI-generated narrative for this trip
+    const { data: itineraryRecord } = await supabaseAdmin
+      .from("trip_itineraries")
+      .select("itinerary_json, trip_snapshot_json")
+      .eq("trip_id", tripId)
+      .eq("status", "active")
+      .order("version", { ascending: false })
+      .limit(1)
+      .single()
+
+    const narrative = itineraryRecord?.itinerary_json as {
+      overview?: string
+      days?: Array<{
+        dayNumber: number
+        narrative: string
+        suggestedStay: { name: string; stopType: string; whyStopHere: string; aaoTip: string } | null
+        aaoTips: string[]
+        gapNote: string | null
+        fuelNote: string | null
+      }>
+      tripNotes?: { fuelGuidance: string | null; remoteWarnings: string | null; roadConditions: string | null }
+    } | null
+
     const exportData = {
       trip: {
         ...trip,
@@ -88,6 +111,7 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
         stay_preference: trip.stay_preference ?? null,
         budget_preference: trip.budget_preference ?? null,
         notes: trip.notes ?? null,
+        narrative: narrative ?? undefined,
         stops: stops.map((s) => ({
           id: s.id,
           location_name: s.stop?.location_name ?? "",

@@ -399,61 +399,88 @@ async function generateCustomStop(
       }
     }
 
-    // Calculate probe points at 20%, 40%, 60%, 80% along route
-    const probePoints = [0.2, 0.4, 0.6, 0.8].map((fraction) => ({
-      lat: startLat + (destLat - startLat) * fraction,
-      lng: startLng + (destLng - startLng) * fraction,
-    }))
+    const directDistanceKmForProbes = calculateDistance(startLat, startLng, destLat, destLng)
 
-    const placeTypes = ["gas_station", "campground", "supermarket"]
+    // More probe points for longer routes (every ~150km straight-line)
+    const probeCount = Math.max(4, Math.min(10, Math.ceil(directDistanceKmForProbes / 150)))
+    const probePoints = Array.from({ length: probeCount }, (_, i) => {
+      const fraction = (i + 1) / (probeCount + 1)
+      return {
+        lat: startLat + (destLat - startLat) * fraction,
+        lng: startLng + (destLng - startLng) * fraction,
+      }
+    })
+
+    // Irrelevant name patterns to exclude from overnight stop options
+    const OVERNIGHT_EXCLUDE = /hotel|motel|hostel|backpacker|resort|inn\b|b&b|bed and breakfast|airbnb/i
+
+    // Search config: [type, keyword, radius]
+    // rv_park is Google's type for caravan parks; campground covers national park camps.
+    // Use a large radius (40km) so remote Australian searches return results.
+    const overnightSearches: Array<{ type: string; keyword?: string; radius: number }> = [
+      { type: "rv_park", radius: 40000 },
+      { type: "campground", radius: 40000 },
+      { type: "rv_park", keyword: "caravan park", radius: 50000 },
+    ]
+
     const seenPlaces = new Set<string>()
     const customStopCandidates: Array<Record<string, unknown> & { distance_from_start_km: number }> = []
     let totalFetched = 0
 
-    // Search at each probe point
+    // Search at each probe point for overnight stops (caravan parks, campgrounds)
     for (const point of probePoints) {
-      for (const placeType of placeTypes) {
+      for (const search of overnightSearches) {
         try {
+          const params = new URLSearchParams({
+            location: `${point.lat},${point.lng}`,
+            radius: String(search.radius),
+            type: search.type,
+            key: apiKey,
+          })
+          if (search.keyword) params.set("keyword", search.keyword)
+
           const response = await fetch(
-            `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${point.lat},${point.lng}&radius=20000&type=${placeType}&key=${apiKey}`
+            `https://maps.googleapis.com/maps/api/place/nearbysearch/json?${params.toString()}`
           )
 
           const data = await response.json()
           if (data.results) {
             totalFetched += data.results.length
-            // Take up to 5 results per type per point
             data.results.slice(0, 5).forEach((place: Record<string, unknown>) => {
+              const name = String(place.name ?? "")
+              // Skip irrelevant accommodation types (hotels, motels, etc.)
+              if (OVERNIGHT_EXCLUDE.test(name)) return
+
               const geometry = place.geometry as {
                 location?: { lat?: number; lng?: number }
               } | null
-              const key = `${place.name}-${geometry?.location?.lat}-${geometry?.location?.lng}`
+              const lat = Number(geometry?.location?.lat ?? 0)
+              const lng = Number(geometry?.location?.lng ?? 0)
+              if (!lat || !lng) return
+
+              const key = `${name.toLowerCase().trim()}|${lat.toFixed(4)}|${lng.toFixed(4)}`
               if (!seenPlaces.has(key)) {
                 seenPlaces.add(key)
-                const distanceFromStart = calculateDistance(
-                  startLat,
-                  startLng,
-                  Number(geometry?.location?.lat ?? 0),
-                  Number(geometry?.location?.lng ?? 0)
-                )
+                const distanceFromStart = calculateDistance(startLat, startLng, lat, lng)
 
                 customStopCandidates.push({
                   trip_id: tripId,
-                  location_name: place.name,
-                  latitude: String(geometry?.location?.lat ?? ""),
-                  longitude: String(geometry?.location?.lng ?? ""),
-                  place_type: placeType,
+                  location_name: name,
+                  latitude: String(lat),
+                  longitude: String(lng),
+                  place_type: "campground",
                   distance_from_start_km: Math.round(distanceFromStart * 10) / 10,
                 })
               }
             })
           }
         } catch (error) {
-          console.warn(`Failed to search ${placeType} at probe point:`, error)
+          console.warn(`Failed to search ${search.type} at probe point:`, error)
         }
       }
     }
 
-    const directDistanceKm = calculateDistance(startLat, startLng, destLat, destLng)
+    const directDistanceKm = directDistanceKmForProbes
     const targetCustomStops = Math.max(2, Math.min(10, Math.round(directDistanceKm / 180)))
 
     const orderedCustomCandidates = [...customStopCandidates].sort(
@@ -897,8 +924,7 @@ export async function POST(req: NextRequest) {
       // [3/4] GENERATE CUSTOM STOPS FROM GOOGLE PLACES
       // ============================================================
       console.log("[3/4] 🌐 Generating custom stops from Google Places...", {
-        searchTypes: ["gas_station", "campground", "supermarket"],
-        probePoints: "20%, 40%, 60%, 80% along route",
+        searchTypes: ["rv_park", "campground", "caravan park keyword"],
       })
 
       const {

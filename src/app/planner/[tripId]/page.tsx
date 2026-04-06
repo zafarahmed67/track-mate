@@ -1118,6 +1118,8 @@ export default function PlannerDetailPage() {
         setChatMessages((prev) => [...prev, result.message])
         if (result.action?.type === "refilter") {
           setRefilterBanner({ preferenceHint: result.action.preferenceHint ?? null })
+          // Auto-refilter stops so the updated preferences take effect immediately (§7.7)
+          loadRouteOptions()
         }
       }
     } catch (error) {
@@ -1131,10 +1133,21 @@ export default function PlannerDetailPage() {
   const handleSaveTrip = async () => {
     setSaving(true)
     try {
+      // Persist segment selections alongside the narrative so they survive page reload (§7.9)
+      const currentRouteDataJson = (trip?.route_data_json ?? {}) as Record<string, unknown>
       const response = await fetch(`/api/trips/${tripId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: "saved", userId }),
+        body: JSON.stringify({
+          status: "saved",
+          userId,
+          route_data_json: {
+            ...currentRouteDataJson,
+            selectedSegmentOptionIds,
+            selectedSegmentFuelIds,
+            narrative: tripNarrative ?? currentRouteDataJson.narrative,
+          },
+        }),
       })
       const result = await response.json()
 
@@ -1988,9 +2001,17 @@ export default function PlannerDetailPage() {
 
         if (data.success && data.trip) {
           setTrip(data.trip)
-          const savedNarrative = (data.trip as TripData).route_data_json?.narrative as TripNarrative | undefined
+          const routeJson = (data.trip as TripData).route_data_json ?? {}
+          const savedNarrative = routeJson.narrative as TripNarrative | undefined
           if (savedNarrative?.days?.length) {
             setTripNarrative(savedNarrative)
+          }
+          // Restore segment selections saved from previous session (§7.9)
+          if (routeJson.selectedSegmentOptionIds) {
+            setSelectedSegmentOptionIds(routeJson.selectedSegmentOptionIds as Record<number, string>)
+          }
+          if (routeJson.selectedSegmentFuelIds) {
+            setSelectedSegmentFuelIds(routeJson.selectedSegmentFuelIds as Record<number, string>)
           }
         }
 

@@ -107,7 +107,7 @@ export function applySuitabilityFilter<T extends FilterableStop>(
     // Rule 5 — Cost band: filter by budget preference
     if (trip.budget_preference === "free") {
       const cb = stop.cost_band?.toLowerCase()
-      if (cb && cb !== "budget") {
+      if (cb && cb !== "free") {
         rejectionReasons["budget_free"] = (rejectionReasons["budget_free"] || 0) + 1
         return false
       }

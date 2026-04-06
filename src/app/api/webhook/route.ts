@@ -128,6 +128,13 @@ export async function POST(req: NextRequest) {
             }
 
             userId = updatedUser.id
+
+            // Send access email to existing user (re-purchase or access restore).
+            // inviteUserByEmail works for both new and existing Supabase auth users.
+            const { error: inviteError } = await supabaseAdmin.auth.admin.inviteUserByEmail(data.email)
+            if (inviteError) {
+                console.error("Error sending access email to existing user (non-fatal):", inviteError.message)
+            }
         } else {
             const { data: newUser, error: insertError } = await supabaseAdmin
                 .from("users")

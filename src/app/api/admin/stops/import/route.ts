@@ -30,6 +30,13 @@ interface CsvRow {
   "Max Rig Length"?: string
   "Cost Band"?: string
   "Verification Status"?: string
+  // Affiliate fields (§7.4)
+  "Affiliate Partner"?: string
+  "Partner Type"?: string
+  "Affiliate URL"?: string
+  "Direct Booking URL"?: string
+  "Discount Code"?: string
+  "Partner Notes"?: string
   [key: string]: string | undefined
 }
 
@@ -60,6 +67,12 @@ function rowToRecord(row: CsvRow) {
     max_rig_length: row["Max Rig Length"]?.trim() || null,
     cost_band: row["Cost Band"]?.trim() || null,
     verification_status: row["Verification Status"]?.trim() || "unverified",
+    affiliate_partner: row["Affiliate Partner"]?.trim() || null,
+    partner_type: row["Partner Type"]?.trim() || null,
+    affiliate_url: row["Affiliate URL"]?.trim() || null,
+    direct_booking_url: row["Direct Booking URL"]?.trim() || null,
+    discount_code: row["Discount Code"]?.trim() || null,
+    partner_notes: row["Partner Notes"]?.trim() || null,
   }
 }
 

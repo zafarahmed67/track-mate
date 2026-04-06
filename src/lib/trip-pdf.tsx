@@ -217,6 +217,60 @@ const styles = StyleSheet.create({
     fontSize: 9,
     color: colors.primary,
   },
+  // Narrative
+  overviewCard: {
+    backgroundColor: colors.primaryLight,
+    borderRadius: 6,
+    padding: 12,
+    marginBottom: 16,
+    borderLeftWidth: 4,
+    borderLeftColor: colors.primary,
+  },
+  overviewText: {
+    fontSize: 10,
+    color: colors.text,
+    lineHeight: 1.5,
+  },
+  narrativeText: {
+    fontSize: 9,
+    color: colors.muted,
+    lineHeight: 1.5,
+    marginBottom: 6,
+    fontStyle: "italic",
+  },
+  fuelNote: {
+    backgroundColor: "#fef9c3",
+    borderRadius: 4,
+    padding: 5,
+    marginTop: 4,
+    borderLeftWidth: 3,
+    borderLeftColor: "#ca8a04",
+  },
+  fuelNoteText: {
+    fontSize: 8,
+    color: "#713f12",
+    lineHeight: 1.4,
+  },
+  tripNotesCard: {
+    backgroundColor: "#f0fdf4",
+    borderRadius: 6,
+    padding: 12,
+    borderLeftWidth: 4,
+    borderLeftColor: "#16a34a",
+    marginBottom: 16,
+  },
+  tripNoteLabel: {
+    fontSize: 8,
+    fontFamily: "Helvetica-Bold",
+    color: "#14532d",
+    marginBottom: 2,
+    marginTop: 6,
+  },
+  tripNoteText: {
+    fontSize: 9,
+    color: "#166534",
+    lineHeight: 1.4,
+  },
   // Footer
   footer: {
     position: "absolute",
@@ -253,6 +307,21 @@ export interface PdfStop {
   address?: string
 }
 
+export interface PdfNarrativeDay {
+  dayNumber: number
+  narrative: string
+  suggestedStay: { name: string; stopType: string; whyStopHere: string; aaoTip: string } | null
+  aaoTips: string[]
+  gapNote: string | null
+  fuelNote: string | null
+}
+
+export interface PdfNarrative {
+  overview?: string
+  days?: PdfNarrativeDay[]
+  tripNotes?: { fuelGuidance: string | null; remoteWarnings: string | null; roadConditions: string | null }
+}
+
 export interface PdfTrip {
   title: string
   start_location_text: string
@@ -266,6 +335,7 @@ export interface PdfTrip {
   stay_preference?: string | null
   budget_preference?: string | null
   notes?: string | null
+  narrative?: PdfNarrative
   stops: PdfStop[]
   exportedAt: string
 }
@@ -344,12 +414,14 @@ function StopEntry({ stop, isLast }: { stop: PdfStop; isLast: boolean }) {
 }
 
 export function TripPdfDocument({ trip }: { trip: PdfTrip }) {
-  const days = buildDays(trip)
+  const rawDays = buildDays(trip)
   const exportDate = new Date(trip.exportedAt).toLocaleDateString("en-AU", {
     day: "numeric",
     month: "long",
     year: "numeric",
   })
+  const narrativeDays = trip.narrative?.days
+  const useNarrative = Array.isArray(narrativeDays) && narrativeDays.length > 0
 
   const prefs = [
     trip.travel_pace ? `Pace: ${formatPace(trip.travel_pace)}` : null,
@@ -360,6 +432,9 @@ export function TripPdfDocument({ trip }: { trip: PdfTrip }) {
     trip.stay_preference ? `Stay: ${capitalize(trip.stay_preference)}` : null,
     trip.budget_preference ? `Budget: ${capitalize(trip.budget_preference)}` : null,
   ].filter(Boolean) as string[]
+
+  const tripNotes = trip.narrative?.tripNotes
+  const hasTripNotes = tripNotes && (tripNotes.fuelGuidance || tripNotes.remoteWarnings || tripNotes.roadConditions)
 
   return (
     <Document title={trip.title || "Trip Itinerary"} author="TrackMate">
@@ -403,45 +478,123 @@ export function TripPdfDocument({ trip }: { trip: PdfTrip }) {
           </View>
         )}
 
+        {/* Trip overview from AI narrative */}
+        {trip.narrative?.overview && (
+          <View style={styles.overviewCard}>
+            <Text style={styles.overviewText}>{trip.narrative.overview}</Text>
+          </View>
+        )}
+
         {/* Day-by-day itinerary */}
         <Text style={styles.sectionTitle}>Day-by-Day Itinerary</Text>
 
-        {days.map(({ day, stops }) => {
-          const isFirst = day === 1
-          const isLast = day === trip.trip_duration_days
-          const dayLabel = isFirst
-            ? `Day ${day}: Depart ${trip.start_location_text}`
-            : isLast
-            ? `Day ${day}: Arrive ${trip.destination_text}`
-            : `Day ${day}`
+        {useNarrative
+          ? narrativeDays!.map((day) => {
+              const isFirst = day.dayNumber === 1
+              const isLast = day.dayNumber === trip.trip_duration_days
+              const dayLabel = isFirst
+                ? `Day ${day.dayNumber}: Depart ${trip.start_location_text}`
+                : isLast
+                ? `Day ${day.dayNumber}: Arrive ${trip.destination_text}`
+                : `Day ${day.dayNumber}`
 
-          if (stops.length === 0) {
-            return (
-              <View key={day} style={styles.gapCard}>
-                <Text style={styles.gapHeader}>{dayLabel}</Text>
-                <Text style={styles.gapText}>
-                  No AAO verified stop available on this stretch. Check local
-                  caravan parks or camping apps near your route.
-                </Text>
-              </View>
-            )
-          }
+              if (day.gapNote && !day.suggestedStay) {
+                return (
+                  <View key={day.dayNumber} style={styles.gapCard} wrap={false}>
+                    <Text style={styles.gapHeader}>{dayLabel}</Text>
+                    {day.narrative ? <Text style={styles.narrativeText}>{day.narrative}</Text> : null}
+                    <Text style={styles.gapText}>{day.gapNote}</Text>
+                  </View>
+                )
+              }
 
-          return (
-            <View key={day} style={styles.dayCard} wrap={false}>
-              <Text style={styles.dayHeader}>{dayLabel}</Text>
-              <Text style={styles.dayMeta}>{stops.length} stop{stops.length !== 1 ? "s" : ""}</Text>
-              {stops.map((stop, i) => (
-                <StopEntry key={stop.id} stop={stop} isLast={i === stops.length - 1} />
-              ))}
-            </View>
-          )
-        })}
+              return (
+                <View key={day.dayNumber} style={styles.dayCard} wrap={false}>
+                  <Text style={styles.dayHeader}>{dayLabel}</Text>
+                  {day.narrative ? <Text style={styles.narrativeText}>{day.narrative}</Text> : null}
+                  {day.suggestedStay && (
+                    <StopEntry
+                      stop={{
+                        id: `day-${day.dayNumber}`,
+                        location_name: day.suggestedStay.name,
+                        stay_type: day.suggestedStay.stopType,
+                        why_stop_here: day.suggestedStay.whyStopHere,
+                        aao_tip: day.suggestedStay.aaoTip || undefined,
+                      }}
+                      isLast
+                    />
+                  )}
+                  {day.fuelNote && (
+                    <View style={styles.fuelNote}>
+                      <Text style={styles.fuelNoteText}>⛽ {day.fuelNote}</Text>
+                    </View>
+                  )}
+                </View>
+              )
+            })
+          : rawDays.map(({ day, stops }) => {
+              const isFirst = day === 1
+              const isLast = day === trip.trip_duration_days
+              const dayLabel = isFirst
+                ? `Day ${day}: Depart ${trip.start_location_text}`
+                : isLast
+                ? `Day ${day}: Arrive ${trip.destination_text}`
+                : `Day ${day}`
 
-        {/* Trip notes */}
-        {trip.notes && (
+              if (stops.length === 0) {
+                return (
+                  <View key={day} style={styles.gapCard}>
+                    <Text style={styles.gapHeader}>{dayLabel}</Text>
+                    <Text style={styles.gapText}>
+                      No AAO verified stop available on this stretch. Check local
+                      caravan parks or camping apps near your route.
+                    </Text>
+                  </View>
+                )
+              }
+
+              return (
+                <View key={day} style={styles.dayCard} wrap={false}>
+                  <Text style={styles.dayHeader}>{dayLabel}</Text>
+                  <Text style={styles.dayMeta}>{stops.length} stop{stops.length !== 1 ? "s" : ""}</Text>
+                  {stops.map((stop, i) => (
+                    <StopEntry key={stop.id} stop={stop} isLast={i === stops.length - 1} />
+                  ))}
+                </View>
+              )
+            })}
+
+        {/* Trip notes from AI narrative */}
+        {hasTripNotes && (
           <>
             <Text style={styles.sectionTitle}>Trip Notes</Text>
+            <View style={styles.tripNotesCard}>
+              {tripNotes!.fuelGuidance && (
+                <>
+                  <Text style={styles.tripNoteLabel}>Fuel Guidance</Text>
+                  <Text style={styles.tripNoteText}>{tripNotes!.fuelGuidance}</Text>
+                </>
+              )}
+              {tripNotes!.remoteWarnings && (
+                <>
+                  <Text style={styles.tripNoteLabel}>Remote Stretch Warnings</Text>
+                  <Text style={styles.tripNoteText}>{tripNotes!.remoteWarnings}</Text>
+                </>
+              )}
+              {tripNotes!.roadConditions && (
+                <>
+                  <Text style={styles.tripNoteLabel}>Road Conditions</Text>
+                  <Text style={styles.tripNoteText}>{tripNotes!.roadConditions}</Text>
+                </>
+              )}
+            </View>
+          </>
+        )}
+
+        {/* User notes */}
+        {trip.notes && (
+          <>
+            <Text style={styles.sectionTitle}>Your Notes</Text>
             <View style={styles.notesCard}>
               <Text style={styles.notesText}>{trip.notes}</Text>
             </View>
