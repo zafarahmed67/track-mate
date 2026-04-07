@@ -211,6 +211,33 @@ function SortableRouteStopItem({
   )
 }
 
+function StaticRouteStopItem({
+  stop,
+}: {
+  stop: RouteStopOption
+}) {
+  return (
+    <div className="flex items-start gap-4">
+      <div className="relative z-10 flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-muted/30">
+        <MapPin className="h-5 w-5 text-muted-foreground" />
+      </div>
+      <div className="flex-1 rounded-2xl bg-background p-3 border border-muted/30">
+        <div className="flex items-center gap-2">
+          <span className="font-medium text-sm">{stop.location_name}</span>
+          {stop.is_verified ? (
+            <Badge variant="outline" className="text-xs">Verified</Badge>
+          ) : (
+            <Badge variant="outline" className="text-xs">Fixed</Badge>
+          )}
+        </div>
+        <div className="text-xs text-muted-foreground mt-1">
+          {stop.stay_type || stop.route_type || "Stop"} • {stop.distance_from_start_km ? `${Math.round(stop.distance_from_start_km)} km from start` : ""}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function PlannerDetailPage() {
   const params = useParams()
   const router = useRouter()
@@ -278,6 +305,7 @@ export default function PlannerDetailPage() {
   const dragSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }))
   const [tripNarrative, setTripNarrative] = useState<TripNarrative | null>(null)
   const [narrativeLoading, setNarrativeLoading] = useState(false)
+  const [hiddenCustomStopsByDay, setHiddenCustomStopsByDay] = useState<Record<number, string[]>>({})
   const [itineraryVersions, setItineraryVersions] = useState<Array<{ id: string; version: number; status: string; model_name: string | null; created_at: string }>>([])
   const [itineraryVersionsLoaded, setItineraryVersionsLoaded] = useState(false)
   const [showVersionHistory, setShowVersionHistory] = useState(false)
@@ -290,6 +318,35 @@ export default function PlannerDetailPage() {
   const chatEndRef = useRef<HTMLDivElement | null>(null)
 
   const normalizeStopId = (id: string | null | undefined): string => (id || "").replace(/^custom-/, "")
+
+  const getCustomStopDisplayKey = (stop: {
+    id?: string
+    stop_id?: string
+    location_name: string
+    latitude?: string | number
+    longitude?: string | number
+  }): string => {
+    const normalizedId = normalizeStopId(stop.stop_id || stop.id)
+    const lat = Number(stop.latitude)
+    const lng = Number(stop.longitude)
+    const coordKey = Number.isFinite(lat) && Number.isFinite(lng)
+      ? `${lat.toFixed(5)}|${lng.toFixed(5)}`
+      : `${String(stop.latitude)}|${String(stop.longitude)}`
+    return normalizedId || `${stop.location_name.toLowerCase().trim()}|${coordKey}`
+  }
+
+  const hideCustomStopFromDay = (dayIndex: number, stop: TripStop) => {
+    const key = getCustomStopDisplayKey(stop)
+    setHiddenCustomStopsByDay((prev) => {
+      const existing = prev[dayIndex] || []
+      if (existing.includes(key)) return prev
+      return {
+        ...prev,
+        [dayIndex]: [...existing, key],
+      }
+    })
+    toast.success(`Removed ${stop.location_name} from Day ${dayIndex + 1} route`)
+  }
 
   const stopRepeatSummary = useMemo(() => {
     const counts = new Map<string, number>()
@@ -1888,11 +1945,15 @@ export default function PlannerDetailPage() {
         return segmentIndex === 0 ? stations : []
       }
 
-      if (stations.length <= 3) return stations
+      // If station distances are unavailable, rotate fallback suggestions by segment
+      // so the same fuel stop does not appear on every single day card.
+      if (stations.length <= 3) {
+        return [stations[segmentIndex % stations.length]]
+      }
 
       const startIndex = segmentIndex % stations.length
       const rotated = [...stations.slice(startIndex), ...stations.slice(0, startIndex)]
-      return rotated.slice(0, 3)
+      return rotated.slice(0, 2)
     }
 
     if (segment.fuelSuggestions && segment.fuelSuggestions.length > 0) {
@@ -2819,13 +2880,20 @@ export default function PlannerDetailPage() {
                 const endpointStopIds = new Set<string>([
                   ...(previousSelectedOption ? [previousSelectedOption.id] : []),
                   ...(selectedOption ? [selectedOption.id] : []),
+                  ...(nextSelectedOption ? [nextSelectedOption.id] : []),
                 ].map((id) => normalizeStopId(id)).filter(Boolean))
+                const endpointStopNames = new Set<string>([
+                  previousSelectedOption?.location_name,
+                  selectedOption?.location_name,
+                  nextSelectedOption?.location_name,
+                ].filter(Boolean).map((name) => String(name).toLowerCase().trim()))
                 const rawRouteStops = getOrderedRouteStops(
                   index,
                   persistedStopsForSegment.length > 0 ? persistedStopsForSegment : allStops.slice(0, 1)
                 )
                 const routeStops = rawRouteStops.filter((stop) => !endpointStopIds.has(normalizeStopId(stop.id)))
                 const routeStopIds = new Set(routeStops.map((stop) => normalizeStopId(stop.id)).filter(Boolean))
+                const hiddenCustomKeysForDay = new Set(hiddenCustomStopsByDay[index] || [])
                 const customStopsForDay = stops.filter((stop) => {
                   if (stop.verification_status !== "custom") return false
 
@@ -2837,17 +2905,16 @@ export default function PlannerDetailPage() {
                   if (!inSegmentWindow) return false
 
                   const normalizedId = normalizeStopId(stop.stop_id || stop.id)
+                  const normalizedName = stop.location_name.toLowerCase().trim()
+                  const displayKey = getCustomStopDisplayKey(stop)
                   return !routeStopIds.has(normalizedId)
+                    && !endpointStopIds.has(normalizedId)
+                    && !endpointStopNames.has(normalizedName)
+                    && !hiddenCustomKeysForDay.has(displayKey)
                 })
                 const seenCustomStopKeys = new Set<string>()
                 const dedupedCustomStopsForDay = customStopsForDay.filter((stop) => {
-                  const normalizedId = normalizeStopId(stop.stop_id || stop.id)
-                  const lat = Number(stop.latitude)
-                  const lng = Number(stop.longitude)
-                  const coordKey = Number.isFinite(lat) && Number.isFinite(lng)
-                    ? `${lat.toFixed(5)}|${lng.toFixed(5)}`
-                    : `${String(stop.latitude)}|${String(stop.longitude)}`
-                  const key = normalizedId || `${stop.location_name.toLowerCase().trim()}|${coordKey}`
+                  const key = getCustomStopDisplayKey(stop)
 
                   if (seenCustomStopKeys.has(key)) return false
                   seenCustomStopKeys.add(key)
@@ -2868,20 +2935,8 @@ export default function PlannerDetailPage() {
                   return count
                 }
                 
-                const MAX_CUSTOM_ROUTE_STOPS_PER_DAY = 2
-                const selectedCustomStop = selectedOption
-                  ? sortedCustomStopsForDay.find(
-                      (stop) => normalizeStopId(stop.stop_id || stop.id) === normalizeStopId(selectedOption.id)
-                    )
-                  : undefined
-                const remainingCustomStops = sortedCustomStopsForDay.filter(
-                  (stop) => !selectedCustomStop || normalizeStopId(stop.stop_id || stop.id) !== normalizeStopId(selectedCustomStop.stop_id || selectedCustomStop.id)
-                )
-                const visibleCustomStopsForDay = [
-                  ...(selectedCustomStop ? [selectedCustomStop] : []),
-                  ...remainingCustomStops.slice(0, Math.max(0, MAX_CUSTOM_ROUTE_STOPS_PER_DAY - (selectedCustomStop ? 1 : 0))),
-                ]
-                const hiddenCustomStopsCount = Math.max(0, sortedCustomStopsForDay.length - visibleCustomStopsForDay.length)
+                const visibleCustomStopsForDay = sortedCustomStopsForDay
+                const hiddenCustomStopsCount = 0
                 const displayedRouteStopIds = new Set<string>([
                   ...routeStops.map((stop) => normalizeStopId(stop.id)),
                   ...visibleCustomStopsForDay.map((stop) => normalizeStopId(stop.stop_id || stop.id)),
@@ -2913,6 +2968,8 @@ export default function PlannerDetailPage() {
                   .filter((place) => !knownNames.has(place.name.toLowerCase()))
                   .slice(0, 5)
                 const selectedFuelSuggestion = getSelectedFuelSuggestion(segment, index)
+                const draggableRouteStops = routeStops.filter((stop) => stop.is_verified)
+                const staticRouteStops = routeStops.filter((stop) => !stop.is_verified)
 
                 return (
                   <Card key={`day-card-${index}`} className={active ? "border-primary shadow-lg" : "border"}>
@@ -2980,21 +3037,29 @@ export default function PlannerDetailPage() {
                               </div>
 
                               {routeStops.length > 0 && (
-                                <DndContext
-                                  sensors={dragSensors}
-                                  collisionDetection={closestCenter}
-                                  onDragEnd={(event) => {
-                                    void handleRouteStopDragEnd(index, routeStops, event)
-                                  }}
-                                >
-                                  <SortableContext items={routeStops.map((stop) => stop.id)} strategy={verticalListSortingStrategy}>
-                                    <div className="space-y-4">
-                                      {routeStops.map((stop) => (
-                                        <SortableRouteStopItem key={`stop-${stop.id}`} stop={stop} />
-                                      ))}
-                                    </div>
-                                  </SortableContext>
-                                </DndContext>
+                                <div className="space-y-4">
+                                  {staticRouteStops.map((stop) => (
+                                    <StaticRouteStopItem key={`fixed-stop-${stop.id}`} stop={stop} />
+                                  ))}
+
+                                  {draggableRouteStops.length > 0 && (
+                                    <DndContext
+                                      sensors={dragSensors}
+                                      collisionDetection={closestCenter}
+                                      onDragEnd={(event) => {
+                                        void handleRouteStopDragEnd(index, draggableRouteStops, event)
+                                      }}
+                                    >
+                                      <SortableContext items={draggableRouteStops.map((stop) => stop.id)} strategy={verticalListSortingStrategy}>
+                                        <div className="space-y-4">
+                                          {draggableRouteStops.map((stop) => (
+                                            <SortableRouteStopItem key={`stop-${stop.id}`} stop={stop} />
+                                          ))}
+                                        </div>
+                                      </SortableContext>
+                                    </DndContext>
+                                  )}
+                                </div>
                               )}
 
                               {routeStops.length === 0 && customStopsForDay.length === 0 && (
@@ -3030,6 +3095,15 @@ export default function PlannerDetailPage() {
                                         </div>
                                         <div className="text-xs text-muted-foreground mt-1">
                                           Added from nearby alternatives for Day {index + 1}
+                                        </div>
+                                        <div className="mt-2">
+                                          <Button
+                                            size="sm"
+                                            variant="ghost"
+                                            onClick={() => hideCustomStopFromDay(index, stop)}
+                                          >
+                                            Remove from this day
+                                          </Button>
                                         </div>
                                       </div>
                                     </div>
@@ -3644,37 +3718,6 @@ export default function PlannerDetailPage() {
                 </div>
               </CardContent>
             </Card>
-
-            {stops.length > 0 && (
-              <Card className="border">
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-lg">Fetched stops JSON</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="mb-3 grid grid-cols-2 gap-3 text-sm">
-                    <div className="rounded-2xl border bg-muted/5 p-3">
-                      <div className="text-muted-foreground">Total stops</div>
-                      <div className="text-base font-semibold">{stopRepeatSummary.totalStops}</div>
-                    </div>
-                    <div className="rounded-2xl border bg-muted/5 p-3">
-                      <div className="text-muted-foreground">Unique stops</div>
-                      <div className="text-base font-semibold">{stopRepeatSummary.uniqueStops}</div>
-                    </div>
-                    <div className="rounded-2xl border bg-muted/5 p-3">
-                      <div className="text-muted-foreground">Repeat instances</div>
-                      <div className="text-base font-semibold">{stopRepeatSummary.repeatInstances}</div>
-                    </div>
-                    <div className="rounded-2xl border bg-muted/5 p-3">
-                      <div className="text-muted-foreground">Repeated stops</div>
-                      <div className="text-base font-semibold">{stopRepeatSummary.repeatedStops}</div>
-                    </div>
-                  </div>
-                  <pre className="max-h-96 overflow-auto rounded-2xl border bg-muted/5 p-3 text-xs leading-5 text-muted-foreground">
-                    {JSON.stringify(stops, null, 2)}
-                  </pre>
-                </CardContent>
-              </Card>
-            )}
 
             <Card className="border">
               <CardHeader className="pb-3">

@@ -5,6 +5,12 @@ interface RouteParams {
   params: Promise<{ tripId: string }>
 }
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+const normalizeStopId = (value: string): string => value.replace(/^custom-/, "")
+
+const isUuid = (value: string): boolean => UUID_REGEX.test(value)
+
 export async function GET(req: NextRequest, { params }: RouteParams) {
   try {
     if (!supabaseAdmin) {
@@ -73,7 +79,42 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       )
     }
 
-    const stopsToInsert = stop_ids.map((stopId: string) => ({
+    const normalizedStopIds = stop_ids
+      .map((stopId: string) => normalizeStopId(String(stopId || "")))
+      .filter((stopId: string) => isUuid(stopId))
+
+    if (normalizedStopIds.length === 0) {
+      return NextResponse.json({
+        success: true,
+        message: "No database stop ids to add",
+        data: [],
+      })
+    }
+
+    const { data: existingStops, error: existingStopsError } = await supabaseAdmin
+      .from("stops")
+      .select("id")
+      .in("id", normalizedStopIds)
+
+    if (existingStopsError) {
+      return NextResponse.json(
+        { success: false, error: existingStopsError.message },
+        { status: 500 }
+      )
+    }
+
+    const existingStopIds = new Set((existingStops || []).map((stop) => stop.id))
+    const validStopIds = normalizedStopIds.filter((stopId) => existingStopIds.has(stopId))
+
+    if (validStopIds.length === 0) {
+      return NextResponse.json({
+        success: true,
+        message: "No matching DB stops found to add",
+        data: [],
+      })
+    }
+
+    const stopsToInsert = validStopIds.map((stopId: string) => ({
       trip_id: tripId,
       stop_id: stopId,
       selected_by_ai,
@@ -83,7 +124,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     const { data, error } = await supabaseAdmin
       .from("trip_candidate_stops")
       .upsert(stopsToInsert, {
-        onConflict: "trip_id,stop_id",
+        onConflict: "trip_id,stop_id,generation_version",
       })
       .select()
 
@@ -129,11 +170,19 @@ export async function DELETE(req: NextRequest, { params }: RouteParams) {
       )
     }
 
+    const normalizedId = normalizeStopId(id)
+    if (!isUuid(normalizedId)) {
+      return NextResponse.json(
+        { success: false, error: "Invalid stop id" },
+        { status: 400 }
+      )
+    }
+
     const { count, error } = await supabaseAdmin
       .from("trip_candidate_stops")
       .delete({ count: "exact" })
       .eq("trip_id", tripId)
-      .or(`id.eq.${id},stop_id.eq.${id}`)
+      .or(`id.eq.${normalizedId},stop_id.eq.${normalizedId}`)
 
     if (error) {
       console.error("Database error:", error)
@@ -183,15 +232,25 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
       )
     }
 
-    const updates = stop_orders.map((item: { id: string; rank_score: number }) => ({
-      id: item.id,
-      rank_score: item.rank_score,
-    }))
+    const updates = stop_orders
+      .map((item: { id: string; rank_score: number }) => ({
+        id: String(item.id || ""),
+        normalizedId: normalizeStopId(String(item.id || "")),
+        rank_score: item.rank_score,
+      }))
+      .filter((item) => isUuid(item.normalizedId))
+
+    if (updates.length === 0) {
+      return NextResponse.json(
+        { success: false, error: "No valid database stop ids provided for reorder" },
+        { status: 400 }
+      )
+    }
 
     console.log("hello stops reorder request", {
       tripId,
       updatesCount: updates.length,
-      updateIds: updates.map((item) => item.id),
+      updateIds: updates.map((item) => item.normalizedId),
     })
 
     const unmatchedIds: string[] = []
@@ -201,7 +260,7 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
         .from("trip_candidate_stops")
         .update({ rank_score: update.rank_score })
         .eq("trip_id", tripId)
-        .or(`id.eq.${update.id},stop_id.eq.${update.id}`)
+        .or(`id.eq.${update.normalizedId},stop_id.eq.${update.normalizedId}`)
         .select("id")
 
       if (error) {
@@ -213,7 +272,7 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
       }
 
       if (!data || data.length === 0) {
-        unmatchedIds.push(update.id)
+        unmatchedIds.push(update.normalizedId)
       }
     }
 
@@ -259,7 +318,7 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
           .from("trip_candidate_stops")
           .update({ rank_score: update.rank_score })
           .eq("trip_id", tripId)
-          .or(`id.eq.${update.id},stop_id.eq.${update.id}`)
+          .or(`id.eq.${update.normalizedId},stop_id.eq.${update.normalizedId}`)
           .select("id")
 
         if (error) {
@@ -271,7 +330,7 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
         }
 
         if (!data || data.length === 0) {
-          stillUnmatchedIds.push(update.id)
+          stillUnmatchedIds.push(update.normalizedId)
         }
       }
 
