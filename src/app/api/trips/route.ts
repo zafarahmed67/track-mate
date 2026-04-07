@@ -999,11 +999,28 @@ export async function POST(req: NextRequest) {
         .filter((distance) => distance > 0)
 
       const safeTripDays = Math.max(1, Math.round(Number(tripDurationDays) || 1))
-      const targetTotalStops = safeTripDays * 3
+      const dayBasedStopTarget = safeTripDays * 3
+      const directDistanceKm = calculateDistance(
+        resolvedStartLat,
+        resolvedStartLng,
+        resolvedDestLat,
+        resolvedDestLng
+      )
+      // Bound stop density by route distance so short trips do not create oversized itineraries.
+      const estimatedDriveDistanceKm = Math.max(
+        directDistanceKm,
+        Math.min(directDistanceKm * 1.45, directDistanceKm + 600)
+      )
+      const distanceBasedStopCap = Math.max(1, Math.ceil(estimatedDriveDistanceKm / 90))
+      const targetTotalStops = Math.min(dayBasedStopTarget, distanceBasedStopCap)
       const customStopsNeeded = Math.max(0, targetTotalStops - generatedStopsCount)
 
       console.log("[3/4] target stop quota", {
         tripDurationDays: safeTripDays,
+        dayBasedStopTarget,
+        directDistanceKm: Math.round(directDistanceKm),
+        estimatedDriveDistanceKm: Math.round(estimatedDriveDistanceKm),
+        distanceBasedStopCap,
         targetTotalStops,
         dbStops: generatedStopsCount,
         googleStopsNeeded: customStopsNeeded,

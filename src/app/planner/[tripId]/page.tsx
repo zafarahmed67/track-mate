@@ -2267,7 +2267,7 @@ export default function PlannerDetailPage() {
     return { lat: -25.2744, lng: 133.7751 }
   }, [trip])
 
-  const isNearEndpointMarker = (lat: number, lng: number) => {
+  const isNearEndpointMarker = useCallback((lat: number, lng: number) => {
     if (!trip) return false
 
     const overlapKm = 3
@@ -2282,7 +2282,25 @@ export default function PlannerDetailPage() {
       haversineKm(lat, lng, trip.destination_lat, trip.destination_lng) <= overlapKm
 
     return nearStart || nearDestination
-  }
+  }, [trip])
+
+  const mapNumberedStopsCount = useMemo(() => {
+    const countRenderable = (latRaw: string | number | undefined, lngRaw: string | number | undefined) => {
+      const lat = typeof latRaw === "number" ? latRaw : parseFloat(String(latRaw ?? ""))
+      const lng = typeof lngRaw === "number" ? lngRaw : parseFloat(String(lngRaw ?? ""))
+      if (isNaN(lat) || isNaN(lng)) return false
+      if (isNearEndpointMarker(lat, lng)) return false
+      return true
+    }
+
+    if (filteredStops.length > 0) {
+      return filteredStops.filter((stop) => countRenderable(stop.latitude, stop.longitude)).length
+    }
+
+    return daySegments
+      .flatMap((segment) => [...segment.verifiedStops, ...segment.otherStops])
+      .filter((stop) => countRenderable(stop.latitude, stop.longitude)).length
+  }, [filteredStops, daySegments, isNearEndpointMarker])
 
   if (loading) {
     return (
@@ -2722,6 +2740,9 @@ export default function PlannerDetailPage() {
               </div>
             </CardContent>
           </Card>
+          <div className="mt-2 text-sm text-muted-foreground">
+            Map markers: A + {mapNumberedStopsCount} numbered stops + B = {mapNumberedStopsCount + 2} total.
+          </div>
         </div>
 
 
@@ -2809,9 +2830,45 @@ export default function PlannerDetailPage() {
                 const persistedStopIds = new Set(
                   stops
                     .filter((stop) => stop.verification_status !== "custom")
-                    .map((stop) => stop.stop_id || stop.id)
+                    .map((stop) => normalizeStopId(stop.stop_id || stop.id))
+                    .filter(Boolean)
                 )
-                const persistedStopsForSegment = overnightStopsSorted.filter((stop) => persistedStopIds.has(stop.id))
+                const persistedTripStopsForSegment: RouteStopOption[] = stops
+                  .filter((stop) => stop.verification_status !== "custom")
+                  .filter((stop) => {
+                    if (effectiveDayCount === 1) return true
+                    const stopDistance = Number(stop.distance_from_start_km)
+                    if (Number.isFinite(stopDistance)) {
+                      return stopDistance >= segment.startKm && stopDistance < segment.endKm
+                    }
+                    return stop.day_index === index
+                  })
+                  .map((stop) => ({
+                    id: normalizeStopId(stop.stop_id || stop.id),
+                    location_name: stop.location_name,
+                    latitude: stop.latitude,
+                    longitude: stop.longitude,
+                    state: stop.state,
+                    region: stop.region,
+                    route_type: stop.route_type,
+                    stay_type: stop.stay_type,
+                    pet_friendly: stop.pet_friendly,
+                    water: stop.water,
+                    cost_band: stop.cost_band,
+                    tier: stop.tier,
+                    is_verified: true,
+                    distance_from_start_km: Number.isFinite(Number(stop.distance_from_start_km))
+                      ? Number(stop.distance_from_start_km)
+                      : undefined,
+                  }))
+
+                const persistedStopsMerged = new Map<string, RouteStopOption>()
+                for (const stop of [...overnightStopsSorted, ...persistedTripStopsForSegment]) {
+                  persistedStopsMerged.set(normalizeStopId(stop.id), stop)
+                }
+                const persistedStopsForSegment = Array.from(persistedStopsMerged.values()).filter((stop) =>
+                  persistedStopIds.has(normalizeStopId(stop.id))
+                )
                 // IDs already shown as A (start) or B (end) — exclude from route waypoint pins
                 const endpointStopIds = new Set<string>([
                   ...(previousSelectedOption ? [previousSelectedOption.id] : []),
@@ -2834,9 +2891,11 @@ export default function PlannerDetailPage() {
                   if (stop.verification_status !== "custom") return false
 
                   const stopDistance = Number(stop.distance_from_start_km)
-                  const inSegmentWindow = Number.isFinite(stopDistance)
-                    ? stopDistance >= segment.startKm && stopDistance < segment.endKm
-                    : stop.day_index === index
+                  const inSegmentWindow = effectiveDayCount === 1
+                    ? true
+                    : Number.isFinite(stopDistance)
+                      ? stopDistance >= segment.startKm && stopDistance < segment.endKm
+                      : stop.day_index === index
 
                   if (!inSegmentWindow) return false
 
@@ -2872,6 +2931,7 @@ export default function PlannerDetailPage() {
                 }
                 
                 const visibleCustomStopsForDay = sortedCustomStopsForDay
+                const dayShownStopCount = routeStops.length + visibleCustomStopsForDay.length
                 const hiddenCustomStopsCount = 0
                 const displayedRouteStopIds = new Set<string>([
                   ...routeStops.map((stop) => normalizeStopId(stop.id)),
@@ -2918,7 +2978,7 @@ export default function PlannerDetailPage() {
                           <div>
                             <h2 className="text-lg font-semibold">Day {index + 1}</h2>
                             <p className="text-sm text-muted-foreground">
-                              {formatDistance(distance)} • {formatDuration(duration)}
+                              {formatDistance(distance)} • {formatDuration(duration)} • {dayShownStopCount} shown stops
                             </p>
                           </div>
                         </div>
