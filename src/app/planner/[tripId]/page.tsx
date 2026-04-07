@@ -1024,79 +1024,6 @@ export default function PlannerDetailPage() {
     }
   }
 
-  const [fixingPlan, setFixingPlan] = useState(false)
-
-  const handleFixPlan = async () => {
-    if (!trip || !userId) return
-    setFixingPlan(true)
-    try {
-      const days = daySegments.map((segment, index) => {
-        const selected = getSelectedOption(segment, index)
-        const prev = index > 0 ? getSelectedOption(daySegments[index - 1], index - 1) : null
-        return {
-          day: index + 1,
-          startName: index === 0 ? (trip.start_location_text ?? "Start") : (prev?.location_name ?? `Day ${index}`),
-          endName: selected?.location_name ?? "",
-          endLat: typeof selected?.latitude === "number" ? selected.latitude : parseFloat(selected?.latitude ?? "0"),
-          endLng: typeof selected?.longitude === "number" ? selected.longitude : parseFloat(selected?.longitude ?? "0"),
-          endDistanceFromStartKm: selected?.distance_from_start_km ?? segment.endKm,
-          driveKm: Math.round(segment.endKm - segment.startKm),
-        }
-      })
-
-      const candidateMap = new Map<string, { name: string; latitude: number; longitude: number; distance_from_start_km: number; stay_type?: string }>()
-      for (const seg of daySegments) {
-        for (const stop of [...seg.verifiedStops, ...seg.otherStops]) {
-          if (!candidateMap.has(stop.id)) {
-            candidateMap.set(stop.id, {
-              name: stop.location_name,
-              latitude: typeof stop.latitude === "number" ? stop.latitude : parseFloat(stop.latitude ?? "0"),
-              longitude: typeof stop.longitude === "number" ? stop.longitude : parseFloat(stop.longitude ?? "0"),
-              distance_from_start_km: stop.distance_from_start_km ?? 0,
-              stay_type: stop.stay_type,
-            })
-          }
-        }
-      }
-
-      const response = await fetch(`/api/trips/${tripId}/fix-itinerary`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          days,
-          candidates: Array.from(candidateMap.values()).sort((a, b) => a.distance_from_start_km - b.distance_from_start_km),
-          tripStartName: trip.start_location_text ?? "Start",
-          totalDistanceKm: routeMeta.drivingInfo?.totalDistanceKm ?? 0,
-        }),
-      })
-
-      const data = await response.json()
-      if (!data.success) {
-        toast.error(data.error ?? "Failed to fix plan")
-        return
-      }
-
-      const newIds: Record<number, string> = {}
-      for (const fixedDay of data.days as Array<{ day: number; endName: string }>) {
-        const segIndex = fixedDay.day - 1
-        const seg = daySegments[segIndex]
-        if (!seg) continue
-        const allOpts = [...seg.verifiedStops, ...seg.otherStops]
-        const match = allOpts.find((s) => s.location_name === fixedDay.endName)
-        if (match) newIds[segIndex] = match.id
-      }
-
-      setSelectedSegmentOptionIds(newIds)
-      toast.success("Itinerary fixed — duplicates removed and flow corrected")
-    } catch (err) {
-      console.error("Fix plan error:", err)
-      toast.error("Failed to fix plan")
-    } finally {
-      setFixingPlan(false)
-    }
-  }
-
-
   const handleGenerateNarrative = async () => {
     if (!trip || !userId) return
     setNarrativeLoading(true)
@@ -3651,14 +3578,6 @@ export default function PlannerDetailPage() {
                 <div className="flex flex-col gap-2">
                   <Button className="w-full" onClick={handleRebuildPlan} disabled={routeOptionsLoading}>
                     Rebuild plan
-                  </Button>
-                  <Button
-                    variant="outline"
-                    className="w-full"
-                    onClick={handleFixPlan}
-                    disabled={fixingPlan || routeOptionsLoading}
-                  >
-                    {fixingPlan ? "Fixing…" : "Fix duplicate stops"}
                   </Button>
                 </div>
               </CardContent>

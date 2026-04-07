@@ -6,6 +6,44 @@ interface RouteParams {
   params: Promise<{ tripId: string }>
 }
 
+function extractJsonObject(text: string): string | null {
+  const startIndex = text.indexOf("{")
+  if (startIndex < 0) return null
+
+  let depth = 0
+  let inString = false
+  let escaped = false
+
+  for (let index = startIndex; index < text.length; index++) {
+    const char = text[index]
+
+    if (inString) {
+      if (escaped) {
+        escaped = false
+      } else if (char === "\\") {
+        escaped = true
+      } else if (char === '"') {
+        inString = false
+      }
+      continue
+    }
+
+    if (char === '"') {
+      inString = true
+      continue
+    }
+
+    if (char === "{") depth += 1
+    if (char === "}") depth -= 1
+
+    if (depth === 0) {
+      return text.slice(startIndex, index + 1)
+    }
+  }
+
+  return null
+}
+
 const SYSTEM_PROMPT = `You are a travel writing assistant for an Australian caravan/RV road trip planner called TrackMate.
 Given structured trip data, produce a JSON object with this EXACT shape — no extra keys, no missing keys:
 
@@ -57,7 +95,9 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
+      temperature: 0,
       max_tokens: 2048,
+      response_format: { type: "json_object" },
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
         {
@@ -75,7 +115,14 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
     let narrative
     try {
-      narrative = JSON.parse(raw.replace(/^```[^\n]*\n?/, "").replace(/\n?```$/, ""))
+      const cleaned = raw.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/, "")
+      try {
+        narrative = JSON.parse(cleaned)
+      } catch {
+        const extracted = extractJsonObject(cleaned)
+        if (!extracted) throw new Error("Unable to extract JSON object from model output")
+        narrative = JSON.parse(extracted)
+      }
     } catch {
       console.error("OpenAI returned non-JSON:", raw.slice(0, 500))
       return NextResponse.json(
