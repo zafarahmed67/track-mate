@@ -44,6 +44,96 @@ function extractJsonObject(text: string): string | null {
   return null
 }
 
+type InputDay = {
+  dayNumber: number
+  fromLocation?: string | null
+  toLocation?: string | null
+  distanceKm?: number
+  driveTimeMinutes?: number
+  allowedStopNames?: string[]
+  optionStops?: Array<{
+    location_name: string
+    stay_type?: string | null
+    route_type?: string | null
+    why_stop_here?: string | null
+    aao_tip?: string | null
+    is_verified?: boolean
+  }>
+  verifiedStops?: Array<{
+    location_name: string
+    stay_type?: string | null
+    route_type?: string | null
+    why_stop_here?: string | null
+    aao_tip?: string | null
+  }>
+  degradedMode?: boolean
+  fuelCritical?: boolean
+  gapFromLastFuelKm?: number | null
+  gapToNextFuelKm?: number | null
+  fuelWarning?: string | null
+}
+
+function buildFallbackNarrative(params: {
+  trip: { title?: string; trip_duration_days?: number }
+  totalDistanceKm?: number
+  fuelSummary?: { fuelCriticalDays?: number; remoteDays?: number; planningMode?: string }
+  days: InputDay[]
+}) {
+  const { trip, totalDistanceKm, fuelSummary, days } = params
+  const roundedDistance = Math.round(Number(totalDistanceKm || 0))
+
+  const outDays = days.map((day) => {
+    const options = day.optionStops || []
+    const allowed = day.allowedStopNames || []
+    const chosenName = allowed[0] || null
+    const chosen = options.find((s) => s.location_name === chosenName) || options[0]
+    const stopType = chosen?.stay_type || chosen?.route_type || "campground"
+    const whyStopHere = chosen?.why_stop_here || "Useful overnight break point for this leg."
+    const aaoTip = chosen?.aao_tip || ""
+    const hasStops = allowed.length > 0
+    const gapNote = !hasStops
+      ? "No overnight stop is available on this stretch. Plan this leg carefully before departure."
+      : (day.degradedMode ? "Options are limited on this stretch; verify access and availability before travel." : null)
+
+    const fuelNote = day.fuelCritical
+      ? "Fuel-critical leg: keep reserve fuel and top up whenever possible."
+      : (typeof day.gapFromLastFuelKm === "number" && day.gapFromLastFuelKm > 200)
+      ? `Long fuel gap: ${Math.round(day.gapFromLastFuelKm)} km since last fuel.`
+      : (typeof day.gapToNextFuelKm === "number" && day.gapToNextFuelKm > 200)
+      ? `Long fuel gap ahead: next fuel is about ${Math.round(day.gapToNextFuelKm)} km away.`
+      : null
+
+    return {
+      dayNumber: day.dayNumber,
+      narrative: `Day ${day.dayNumber} runs from ${day.fromLocation || "start"} toward ${day.toLocation || "the next leg"}, covering about ${Math.round(Number(day.distanceKm || 0))} km through remote Australian terrain.`,
+      suggestedStay: hasStops
+        ? {
+            name: chosenName,
+            stopType,
+            whyStopHere,
+            aaoTip,
+          }
+        : null,
+      aaoTips: chosen?.aao_tip ? [chosen.aao_tip] : [],
+      gapNote,
+      fuelNote,
+    }
+  })
+
+  return {
+    overview: `${trip?.title ? `${trip.title}: ` : ""}A ${days.length}-day trip${roundedDistance > 0 ? ` covering about ${roundedDistance} km` : ""} through remote Australian routes with planned overnight anchors and fuel checks.`,
+    days: outDays,
+    tripNotes: {
+      fuelGuidance: (fuelSummary?.fuelCriticalDays || 0) > 0 ? "This route has fuel-critical stretches. Refuel early and often." : null,
+      remoteWarnings: (fuelSummary?.remoteDays || 0) > 0 || fuelSummary?.planningMode === "degraded-valid"
+        ? "Remote sections may have limited services. Confirm overnight access and fuel before each leg."
+        : null,
+      roadConditions: null,
+    },
+    generatedAt: new Date().toISOString(),
+  }
+}
+
 const SYSTEM_PROMPT = `You are a travel writing assistant for an Australian caravan/RV road trip planner called TrackMate.
 Given structured trip data, produce a JSON object with this EXACT shape — no extra keys, no missing keys:
 
@@ -112,6 +202,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     })
 
     const raw = response.choices[0]?.message?.content?.trim() ?? ""
+    const finishReason = response.choices[0]?.finish_reason ?? null
 
     let narrative
     try {
@@ -125,10 +216,11 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       }
     } catch {
       console.error("OpenAI returned non-JSON:", raw.slice(0, 500))
-      return NextResponse.json(
-        { success: false, error: "Failed to parse AI response" },
-        { status: 500 }
-      )
+      narrative = buildFallbackNarrative({ trip, totalDistanceKm, fuelSummary, days })
+      console.warn("[narrative] Using deterministic fallback narrative", {
+        finishReason,
+        dayCount: days.length,
+      })
     }
 
     narrative.generatedAt = new Date().toISOString()
