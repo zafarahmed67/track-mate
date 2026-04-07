@@ -289,6 +289,29 @@ export default function PlannerDetailPage() {
   const [refilterBanner, setRefilterBanner] = useState<{ preferenceHint: string | null } | null>(null)
   const chatEndRef = useRef<HTMLDivElement | null>(null)
 
+  const normalizeStopId = (id: string | null | undefined): string => (id || "").replace(/^custom-/, "")
+
+  const stopRepeatSummary = useMemo(() => {
+    const counts = new Map<string, number>()
+
+    for (const stop of stops) {
+      const normalizedId = normalizeStopId(stop.stop_id || stop.id)
+      if (!normalizedId) continue
+      counts.set(normalizedId, (counts.get(normalizedId) || 0) + 1)
+    }
+
+    const uniqueStops = counts.size
+    const repeatInstances = Array.from(counts.values()).reduce((sum, count) => sum + Math.max(0, count - 1), 0)
+    const repeatedStops = Array.from(counts.values()).filter((count) => count > 1).length
+
+    return {
+      totalStops: stops.length,
+      uniqueStops,
+      repeatInstances,
+      repeatedStops,
+    }
+  }, [stops])
+
   const applyDraggedOrderToTripStops = (tripStops: TripStop[], orderedStopIds: string[]) => {
     if (orderedStopIds.length === 0) return tripStops
 
@@ -502,27 +525,35 @@ export default function PlannerDetailPage() {
     routeOptionsLoading &&
     (!routeMeta.segments || routeMeta.segments.length === 0)
 
-  const allDaySegments = routeMeta.segments && routeMeta.segments.length > 0
-    ? normalizeSegmentsToDays(routeMeta.segments, targetDays)
-    : Array.from({ length: targetDays }, (_, index) => ({
-      startKm: Math.round((routeMeta.drivingInfo?.totalDistanceKm || 0) * (index / targetDays)),
-      endKm: Math.round((routeMeta.drivingInfo?.totalDistanceKm || 0) * ((index + 1) / targetDays)),
-      verifiedStops: [],
-      otherStops: [],
-      fuelSuggestions: [],
-      primaryFuelSuggestion: undefined,
-      isRemote: false,
-      fuelCritical: false,
-      degradedMode: false,
-      fuelDistanceIntoLegKm: undefined,
-      gapFromLastFuelKm: undefined,
-      gapToNextFuelKm: undefined,
-      fuelWarning: undefined,
-    }))
+  const allDaySegments = useMemo(
+    () =>
+      routeMeta.segments && routeMeta.segments.length > 0
+        ? normalizeSegmentsToDays(routeMeta.segments, targetDays)
+        : Array.from({ length: targetDays }, (_, index) => ({
+            startKm: Math.round((routeMeta.drivingInfo?.totalDistanceKm || 0) * (index / targetDays)),
+            endKm: Math.round((routeMeta.drivingInfo?.totalDistanceKm || 0) * ((index + 1) / targetDays)),
+            verifiedStops: [],
+            otherStops: [],
+            fuelSuggestions: [],
+            primaryFuelSuggestion: undefined,
+            isRemote: false,
+            fuelCritical: false,
+            degradedMode: false,
+            fuelDistanceIntoLegKm: undefined,
+            gapFromLastFuelKm: undefined,
+            gapToNextFuelKm: undefined,
+            fuelWarning: undefined,
+          })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [routeMeta.segments, routeMeta.drivingInfo?.totalDistanceKm, routeMeta.paceConfig?.kmPerDay, targetDays]
+  )
 
   const plannedDays = allDaySegments.length
   const effectiveDayCount = Math.max(1, plannedDays)
-  const daySegments = allDaySegments.slice(0, effectiveDayCount)
+  const daySegments = useMemo(
+    () => allDaySegments.slice(0, effectiveDayCount),
+    [allDaySegments, effectiveDayCount]
+  )
 
   const totalRouteDistanceKm = routeMeta.drivingInfo?.totalDistanceKm || 0
   const totalRouteDurationMinutes = routeMeta.drivingInfo?.totalDurationMinutes || 0
@@ -905,27 +936,6 @@ export default function PlannerDetailPage() {
     toast.success("Removed selected stop from this segment")
   }
 
-  const getSelectedOption = (segment: RouteSegment, segmentIndex?: number) => {
-    const allOptions = filterStopsBySegmentDistance(segment, [...segment.verifiedStops, ...segment.otherStops])
-    const visibleOptions = allOptions.filter((option) => !excludedOptionIds.has(option.id))
-
-    if (segmentIndex !== undefined) {
-      const selectedId = selectedSegmentOptionIds[segmentIndex]
-      const selected = visibleOptions.find((option) => option.id === selectedId)
-      if (selected) return selected
-
-      // Default fallback: avoid repeating the same first option as previous day.
-      if (visibleOptions.length > 1 && segmentIndex > 0) {
-        const prevSegment = daySegments[segmentIndex - 1]
-        const prevOptions = prevSegment ? [...prevSegment.verifiedStops, ...prevSegment.otherStops] : []
-        const prevSelectedId = selectedSegmentOptionIds[segmentIndex - 1] || prevOptions[0]?.id
-        const nonDuplicate = visibleOptions.find((option) => option.id !== prevSelectedId)
-        if (nonDuplicate) return nonDuplicate
-      }
-    }
-    return visibleOptions[0]
-  }
-
   const toggleSegmentExpanded = (index: number) => {
     setExpandedSegments((prev) => {
       const next = new Set(prev)
@@ -956,6 +966,79 @@ export default function PlannerDetailPage() {
       setRouteOptionsLoading(false)
     }
   }
+
+  const [fixingPlan, setFixingPlan] = useState(false)
+
+  const handleFixPlan = async () => {
+    if (!trip || !userId) return
+    setFixingPlan(true)
+    try {
+      const days = daySegments.map((segment, index) => {
+        const selected = getSelectedOption(segment, index)
+        const prev = index > 0 ? getSelectedOption(daySegments[index - 1], index - 1) : null
+        return {
+          day: index + 1,
+          startName: index === 0 ? (trip.start_location_text ?? "Start") : (prev?.location_name ?? `Day ${index}`),
+          endName: selected?.location_name ?? "",
+          endLat: typeof selected?.latitude === "number" ? selected.latitude : parseFloat(selected?.latitude ?? "0"),
+          endLng: typeof selected?.longitude === "number" ? selected.longitude : parseFloat(selected?.longitude ?? "0"),
+          endDistanceFromStartKm: selected?.distance_from_start_km ?? segment.endKm,
+          driveKm: Math.round(segment.endKm - segment.startKm),
+        }
+      })
+
+      const candidateMap = new Map<string, { name: string; latitude: number; longitude: number; distance_from_start_km: number; stay_type?: string }>()
+      for (const seg of daySegments) {
+        for (const stop of [...seg.verifiedStops, ...seg.otherStops]) {
+          if (!candidateMap.has(stop.id)) {
+            candidateMap.set(stop.id, {
+              name: stop.location_name,
+              latitude: typeof stop.latitude === "number" ? stop.latitude : parseFloat(stop.latitude ?? "0"),
+              longitude: typeof stop.longitude === "number" ? stop.longitude : parseFloat(stop.longitude ?? "0"),
+              distance_from_start_km: stop.distance_from_start_km ?? 0,
+              stay_type: stop.stay_type,
+            })
+          }
+        }
+      }
+
+      const response = await fetch(`/api/trips/${tripId}/fix-itinerary`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          days,
+          candidates: Array.from(candidateMap.values()).sort((a, b) => a.distance_from_start_km - b.distance_from_start_km),
+          tripStartName: trip.start_location_text ?? "Start",
+          totalDistanceKm: routeMeta.drivingInfo?.totalDistanceKm ?? 0,
+        }),
+      })
+
+      const data = await response.json()
+      if (!data.success) {
+        toast.error(data.error ?? "Failed to fix plan")
+        return
+      }
+
+      const newIds: Record<number, string> = {}
+      for (const fixedDay of data.days as Array<{ day: number; endName: string }>) {
+        const segIndex = fixedDay.day - 1
+        const seg = daySegments[segIndex]
+        if (!seg) continue
+        const allOpts = [...seg.verifiedStops, ...seg.otherStops]
+        const match = allOpts.find((s) => s.location_name === fixedDay.endName)
+        if (match) newIds[segIndex] = match.id
+      }
+
+      setSelectedSegmentOptionIds(newIds)
+      toast.success("Itinerary fixed — duplicates removed and flow corrected")
+    } catch (err) {
+      console.error("Fix plan error:", err)
+      toast.error("Failed to fix plan")
+    } finally {
+      setFixingPlan(false)
+    }
+  }
+
 
   const handleGenerateNarrative = async () => {
     if (!trip || !userId) return
@@ -1658,7 +1741,7 @@ export default function PlannerDetailPage() {
     return `${trip?.start_location_text ?? "Start"} → ${trip?.destination_text ?? "Destination"}`
   }
 
-  const filterStopsBySegmentDistance = (segment: RouteSegment, options: RouteStopOption[]) => {
+  const filterStopsBySegmentDistance = useCallback((segment: RouteSegment, options: RouteStopOption[]) => {
     if (options.length === 0) return options
 
     const optionsWithDistance = options.filter((option) =>
@@ -1686,6 +1769,32 @@ export default function PlannerDetailPage() {
         Math.abs((a.distance_from_start_km as number) - midpoint) -
         Math.abs((b.distance_from_start_km as number) - midpoint)
     )
+  }, [])
+
+  // Pre-compute each day's selection sequentially — single source of truth for dedup
+  const resolvedDaySelections = useMemo(() => {
+    const usedIds = new Set<string>(excludedOptionIds)
+    return daySegments.map((seg, i) => {
+      const allOptions = filterStopsBySegmentDistance(seg, [...seg.verifiedStops, ...seg.otherStops])
+      const visible = allOptions.filter((o) => !excludedOptionIds.has(o.id))
+      const explicitId = selectedSegmentOptionIds[i]
+      if (explicitId) {
+        const explicit = visible.find((o) => o.id === explicitId)
+        if (explicit) { usedIds.add(explicit.id); return explicit }
+      }
+      const pick = visible.find((o) => !usedIds.has(o.id)) ?? null
+      if (pick) usedIds.add(pick.id)
+      return pick
+    })
+  }, [daySegments, selectedSegmentOptionIds, excludedOptionIds, filterStopsBySegmentDistance])
+
+  const getSelectedOption = (segment: RouteSegment, segmentIndex?: number) => {
+    if (segmentIndex !== undefined) {
+      const resolved = resolvedDaySelections[segmentIndex]
+      return resolved ?? undefined
+    }
+    const allOptions = filterStopsBySegmentDistance(segment, [...segment.verifiedStops, ...segment.otherStops])
+    return allOptions.filter((o) => !excludedOptionIds.has(o.id))[0]
   }
 
   const getSegmentOptions = (segment: RouteSegment, maxOptions = 3) => {
@@ -1984,7 +2093,7 @@ export default function PlannerDetailPage() {
       warnings.push("Planner is in degraded-valid mode for remote stretches. Fuel and overnight picks are still route-safe, but alternatives may be limited.")
     }
     setRouteWarnings(warnings)
-  }, [routeMeta, daySegments])
+  }, [routeMeta.corridor, routeMeta.fuelStations, routeMeta.planningMode, daySegments])
 
   useEffect(() => {
     async function fetchTripData() {
@@ -2288,7 +2397,7 @@ export default function PlannerDetailPage() {
               </div>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="rounded-2xl bg-gradient-to-r from-primary/5 to-primary/10 p-4 border border-primary/10">
+              <div className="rounded-2xl bg-linear-to-r from-primary/5 to-primary/10 p-4 border border-primary/10">
                 <div className="flex items-center gap-3 mb-3">
                   <MapPin className="h-5 w-5 text-primary" />
                   <div className="flex items-center gap-2 text-sm">
@@ -2693,15 +2802,46 @@ export default function PlannerDetailPage() {
                     .map((stop) => stop.stop_id || stop.id)
                 )
                 const persistedStopsForSegment = overnightStopsSorted.filter((stop) => persistedStopIds.has(stop.id))
-                const routeStops = getOrderedRouteStops(
+                // IDs already shown as A (start) or B (end) — exclude from route waypoint pins
+                const endpointStopIds = new Set<string>([
+                  ...(previousSelectedOption ? [previousSelectedOption.id] : []),
+                  ...(selectedOption ? [selectedOption.id] : []),
+                ].map((id) => normalizeStopId(id)).filter(Boolean))
+                const rawRouteStops = getOrderedRouteStops(
                   index,
                   persistedStopsForSegment.length > 0 ? persistedStopsForSegment : allStops.slice(0, 1)
                 )
-                const customStopsForDay = stops.filter(
-                  (stop) => stop.verification_status === "custom" && stop.day_index === index
-                )
+                const routeStops = rawRouteStops.filter((stop) => !endpointStopIds.has(normalizeStopId(stop.id)))
+                const routeStopIds = new Set(routeStops.map((stop) => normalizeStopId(stop.id)).filter(Boolean))
+                const customStopsForDay = stops.filter((stop) => {
+                  if (stop.verification_status !== "custom") return false
+
+                  const stopDistance = Number(stop.distance_from_start_km)
+                  const inSegmentWindow = Number.isFinite(stopDistance)
+                    ? stopDistance >= segment.startKm && stopDistance < segment.endKm
+                    : stop.day_index === index
+
+                  if (!inSegmentWindow) return false
+
+                  const normalizedId = normalizeStopId(stop.stop_id || stop.id)
+                  return !routeStopIds.has(normalizedId)
+                })
+                const seenCustomStopKeys = new Set<string>()
+                const dedupedCustomStopsForDay = customStopsForDay.filter((stop) => {
+                  const normalizedId = normalizeStopId(stop.stop_id || stop.id)
+                  const lat = Number(stop.latitude)
+                  const lng = Number(stop.longitude)
+                  const coordKey = Number.isFinite(lat) && Number.isFinite(lng)
+                    ? `${lat.toFixed(5)}|${lng.toFixed(5)}`
+                    : `${String(stop.latitude)}|${String(stop.longitude)}`
+                  const key = normalizedId || `${stop.location_name.toLowerCase().trim()}|${coordKey}`
+
+                  if (seenCustomStopKeys.has(key)) return false
+                  seenCustomStopKeys.add(key)
+                  return true
+                })
                 // Sort custom stops by route distance to match map order
-                const sortedCustomStopsForDay = [...customStopsForDay].sort(
+                const sortedCustomStopsForDay = [...dedupedCustomStopsForDay].sort(
                   (a, b) => (a.distance_from_start_km ?? 999999) - (b.distance_from_start_km ?? 999999)
                 )
                 
@@ -2715,10 +2855,24 @@ export default function PlannerDetailPage() {
                   return count
                 }
                 
-                const visibleCustomStopsForDay = sortedCustomStopsForDay
-                const hiddenCustomStopsCount = 0
-                const routeStopIds = new Set(routeStops.map((stop) => stop.id))
-                const alternateStops = allStops.filter((stop) => !routeStopIds.has(stop.id))
+                const MAX_CUSTOM_ROUTE_STOPS_PER_DAY = 2
+                const selectedCustomStop = selectedOption
+                  ? sortedCustomStopsForDay.find(
+                      (stop) => normalizeStopId(stop.stop_id || stop.id) === normalizeStopId(selectedOption.id)
+                    )
+                  : undefined
+                const remainingCustomStops = sortedCustomStopsForDay.filter(
+                  (stop) => !selectedCustomStop || normalizeStopId(stop.stop_id || stop.id) !== normalizeStopId(selectedCustomStop.stop_id || selectedCustomStop.id)
+                )
+                const visibleCustomStopsForDay = [
+                  ...(selectedCustomStop ? [selectedCustomStop] : []),
+                  ...remainingCustomStops.slice(0, Math.max(0, MAX_CUSTOM_ROUTE_STOPS_PER_DAY - (selectedCustomStop ? 1 : 0))),
+                ]
+                const hiddenCustomStopsCount = Math.max(0, sortedCustomStopsForDay.length - visibleCustomStopsForDay.length)
+                const alternateStops = allStops.filter((stop) => {
+                  const normalizedId = normalizeStopId(stop.id)
+                  return !routeStopIds.has(normalizedId) && !endpointStopIds.has(normalizedId)
+                })
                 const optionsToShow = expandedSegmentOptions.has(index)
                   ? alternateStops
                   : alternateStops.slice(0, 3)
@@ -2839,6 +2993,9 @@ export default function PlannerDetailPage() {
                                         <div className="flex items-center gap-2">
                                           <span className="font-medium text-sm">{stop.location_name}</span>
                                           <Badge variant="outline" className="text-xs">Custom</Badge>
+                                          {normalizeStopId(stop.stop_id || stop.id) === normalizeStopId(selectedOption?.id) && (
+                                            <Badge variant="secondary" className="text-xs">Selected</Badge>
+                                          )}
                                         </div>
                                         <div className="text-xs text-muted-foreground mt-1">
                                           Added from nearby alternatives for Day {index + 1}
@@ -3251,7 +3408,7 @@ export default function PlannerDetailPage() {
                               <p className="text-xs text-muted-foreground">{day.suggestedStay.whyStopHere}</p>
                             )}
                             {day.suggestedStay.aaoTip && (
-                              <p className="text-xs text-primary/80 italic">"{day.suggestedStay.aaoTip}"</p>
+                              <p className="text-xs text-primary/80 italic">&quot;{day.suggestedStay.aaoTip}&quot;</p>
                             )}
                           </div>
                         ) : (
@@ -3377,9 +3534,19 @@ export default function PlannerDetailPage() {
                     </Button>
                   </div>
                 </div>
-                <Button className="w-full" onClick={handleRebuildPlan}>
-                  Rebuild plan
-                </Button>
+                <div className="flex flex-col gap-2">
+                  <Button className="w-full" onClick={handleRebuildPlan} disabled={routeOptionsLoading}>
+                    Rebuild plan
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="w-full"
+                    onClick={handleFixPlan}
+                    disabled={fixingPlan || routeOptionsLoading}
+                  >
+                    {fixingPlan ? "Fixing…" : "Fix duplicate stops"}
+                  </Button>
+                </div>
               </CardContent>
             </Card>
 
@@ -3446,6 +3613,37 @@ export default function PlannerDetailPage() {
                 </div>
               </CardContent>
             </Card>
+
+            {stops.length > 0 && (
+              <Card className="border">
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-lg">Fetched stops JSON</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="mb-3 grid grid-cols-2 gap-3 text-sm">
+                    <div className="rounded-2xl border bg-muted/5 p-3">
+                      <div className="text-muted-foreground">Total stops</div>
+                      <div className="text-base font-semibold">{stopRepeatSummary.totalStops}</div>
+                    </div>
+                    <div className="rounded-2xl border bg-muted/5 p-3">
+                      <div className="text-muted-foreground">Unique stops</div>
+                      <div className="text-base font-semibold">{stopRepeatSummary.uniqueStops}</div>
+                    </div>
+                    <div className="rounded-2xl border bg-muted/5 p-3">
+                      <div className="text-muted-foreground">Repeat instances</div>
+                      <div className="text-base font-semibold">{stopRepeatSummary.repeatInstances}</div>
+                    </div>
+                    <div className="rounded-2xl border bg-muted/5 p-3">
+                      <div className="text-muted-foreground">Repeated stops</div>
+                      <div className="text-base font-semibold">{stopRepeatSummary.repeatedStops}</div>
+                    </div>
+                  </div>
+                  <pre className="max-h-96 overflow-auto rounded-2xl border bg-muted/5 p-3 text-xs leading-5 text-muted-foreground">
+                    {JSON.stringify(stops, null, 2)}
+                  </pre>
+                </CardContent>
+              </Card>
+            )}
 
             <Card className="border">
               <CardHeader className="pb-3">

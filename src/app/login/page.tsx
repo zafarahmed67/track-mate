@@ -1,8 +1,8 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import Link from "next/link"
-import { useRouter } from "next/navigation"
+import { useRouter, useSearchParams } from "next/navigation"
 import { createClient } from "@supabase/supabase-js"
 import { Button } from "@/components/ui/button"
 import {
@@ -20,12 +20,26 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_PUBLISHED_KEY!
 )
 
+const ERROR_MESSAGES: Record<string, string> = {
+  link_expired: "Your login link has expired. Please request a new one below.",
+  invalid_session: "Your session was invalid. Please sign in again.",
+  user_not_found: "Account not found. Contact support if you believe this is an error.",
+  auth_error: "Authentication failed. Please try again.",
+  unexpected: "Something went wrong. Please try again.",
+}
+
 export default function LoginPage() {
   const router = useRouter()
+  const searchParams = useSearchParams()
   const [email, setEmail] = useState("")
   const [submitted, setSubmitted] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState("")
+
+  useEffect(() => {
+    const errorCode = searchParams.get("error")
+    if (errorCode) setError(ERROR_MESSAGES[errorCode] ?? "Authentication failed. Please try again.")
+  }, [searchParams])
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault()

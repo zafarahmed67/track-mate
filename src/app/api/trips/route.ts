@@ -368,7 +368,9 @@ async function generateCustomStop(
   destLat: number,
   destLng: number,
   tripId: string,
-  tripDurationDays: number
+  tripDurationDays: number,
+  existingStopDistancesKm: number[] = [],
+  requestedCustomStops = 0
 ): Promise<GenerateCustomStopResult> {
   if (!supabaseAdmin) {
     return {
@@ -401,8 +403,9 @@ async function generateCustomStop(
 
     const directDistanceKmForProbes = calculateDistance(startLat, startLng, destLat, destLng)
 
-    // More probe points for longer routes (every ~150km straight-line)
-    const probeCount = Math.max(4, Math.min(10, Math.ceil(directDistanceKmForProbes / 150)))
+    // More probe points for longer routes. Remote routes need a wider search net.
+    const baseProbeCount = Math.max(4, Math.ceil(directDistanceKmForProbes / 150))
+    const probeCount = directDistanceKmForProbes > 2000 ? Math.min(50, baseProbeCount) : Math.min(30, baseProbeCount)
     const probePoints = Array.from({ length: probeCount }, (_, i) => {
       const fraction = (i + 1) / (probeCount + 1)
       return {
@@ -416,12 +419,22 @@ async function generateCustomStop(
 
     // Search config: [type, keyword, radius]
     // rv_park is Google's type for caravan parks; campground covers national park camps.
-    // Use a large radius (40km) so remote Australian searches return results.
+    // Use a larger radius for remote Australian searches so sparse outback routes still return results.
     const overnightSearches: Array<{ type: string; keyword?: string; radius: number }> = [
-      { type: "rv_park", radius: 40000 },
-      { type: "campground", radius: 40000 },
+      { type: "rv_park", radius: directDistanceKmForProbes > 1000 ? 80000 : 40000 },
+      { type: "campground", radius: directDistanceKmForProbes > 1000 ? 80000 : 40000 },
       { type: "rv_park", keyword: "caravan park", radius: 50000 },
+      { type: "campground", keyword: "free camp", radius: directDistanceKmForProbes > 1000 ? 80000 : 50000 },
+      { type: "campground", keyword: "roadhouse", radius: directDistanceKmForProbes > 1000 ? 80000 : 50000 },
     ]
+
+    if (directDistanceKmForProbes > 1000) {
+      overnightSearches.push(
+        { type: "parking", radius: 80000 },
+        { type: "gas_station", keyword: "truck stop", radius: 80000 },
+        { type: "point_of_interest", keyword: "rest area", radius: 80000 }
+      )
+    }
 
     const seenPlaces = new Set<string>()
     const customStopCandidates: Array<Record<string, unknown> & { distance_from_start_km: number }> = []
@@ -446,7 +459,8 @@ async function generateCustomStop(
           const data = await response.json()
           if (data.results) {
             totalFetched += data.results.length
-            data.results.slice(0, 5).forEach((place: Record<string, unknown>) => {
+            const maxResultsPerSearch = directDistanceKmForProbes > 1000 ? 20 : 10
+            data.results.slice(0, maxResultsPerSearch).forEach((place: Record<string, unknown>) => {
               const name = String(place.name ?? "")
               // Skip irrelevant accommodation types (hotels, motels, etc.)
               if (OVERNIGHT_EXCLUDE.test(name)) return
@@ -481,12 +495,65 @@ async function generateCustomStop(
     }
 
     const directDistanceKm = directDistanceKmForProbes
-    const targetCustomStops = Math.max(2, Math.min(10, Math.round(directDistanceKm / 180)))
+    // Use the explicit requestedCustomStops passed from trip handler, with fallback to distance-based calc
+    const targetCustomStops = requestedCustomStops > 0
+      ? requestedCustomStops
+      : Math.max(2, Math.min(10, Math.round(directDistanceKm / 180)))
 
     const orderedCustomCandidates = [...customStopCandidates].sort(
       (a, b) => a.distance_from_start_km - b.distance_from_start_km
     )
-    const plannedCustomCandidates = pickSpacedStops(orderedCustomCandidates, 70, targetCustomStops)
+    // Dynamic initial spacing based on route length and target
+    const initialSpacingKm = Math.max(20, Math.ceil(directDistanceKm / (targetCustomStops + Math.ceil(targetCustomStops * 0.2))))
+    const plannedCustomCandidates = pickSpacedStops(orderedCustomCandidates, initialSpacingKm, targetCustomStops)
+
+    // If initial spacing doesn't hit quota, progressively relax constraints
+    if (plannedCustomCandidates.length < targetCustomStops && customStopCandidates.length > plannedCustomCandidates.length) {
+      const selectedKeys = new Set(
+        plannedCustomCandidates.map((s) =>
+          buildCustomStopKey(String(s.location_name || ""), String(s.latitude || ""), String(s.longitude || ""))
+        )
+      )
+
+      const addMoreCandidates = (candidates: typeof customStopCandidates, minSpacingKm: number) => {
+        for (const candidate of candidates) {
+          if (plannedCustomCandidates.length >= targetCustomStops) break
+          const key = buildCustomStopKey(String(candidate.location_name || ""), String(candidate.latitude || ""), String(candidate.longitude || ""))
+          if (selectedKeys.has(key)) continue
+          const farEnough = plannedCustomCandidates.every((p) => Math.abs(p.distance_from_start_km - candidate.distance_from_start_km) >= minSpacingKm)
+          if (!farEnough) continue
+          plannedCustomCandidates.push(candidate)
+          selectedKeys.add(key)
+        }
+      }
+
+      // Pass 1: Relaxed spacing (60% of initial), still using no-overlap candidates
+      const pass1Spacing = Math.max(10, Math.ceil(initialSpacingKm * 0.6))
+      addMoreCandidates(customStopCandidates.filter((c) => existingStopDistancesKm.every((d) => Math.abs(c.distance_from_start_km - d) >= 60)), pass1Spacing)
+
+      // Pass 2: Even more relaxed (40% initial), reduce DB overlap to 25km
+      if (plannedCustomCandidates.length < targetCustomStops) {
+        const pass2Spacing = Math.max(8, Math.ceil(initialSpacingKm * 0.4))
+        addMoreCandidates(customStopCandidates.filter((c) => existingStopDistancesKm.every((d) => Math.abs(c.distance_from_start_km - d) >= 25)), pass2Spacing)
+      }
+
+      // Pass 3: Tight spacing (25% initial), minimal DB overlap (15km)
+      if (plannedCustomCandidates.length < targetCustomStops) {
+        const pass3Spacing = Math.max(5, Math.ceil(initialSpacingKm * 0.25))
+        addMoreCandidates(customStopCandidates.filter((c) => existingStopDistancesKm.every((d) => Math.abs(c.distance_from_start_km - d) >= 15)), pass3Spacing)
+      }
+
+      // Pass 4: Final fallback with very loose spacing (3km)
+      if (plannedCustomCandidates.length < targetCustomStops) {
+        addMoreCandidates(customStopCandidates, 3)
+      }
+
+      if (plannedCustomCandidates.length >= targetCustomStops) {
+        console.log(`[3/4] Adaptive fallback filled to ${plannedCustomCandidates.length} stops (target: ${targetCustomStops})`)
+      } else {
+        console.log(`[3/4] Adaptive fallback partially filled: ${plannedCustomCandidates.length} of ${targetCustomStops} (initial spacing: ${initialSpacingKm}km)`)
+      }
+    }
     const customStopsToInsert = plannedCustomCandidates.map((candidate) => {
       const progress = directDistanceKm > 0
         ? Math.max(0, Math.min(0.999, Number(candidate.distance_from_start_km) / directDistanceKm))
@@ -927,6 +994,21 @@ export async function POST(req: NextRequest) {
         searchTypes: ["rv_park", "campground", "caravan park keyword"],
       })
 
+      const dbStopDistancesKm = stops
+        .map((stop) => (stop as { distance_from_start_km?: number }).distance_from_start_km ?? 0)
+        .filter((distance) => distance > 0)
+
+      const safeTripDays = Math.max(1, Math.round(Number(tripDurationDays) || 1))
+      const targetTotalStops = safeTripDays * 3
+      const customStopsNeeded = Math.max(0, targetTotalStops - generatedStopsCount)
+
+      console.log("[3/4] target stop quota", {
+        tripDurationDays: safeTripDays,
+        targetTotalStops,
+        dbStops: generatedStopsCount,
+        googleStopsNeeded: customStopsNeeded,
+      })
+
       const {
         success: customSuccess,
         stopsGenerated = 0,
@@ -940,7 +1022,9 @@ export async function POST(req: NextRequest) {
           resolvedDestLat,
           resolvedDestLng,
           data.id,
-          Number(tripDurationDays) || 1
+          Number(tripDurationDays) || 1,
+          dbStopDistancesKm,
+          customStopsNeeded
         )
 
       if (customError) {

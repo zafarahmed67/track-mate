@@ -17,8 +17,8 @@ interface FuelStationOption {
 interface RouteStopCandidate {
   id: string
   location_name: string
-  latitude: string
-  longitude: string
+  latitude: string | number
+  longitude: string | number
   corridor?: string | null
   state?: string
   region?: string
@@ -370,10 +370,10 @@ export async function POST(req: NextRequest) {
     const { data: stops, error: stopsError } = await supabaseAdmin
       .from("stops")
       .select("*")
-      .gte("latitude", bounds.minLat.toString())
-      .lte("latitude", bounds.maxLat.toString())
-      .gte("longitude", bounds.minLng.toString())
-      .lte("longitude", bounds.maxLng.toString())
+      .gte("latitude", bounds.minLat)
+      .lte("latitude", bounds.maxLat)
+      .gte("longitude", bounds.minLng)
+      .lte("longitude", bounds.maxLng)
 
     if (stopsError) {
       return NextResponse.json(
@@ -390,10 +390,6 @@ export async function POST(req: NextRequest) {
         .from("custom_stops")
         .select("*")
         .eq("trip_id", tripId)
-        .gte("latitude", bounds.minLat.toString())
-        .lte("latitude", bounds.maxLat.toString())
-        .gte("longitude", bounds.minLng.toString())
-        .lte("longitude", bounds.maxLng.toString())
 
       if (customStopsError) {
         console.error("Error fetching custom stops:", customStopsError)
@@ -419,8 +415,8 @@ export async function POST(req: NextRequest) {
     const allStops = [...(stops || []), ...customStops]
 
     const routeFiltered = allStops.map((stop) => {
-      const lat = parseFloat(stop.latitude)
-      const lng = parseFloat(stop.longitude)
+      const lat = typeof stop.latitude === "number" ? stop.latitude : parseFloat(stop.latitude)
+      const lng = typeof stop.longitude === "number" ? stop.longitude : parseFloat(stop.longitude)
       const distFromStart = calculateDistance(startLat, startLng, lat, lng)
       const distFromDest = calculateDistance(destLat, destLng, lat, lng)
       const sumDist = distFromStart + distFromDest
@@ -446,11 +442,14 @@ export async function POST(req: NextRequest) {
 
     const segments: PlannedSegment[] = []
     const usedStopIds = new Set<string>()
+    // Tracks all stops that have been selected as the primary overnight anchor,
+    // used to avoid recommending the same stop as the primary pick on multiple days.
+    const anchoredStopIds = new Set<string>()
 
     const totalDistanceKm = drivingInfo?.totalDistanceKm ?? directDistance
     const suggestedDays = Math.max(1, Math.round(totalDistanceKm / config.kmPerDay))
     const planningDays = requestedTripDays && requestedTripDays > 0
-      ? Math.min(requestedTripDays, suggestedDays)
+      ? requestedTripDays
       : suggestedDays
     const northbound = destLat > startLat
     const latSpan = Math.abs(destLat - startLat)
@@ -466,7 +465,21 @@ export async function POST(req: NextRequest) {
       220,
       avoidLongDays ? 340 : 450
     )
-    const stopDistances = stopsWithDistance.map((s) => s.distance_from_start_km)
+
+    // Stop distance_from_start_km is haversine (straight-line). Segment boundaries
+    // use actual driving km. Scale stop distances proportionally so stops land in
+    // the correct segment window (e.g. 2482 km haversine → 3842 km driving).
+    const scaleFactor = totalDistanceKm > 0 && directDistance > 0
+      ? totalDistanceKm / directDistance
+      : 1
+    const scaledStopsWithDistance: RouteStopCandidate[] = scaleFactor !== 1
+      ? stopsWithDistance.map((s) => ({
+          ...s,
+          distance_from_start_km: Math.round(s.distance_from_start_km * scaleFactor * 10) / 10,
+        }))
+      : stopsWithDistance
+
+    const stopDistances = scaledStopsWithDistance.map((s) => s.distance_from_start_km)
 
     let boundaries = buildAdaptiveBoundaries(
       totalDistanceKm,
@@ -504,17 +517,18 @@ export async function POST(req: NextRequest) {
       const MIN_STOPS_PER_SEGMENT = 2
       const TARGET_STOPS_PER_SEGMENT = 3
 
-      const inRange = stopsWithDistance.filter(
+      const inRange = scaledStopsWithDistance.filter(
         (s) => s.distance_from_start_km >= (startKm - 35) && s.distance_from_start_km <= (endKm + 35)
       )
 
-      const expandedInRange = stopsWithDistance.filter(
+      const expandedInRange = scaledStopsWithDistance.filter(
         (s) => s.distance_from_start_km >= (startKm - 75) && s.distance_from_start_km <= (endKm + 75)
       )
 
       const inRangeUnused = inRange.filter((s) => !usedStopIds.has(s.id))
 
       const expandedUnused = expandedInRange.filter((s) => !usedStopIds.has(s.id))
+      const isForwardEnough = (s: RouteStopCandidate) => s.distance_from_start_km >= (startKm - 20)
 
       const canIncludeAsOther = (s: RouteStopCandidate) => s.is_verified || includeFreeCamps !== false || s.cost_band !== "Free"
 
@@ -574,7 +588,7 @@ export async function POST(req: NextRequest) {
 
       if (totalCandidates() < MIN_STOPS_PER_SEGMENT) {
         const nearestGlobalUnused = rankStops(
-          stopsWithDistance.filter((s) => !usedStopIds.has(s.id) && canIncludeAsOther(s)),
+          scaledStopsWithDistance.filter((s) => !usedStopIds.has(s.id) && canIncludeAsOther(s) && isForwardEnough(s)),
           midKm,
           20,
           preferVerified
@@ -583,8 +597,9 @@ export async function POST(req: NextRequest) {
       }
 
       if (totalCandidates() < MIN_STOPS_PER_SEGMENT) {
+        // Prefer stops not yet used as overnight anchors to avoid day-to-day repeats
         const nearestGlobal = rankStops(
-          stopsWithDistance.filter((s) => canIncludeAsOther(s)),
+          scaledStopsWithDistance.filter((s) => canIncludeAsOther(s) && !anchoredStopIds.has(s.id) && isForwardEnough(s)),
           midKm,
           20,
           preferVerified
@@ -594,7 +609,51 @@ export async function POST(req: NextRequest) {
 
       if (totalCandidates() === 0) {
         degradedMode = true
-        otherInSegment = rankStops(stopsWithDistance, midKm, 3)
+        const lookaheadKm = Math.max(220, config.kmPerDay)
+        const forwardFallback = rankStops(
+          scaledStopsWithDistance.filter(
+            (s) =>
+              canIncludeAsOther(s) &&
+              !anchoredStopIds.has(s.id) &&
+              s.distance_from_start_km >= (startKm - 20) &&
+              s.distance_from_start_km <= (endKm + lookaheadKm)
+          ),
+          endKm + lookaheadKm * 0.5,
+          3,
+          preferVerified
+        )
+
+        if (forwardFallback.length > 0) {
+          appendCandidates(forwardFallback)
+        }
+
+        // Final rescue: if end-of-route segment is still empty, borrow the nearest
+        // unanchored stop from adjacent distance bands (slight backtrack allowed).
+        if (totalCandidates() === 0) {
+          const backtrackKm = Math.max(140, config.kmPerDay * 0.6)
+          const nearbyFallback = rankStops(
+            scaledStopsWithDistance.filter(
+              (s) =>
+                canIncludeAsOther(s) &&
+                !anchoredStopIds.has(s.id) &&
+                s.distance_from_start_km >= (startKm - backtrackKm) &&
+                s.distance_from_start_km <= (endKm + Math.max(80, config.kmPerDay * 0.4))
+            ),
+            endKm,
+            2,
+            preferVerified
+          )
+
+          if (nearbyFallback.length > 0) {
+            appendCandidates(nearbyFallback)
+          }
+        }
+
+        if (totalCandidates() === 0) {
+          // Still no viable forward candidates in this corridor.
+          verifiedInSegment = []
+          otherInSegment = []
+        }
       }
 
       if (verifiedInSegment.length > 6) {
@@ -607,6 +666,7 @@ export async function POST(req: NextRequest) {
       const overnightAnchor = verifiedInSegment[0] || otherInSegment[0]
       if (overnightAnchor) {
         usedStopIds.add(overnightAnchor.id)
+        anchoredStopIds.add(overnightAnchor.id)
       }
 
       const segmentDistance = Math.max(0, endKm - startKm)

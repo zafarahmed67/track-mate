@@ -51,6 +51,15 @@ function AuthCallbackContent() {
     async function handleCallback() {
       try {
         const hashParams = new URLSearchParams(window.location.hash.substring(1))
+        const errorCode = hashParams.get("error_code") || searchParams.get("error_code")
+
+        if (errorCode) {
+          setRedirecting(true)
+          const msg = errorCode === "otp_expired" ? "link_expired" : "auth_error"
+          router.replace(`/login?error=${msg}`)
+          return
+        }
+
         const accessToken = hashParams.get("access_token") || searchParams.get("access_token")
         const type = hashParams.get("type") || searchParams.get("type")
 
