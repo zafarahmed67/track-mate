@@ -1054,6 +1054,18 @@ export default function PlannerDetailPage() {
           why_we_d_stay_again: s.why_we_d_stay_again ?? null,
         }))
 
+        const optionStops = [...segment.verifiedStops, ...segment.otherStops].map((s) => ({
+          location_name: s.location_name,
+          stay_type: s.stay_type ?? null,
+          route_type: s.route_type ?? null,
+          aao_tip: s.aao_tip ?? null,
+          why_stop_here: s.why_stop_here ?? null,
+          why_we_d_stay_again: s.why_we_d_stay_again ?? null,
+          is_verified: Boolean(s.is_verified),
+        }))
+
+        const allowedStopNames = Array.from(new Set(optionStops.map((s) => s.location_name).filter(Boolean)))
+
         return {
           dayNumber: index + 1,
           fromLocation: index === 0
@@ -1065,8 +1077,9 @@ export default function PlannerDetailPage() {
           distanceKm: estimateSegmentDistance(segment),
           driveTimeMinutes: estimateSegmentDuration(segment),
           verifiedStops,
+          optionStops,
           // Explicit list for AI enforcement — AI must only pick from these names
-          allowedStopNames: verifiedStops.map((s) => s.location_name),
+          allowedStopNames,
           // Fuel data
           fuelCritical: segment.fuelCritical ?? false,
           isRemote: segment.isRemote ?? false,
@@ -2869,9 +2882,23 @@ export default function PlannerDetailPage() {
                   ...remainingCustomStops.slice(0, Math.max(0, MAX_CUSTOM_ROUTE_STOPS_PER_DAY - (selectedCustomStop ? 1 : 0))),
                 ]
                 const hiddenCustomStopsCount = Math.max(0, sortedCustomStopsForDay.length - visibleCustomStopsForDay.length)
+                const displayedRouteStopIds = new Set<string>([
+                  ...routeStops.map((stop) => normalizeStopId(stop.id)),
+                  ...visibleCustomStopsForDay.map((stop) => normalizeStopId(stop.stop_id || stop.id)),
+                  normalizeStopId(selectedOption?.id),
+                ].filter(Boolean))
+                const displayedRouteStopNames = new Set<string>([
+                  ...routeStops.map((stop) => stop.location_name.toLowerCase().trim()),
+                  ...visibleCustomStopsForDay.map((stop) => stop.location_name.toLowerCase().trim()),
+                  selectedOption?.location_name?.toLowerCase().trim(),
+                ].filter(Boolean) as string[])
                 const alternateStops = allStops.filter((stop) => {
                   const normalizedId = normalizeStopId(stop.id)
-                  return !routeStopIds.has(normalizedId) && !endpointStopIds.has(normalizedId)
+                  const normalizedName = stop.location_name.toLowerCase().trim()
+                  return !routeStopIds.has(normalizedId)
+                    && !endpointStopIds.has(normalizedId)
+                    && !displayedRouteStopIds.has(normalizedId)
+                    && !displayedRouteStopNames.has(normalizedName)
                 })
                 const optionsToShow = expandedSegmentOptions.has(index)
                   ? alternateStops
@@ -2971,7 +2998,11 @@ export default function PlannerDetailPage() {
                               )}
 
                               {routeStops.length === 0 && customStopsForDay.length === 0 && (
-                                segment.verifiedStops.length === 0 ? (
+                                selectedOption ? (
+                                  <div className="rounded-2xl border border-dashed border-muted/30 bg-muted/10 p-3 text-xs text-muted-foreground">
+                                    Overnight anchor is set for this leg at point B. Add additional alternatives from Options if needed.
+                                  </div>
+                                ) : segment.verifiedStops.length === 0 ? (
                                   <div className="rounded-2xl border border-dashed border-amber-400/40 bg-amber-50/5 p-3 text-xs text-amber-700 dark:text-amber-400">
                                     No AAO verified stop on this stretch. This leg has no database-verified overnight options — check nearby alternatives below or add a custom stop.
                                   </div>

@@ -16,13 +16,13 @@ Given structured trip data, produce a JSON object with this EXACT shape — no e
       "dayNumber": 1,
       "narrative": "<2-3 sentences about the day's drive — terrain, region highlights, character. Do NOT name a stop here.>",
       "suggestedStay": {
-        "name": "<exact location_name from verifiedStops for this day, or null if allowedStopNames is empty>",
-        "stopType": "<stay_type or route_type value from that stop>",
+        "name": "<exact location_name from this day's allowedStopNames, or null if allowedStopNames is empty>",
+        "stopType": "<stay_type or route_type value from optionStops record for that stop>",
         "whyStopHere": "<why_stop_here value from that stop, or a 1-sentence reason if field is empty>",
         "aaoTip": "<aao_tip value from that stop, or empty string if none>"
       },
       "aaoTips": ["<tip drawn from aao_tip / why_stop_here / why_we_d_stay_again of verifiedStops>"],
-      "gapNote": "<1-sentence planning caution if degradedMode=true OR verifiedStops is empty, otherwise null>",
+      "gapNote": "<1-sentence planning caution if degradedMode=true OR allowedStopNames is empty, otherwise null>",
       "fuelNote": "<1-sentence fuel guidance if fuelCritical=true OR gapFromLastFuelKm>200 OR gapToNextFuelKm>200, otherwise null>"
     }
   ],
@@ -37,8 +37,9 @@ Given structured trip data, produce a JSON object with this EXACT shape — no e
 STRICT RULES — violation will break the app:
 1. STOP ENFORCEMENT: suggestedStay.name MUST be an exact value from that day's allowedStopNames array. If allowedStopNames is empty, set suggestedStay to null. NEVER invent a stop name not in allowedStopNames.
 2. FUEL: populate fuelNote and tripNotes.fuelGuidance from the fuelCritical / gapFromLastFuelKm / gapToNextFuelKm / fuelWarning fields provided. Do not invent fuel information.
-3. GAPS: if verifiedStops is empty for a day, set suggestedStay to null and write a gapNote stating no AAO verified stop is available on that stretch.
-4. OUTPUT: respond with ONLY the raw JSON object. No markdown fences, no explanation, no trailing text.`
+3. GAPS: if allowedStopNames is empty for a day, set suggestedStay to null and write a gapNote stating no overnight stop is available on that stretch.
+4. VERIFIED CONTEXT: if verifiedStops is empty but allowedStopNames has values, do NOT claim the leg has no stop options.
+5. OUTPUT: respond with ONLY the raw JSON object. No markdown fences, no explanation, no trailing text.`
 
 export async function POST(req: NextRequest, { params }: RouteParams) {
   try {
