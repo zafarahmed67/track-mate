@@ -179,6 +179,58 @@ function interpolatePoint(lat1: number, lng1: number, lat2: number, lng2: number
   }
 }
 
+function projectDistanceAlongRouteKm(params: {
+  startLat: number
+  startLng: number
+  destLat: number
+  destLng: number
+  pointLat: number
+  pointLng: number
+  totalDistanceKm: number
+}) {
+  const {
+    startLat,
+    startLng,
+    destLat,
+    destLng,
+    pointLat,
+    pointLng,
+    totalDistanceKm,
+  } = params
+
+  const effectiveTotalKm = Number.isFinite(totalDistanceKm) && totalDistanceKm > 0
+    ? totalDistanceKm
+    : calculateDistance(startLat, startLng, destLat, destLng)
+
+  if (!Number.isFinite(effectiveTotalKm) || effectiveTotalKm <= 0) return 0
+
+  // Use an equirectangular projection for stable local vector math.
+  const avgLatRad = ((startLat + destLat) / 2) * Math.PI / 180
+  const scaleX = Math.cos(avgLatRad)
+
+  const sx = startLng * scaleX
+  const sy = startLat
+  const dx = destLng * scaleX
+  const dy = destLat
+  const px = pointLng * scaleX
+  const py = pointLat
+
+  const vx = dx - sx
+  const vy = dy - sy
+  const wx = px - sx
+  const wy = py - sy
+  const vLenSq = (vx * vx) + (vy * vy)
+
+  if (!Number.isFinite(vLenSq) || vLenSq <= 1e-12) {
+    return Math.round(calculateDistance(startLat, startLng, pointLat, pointLng) * 10) / 10
+  }
+
+  const tRaw = ((wx * vx) + (wy * vy)) / vLenSq
+  const t = clamp(tRaw, 0, 1)
+
+  return Math.round(effectiveTotalKm * t * 10) / 10
+}
+
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value))
 }
@@ -728,7 +780,15 @@ export async function POST(req: NextRequest) {
               const stationLat = station.geometry.location.lat
               const stationLng = station.geometry.location.lng
               const key = station.place_id || `${stationLat.toFixed(3)}:${stationLng.toFixed(3)}`
-              const distanceFromStartKm = calculateDistance(startLat, startLng, stationLat, stationLng)
+              const distanceFromStartKm = projectDistanceAlongRouteKm({
+                startLat,
+                startLng,
+                destLat,
+                destLng,
+                pointLat: stationLat,
+                pointLng: stationLng,
+                totalDistanceKm,
+              })
 
               newStations.push({
                 id: key,
@@ -832,7 +892,15 @@ export async function POST(req: NextRequest) {
                 const stationLat = station.geometry.location.lat
                 const stationLng = station.geometry.location.lng
                 const key = station.place_id || `${stationLat.toFixed(3)}:${stationLng.toFixed(3)}`
-                const distanceFromStartKm = calculateDistance(startLat, startLng, stationLat, stationLng)
+                const distanceFromStartKm = projectDistanceAlongRouteKm({
+                  startLat,
+                  startLng,
+                  destLat,
+                  destLng,
+                  pointLat: stationLat,
+                  pointLng: stationLng,
+                  totalDistanceKm,
+                })
 
                 newStations.push({
                   id: key,
