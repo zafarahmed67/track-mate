@@ -1463,23 +1463,32 @@ export default function PlannerDetailPage() {
 
   const handleRemoveStopFromOptions = async (stopId: string) => {
     try {
-      const stopToRemove = stops.find((s) => s.id === stopId)
+      const normalizedStopId = normalizeStopId(stopId)
+      const stopToRemove = stops.find((s) => normalizeStopId(s.id) === normalizedStopId)
       const stopName = stopToRemove?.location_name || "Unknown stop"
+      const isCustomStop = stopToRemove?.verification_status === "custom" || stopId.startsWith("custom-")
 
-      const tripResponse = await fetch(`/api/trips/${tripId}/stops?id=${stopId}`, {
-        method: "DELETE",
-      })
-      const tripResult = await tripResponse.json()
-
-      const result = tripResult.success
-        ? tripResult
-        : await (await fetch(`/api/custom-stops?id=${stopId}`, {
+      const tryDeleteTripStop = async () => {
+        const response = await fetch(`/api/trips/${tripId}/stops?id=${normalizedStopId}`, {
           method: "DELETE",
-        })).json()
+        })
+        return response.json()
+      }
+
+      const tryDeleteCustomStop = async () => {
+        const response = await fetch(`/api/custom-stops?id=${stopId}`, {
+          method: "DELETE",
+        })
+        return response.json()
+      }
+
+      const result = isCustomStop
+        ? (await tryDeleteCustomStop())
+        : (await tryDeleteTripStop())
 
       if (result.success) {
         validateFuelAfterEdit(stopId, stopName)
-        const newStops = stops.filter((s) => s.id !== stopId)
+        const newStops = stops.filter((s) => normalizeStopId(s.id) !== normalizedStopId)
         setStops(newStops)
         setFilteredStops(newStops)
         await loadRouteOptions()

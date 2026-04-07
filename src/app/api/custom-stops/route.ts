@@ -1,6 +1,9 @@
 import { supabaseAdmin } from "@/config/supabase"
 import { NextRequest, NextResponse } from "next/server"
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const normalizeStopId = (value: string): string => value.replace(/^custom-/, "")
+
 export async function GET(req: NextRequest) {
   try {
     if (!supabaseAdmin) {
@@ -149,10 +152,18 @@ export async function DELETE(req: NextRequest) {
       )
     }
 
+    const normalizedId = normalizeStopId(id)
+    if (!UUID_REGEX.test(normalizedId)) {
+      return NextResponse.json(
+        { success: false, error: "Invalid stop id" },
+        { status: 400 }
+      )
+    }
+
     const { count, error } = await supabaseAdmin
       .from("custom_stops")
       .delete({ count: "exact" })
-      .eq("id", id)
+      .eq("id", normalizedId)
 
     if (error) {
       console.error("Database error:", error)

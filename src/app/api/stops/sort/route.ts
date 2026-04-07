@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from "next/server"
 
+function toFiniteNumber(value: unknown): number | null {
+  const n = Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
 interface GoogleDirectionsRoute {
   summary?: string
   overview_polyline: { points: string }
@@ -141,9 +146,50 @@ export async function POST(req: NextRequest) {
       })
     }
 
+    const originLat = toFiniteNumber(origin?.lat)
+    const originLng = toFiniteNumber(origin?.lng)
+    const destinationLat = toFiniteNumber(destination?.lat)
+    const destinationLng = toFiniteNumber(destination?.lng)
+
+    if (originLat === null || originLng === null || destinationLat === null || destinationLng === null) {
+      return NextResponse.json(
+        { success: false, error: "origin and destination coordinates are required" },
+        { status: 400 }
+      )
+    }
+
+    const sanitizedStops = stops
+      .map((stop) => {
+        const lat = toFiniteNumber(stop.latitude)
+        const lng = toFiniteNumber(stop.longitude)
+        if (lat === null || lng === null) return null
+        return {
+          id: stop.id,
+          location_name: stop.location_name,
+          latitude: lat,
+          longitude: lng,
+        }
+      })
+      .filter((stop): stop is { id: string; location_name: string; latitude: number; longitude: number } => !!stop)
+
+    if (sanitizedStops.length === 0) {
+      return NextResponse.json({ success: true, sortedStops: [] })
+    }
+
     let polylinePoints: Array<{ lat: number; lng: number }> = []
 
-    if (waypoints && waypoints.length > 0) {
+    const sanitizedWaypoints = Array.isArray(waypoints)
+      ? waypoints
+          .map((w: { lat: unknown; lng: unknown }) => {
+            const lat = toFiniteNumber(w?.lat)
+            const lng = toFiniteNumber(w?.lng)
+            if (lat === null || lng === null) return null
+            return { lat, lng }
+          })
+          .filter((w): w is { lat: number; lng: number } => !!w)
+      : []
+
+    if (sanitizedWaypoints.length > 0) {
       const apiKey = process.env.NEXT_PUBLIC_GMAPS_API_KEY
       if (!apiKey) {
         return NextResponse.json(
@@ -153,15 +199,15 @@ export async function POST(req: NextRequest) {
       }
 
       let waypointStr = ""
-      if (waypoints.length === 1) {
-        waypointStr = `waypoints=${waypoints[0].lat},${waypoints[0].lng}`
+      if (sanitizedWaypoints.length === 1) {
+        waypointStr = `waypoints=${sanitizedWaypoints[0].lat},${sanitizedWaypoints[0].lng}`
       } else {
-        waypointStr = `waypoints=optimize:true|${waypoints.map((w: { lat: number; lng: number }) => `${w.lat},${w.lng}`).join("|")}`
+        waypointStr = `waypoints=optimize:true|${sanitizedWaypoints.map((w: { lat: number; lng: number }) => `${w.lat},${w.lng}`).join("|")}`
       }
 
       const urlParams = new URLSearchParams({
-        origin: `${origin.lat},${origin.lng}`,
-        destination: `${destination.lat},${destination.lng}`,
+        origin: `${originLat},${originLng}`,
+        destination: `${destinationLat},${destinationLng}`,
         mode: "driving",
         key: apiKey,
       })
@@ -171,7 +217,7 @@ export async function POST(req: NextRequest) {
         urlParams.append("avoid", "ferries")
       }
 
-      if (avoidGravelRoads === true && (!waypoints || waypoints.length === 0)) {
+      if (avoidGravelRoads === true && sanitizedWaypoints.length === 0) {
         urlParams.append("alternatives", "true")
       }
 
@@ -186,10 +232,49 @@ export async function POST(req: NextRequest) {
       const data = await response.json()
 
       if (data.status !== "OK" || !data.routes?.length) {
-        return NextResponse.json(
-          { success: false, error: "Failed to get route directions" },
-          { status: 500 }
-        )
+        const fallbackStops = sanitizedStops
+          .map((stop) => {
+            const routeDistance = calculateDistance(originLat, originLng, stop.latitude, stop.longitude)
+            return {
+              id: stop.id,
+              name: stop.location_name,
+              lat: stop.latitude,
+              lng: stop.longitude,
+              routeDistance,
+            }
+          })
+          .sort((a, b) => a.routeDistance - b.routeDistance)
+
+        const sortedStops: Array<{
+          id: string
+          name: string
+          lat: number
+          lng: number
+          routeDistance: number
+          order: number
+        }> = []
+
+        let lastDistance = -Number(minSpacingKm || 50)
+        for (const stop of fallbackStops) {
+          if (stop.routeDistance >= lastDistance + Number(minSpacingKm || 50)) {
+            sortedStops.push({
+              id: stop.id,
+              name: stop.name,
+              lat: stop.lat,
+              lng: stop.lng,
+              routeDistance: Math.round(stop.routeDistance * 10) / 10,
+              order: sortedStops.length + 1,
+            })
+            lastDistance = stop.routeDistance
+          }
+        }
+
+        return NextResponse.json({
+          success: true,
+          sortedStops,
+          degraded: true,
+          warning: `Directions API returned ${data.status}; used local distance sort fallback`,
+        })
       }
 
       const selectedRoute = selectBestDirectionsRoute(data.routes as GoogleDirectionsRoute[])
@@ -198,12 +283,12 @@ export async function POST(req: NextRequest) {
 
       const waypointOrder = selectedRoute.waypoint_order || []
 
-      const stopsWithRouteDistance = stops.map((stop, index) => {
-        const stopLat = parseFloat(stop.latitude)
-        const stopLng = parseFloat(stop.longitude)
+      const stopsWithRouteDistance = sanitizedStops.map((stop, index) => {
+        const stopLat = stop.latitude
+        const stopLng = stop.longitude
 
         let cumulativeDistance = 0
-        let distanceFromRoute = calculateDistance(origin.lat, origin.lng, stopLat, stopLng)
+        let distanceFromRoute = calculateDistance(originLat, originLng, stopLat, stopLng)
 
         if (polylinePoints.length > 2) {
           const { distance, cumulativeDistance: cumDist } = findNearestPointOnPolyline(
@@ -214,7 +299,7 @@ export async function POST(req: NextRequest) {
           cumulativeDistance = cumDist
           distanceFromRoute = distance
         } else {
-          cumulativeDistance = calculateDistance(origin.lat, origin.lng, stopLat, stopLng)
+          cumulativeDistance = calculateDistance(originLat, originLng, stopLat, stopLng)
         }
 
         return {
@@ -278,15 +363,15 @@ export async function POST(req: NextRequest) {
       })
     } else {
       polylinePoints = [
-        { lat: origin.lat, lng: origin.lng },
-        { lat: destination.lat, lng: destination.lng },
+        { lat: originLat, lng: originLng },
+        { lat: destinationLat, lng: destinationLng },
       ]
 
-      const stopsWithRouteDistance = stops.map((stop) => {
-        const stopLat = parseFloat(stop.latitude)
-        const stopLng = parseFloat(stop.longitude)
-        const cumulativeDistance = calculateDistance(origin.lat, origin.lng, stopLat, stopLng)
-        const distanceFromRoute = calculateDistance(origin.lat, origin.lng, stopLat, stopLng)
+      const stopsWithRouteDistance = sanitizedStops.map((stop) => {
+        const stopLat = stop.latitude
+        const stopLng = stop.longitude
+        const cumulativeDistance = calculateDistance(originLat, originLng, stopLat, stopLng)
+        const distanceFromRoute = calculateDistance(originLat, originLng, stopLat, stopLng)
 
         return {
           id: stop.id,
