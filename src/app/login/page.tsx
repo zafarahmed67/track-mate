@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, Suspense } from "react"
 import Link from "next/link"
 import { useRouter, useSearchParams } from "next/navigation"
 import { createClient } from "@supabase/supabase-js"
@@ -28,7 +28,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   unexpected: "Something went wrong. Please try again.",
 }
 
-export default function LoginPage() {
+function LoginForm() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const [email, setEmail] = useState("")
@@ -140,5 +140,27 @@ export default function LoginPage() {
         </CardContent>
       </Card>
     </main>
+  )
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={
+      <main className="flex min-h-screen items-center justify-center bg-muted/30 px-4 py-10">
+        <Card className="w-full max-w-md">
+          <CardHeader className="space-y-2 text-center">
+            <Link href="/" className="mx-auto text-2xl font-bold tracking-tight">
+              TrackMate
+            </Link>
+            <CardTitle className="text-2xl">Login</CardTitle>
+            <CardDescription>
+              Loading...
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      </main>
+    }>
+      <LoginForm />
+    </Suspense>
   )
 }
