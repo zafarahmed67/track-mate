@@ -399,21 +399,32 @@ export default function LandingPage() {
               Purchase once, plan as many trips as you need.
             </p>
             <div className="flex flex-col items-center gap-3 sm:flex-row sm:justify-center">
-              <Button asChild size="lg" className="h-13 px-10 text-base font-medium group w-full sm:w-auto shadow-lg shadow-primary/20">
-                <Link href={hasActiveAccess ? "/planner" : "/planner/new"}>
-                  {hasActiveAccess ? "Go to My Trips" : "Get Started"}
-                  <ArrowRight className="ml-2 h-4 w-4 transition-transform group-hover:translate-x-1" />
-                </Link>
-              </Button>
               {hasActiveAccess ? (
-                <Button asChild size="lg" variant="outline" className="h-13 px-10 text-base w-full sm:w-auto">
-                  <Link href="/planner">View My Trips</Link>
-                </Button>
+                <>
+                  <Button asChild size="lg" className="h-13 px-10 text-base font-medium group w-full sm:w-auto shadow-lg shadow-primary/20">
+                    <Link href="/planner">
+                      Go to My Trips
+                      <ArrowRight className="ml-2 h-4 w-4 transition-transform group-hover:translate-x-1" />
+                    </Link>
+                  </Button>
+                  <Button asChild size="lg" variant="outline" className="h-13 px-10 text-base w-full sm:w-auto">
+                    <Link href="/planner">View My Trips</Link>
+                  </Button>
+                </>
               ) : (
-                <Button asChild size="lg" variant="outline" className="h-13 px-10 text-base w-full sm:w-auto">
-                  <Link href="/login">I already have access</Link>
-                </Button>
+                <>
+                  <Button asChild size="lg" className="h-13 px-10 text-base font-medium group w-full sm:w-auto shadow-lg shadow-primary/20">
+                    <Link href="/planner/new">
+                      Get Started
+                      <ArrowRight className="ml-2 h-4 w-4 transition-transform group-hover:translate-x-1" />
+                    </Link>
+                  </Button>
+                  <Button asChild size="lg" variant="outline" className="h-13 px-10 text-base w-full sm:w-auto">
+                    <Link href="/login">I already have access</Link>
+                  </Button>
+                </>
               )}
+            </div>
           </div>
         </div>
       </section>
