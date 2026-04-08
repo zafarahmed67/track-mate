@@ -5,7 +5,7 @@ import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
-import { isAuthenticated, getStoredUser, logout } from "@/lib/auth"
+import { isAuthenticated, getStoredUser, logout, hasAccess } from "@/lib/auth"
 import {
   MapPin,
   Navigation,
@@ -25,18 +25,23 @@ import {
 export default function LandingPage() {
   const router = useRouter()
   const [loggedIn, setLoggedIn] = useState(false)
+  const [hasActiveAccess, setHasActiveAccess] = useState(false)
   const [userEmail, setUserEmail] = useState("")
   const [mounted, setMounted] = useState(false)
 
   useEffect(() => {
     setMounted(true)
-    setLoggedIn(isAuthenticated())
+    const isLoggedIn = isAuthenticated()
+    const hasAccessStatus = hasAccess()
+    setLoggedIn(isLoggedIn)
+    setHasActiveAccess(hasAccessStatus)
     setUserEmail(getStoredUser()?.email || "")
   }, [])
 
   const handleLogout = () => {
     logout()
     setLoggedIn(false)
+    setHasActiveAccess(false)
     setUserEmail("")
     router.push("/")
   }
@@ -112,16 +117,19 @@ export default function LandingPage() {
           </Link>
 
           <nav className="flex items-center gap-1">
-            {mounted && loggedIn ? (
+            {mounted && hasActiveAccess ? (
               <>
                 <span className="mr-2 text-sm text-muted-foreground hidden sm:inline truncate max-w-[180px]">{userEmail}</span>
-                <Button variant="ghost" size="sm" onClick={handleLogout} className="text-muted-foreground">Sign out</Button>
+                <Button variant="ghost" size="sm" onClick={handleLogout} className="text-muted-foreground">Logout</Button>
                 <Button asChild size="sm" className="ml-1">
                   <Link href="/planner">My Trips <ArrowRight className="ml-1.5 h-3.5 w-3.5" /></Link>
                 </Button>
               </>
             ) : (
               <>
+                {loggedIn && (
+                  <span className="mr-2 text-sm text-amber-600 hidden sm:inline">No Access</span>
+                )}
                 <Button asChild variant="ghost" size="sm"><Link href="/login">Login</Link></Button>
                 <Button asChild size="sm" className="ml-1">
                   <Link href="/planner/new">Start Planning</Link>
@@ -152,9 +160,10 @@ export default function LandingPage() {
             <h1
               className={`text-center text-5xl font-bold tracking-tight leading-[1.1] sm:text-6xl lg:text-7xl transition-all duration-700 delay-100 ${mounted ? "opacity-100 translate-y-0" : "opacity-0 translate-y-6"}`}
             >
-              Plan your lap with{" "}
+            Plan your next leg 
+
               <span className="relative inline-block">
-                <span className="relative z-10 text-primary">verified stops</span>
+                <span className="relative z-10 text-primary">with confidence</span>
                 <svg className="absolute -bottom-2 left-0 w-full" viewBox="0 0 300 12" fill="none" xmlns="http://www.w3.org/2000/svg">
                   <path d="M2 8 Q75 2 150 8 Q225 14 298 8" stroke="currentColor" strokeWidth="3" strokeLinecap="round" className="text-primary/30" />
                 </svg>
@@ -166,22 +175,27 @@ export default function LandingPage() {
             <p
               className={`mx-auto mt-8 max-w-2xl text-center text-lg text-muted-foreground leading-relaxed transition-all duration-700 delay-200 ${mounted ? "opacity-100 translate-y-0" : "opacity-0 translate-y-6"}`}
             >
-              TrackMate builds route-aware itineraries from a real Australian stop database —
-              matched to your rig, pace, and preferences. No hallucinated camps. No dead ends.
+              TrackMate helps you map realistic driving days, find the right stops, and plan fuel along your route without the guesswork.
             </p>
 
             <div
               className={`mt-10 flex flex-col items-center justify-center gap-3 sm:flex-row transition-all duration-700 delay-300 ${mounted ? "opacity-100 translate-y-0" : "opacity-0 translate-y-6"}`}
             >
               <Button asChild size="lg" className="h-12 px-8 text-base font-medium group w-full sm:w-auto">
-                <Link href={loggedIn ? "/planner" : "/planner/new"}>
-                  {loggedIn ? "Go to My Trips" : "Start Planning Free"}
+                <Link href={hasActiveAccess ? "/planner" : "/planner/new"}>
+                  {hasActiveAccess ? "Go to My Trips" : "Start Planning Free"}
                   <ArrowRight className="ml-2 h-4 w-4 transition-transform group-hover:translate-x-1" />
                 </Link>
               </Button>
-              <Button asChild size="lg" variant="outline" className="h-12 px-8 text-base w-full sm:w-auto">
-                <Link href="/login">Login to your account</Link>
-              </Button>
+              {hasActiveAccess ? (
+                <Button asChild size="lg" variant="outline" className="h-12 px-8 text-base w-full sm:w-auto">
+                  <Link href="/planner">View My Trips</Link>
+                </Button>
+              ) : (
+                <Button asChild size="lg" variant="outline" className="h-12 px-8 text-base w-full sm:w-auto">
+                  <Link href="/login">Login to your account</Link>
+                </Button>
+              )}
             </div>
 
             {/* Hero visual — route mockup */}
@@ -386,15 +400,20 @@ export default function LandingPage() {
             </p>
             <div className="flex flex-col items-center gap-3 sm:flex-row sm:justify-center">
               <Button asChild size="lg" className="h-13 px-10 text-base font-medium group w-full sm:w-auto shadow-lg shadow-primary/20">
-                <Link href="/planner/new">
-                  Get Started
+                <Link href={hasActiveAccess ? "/planner" : "/planner/new"}>
+                  {hasActiveAccess ? "Go to My Trips" : "Get Started"}
                   <ArrowRight className="ml-2 h-4 w-4 transition-transform group-hover:translate-x-1" />
                 </Link>
               </Button>
-              <Button asChild size="lg" variant="outline" className="h-13 px-10 text-base w-full sm:w-auto">
-                <Link href="/login">I already have access</Link>
-              </Button>
-            </div>
+              {hasActiveAccess ? (
+                <Button asChild size="lg" variant="outline" className="h-13 px-10 text-base w-full sm:w-auto">
+                  <Link href="/planner">View My Trips</Link>
+                </Button>
+              ) : (
+                <Button asChild size="lg" variant="outline" className="h-13 px-10 text-base w-full sm:w-auto">
+                  <Link href="/login">I already have access</Link>
+                </Button>
+              )}
           </div>
         </div>
       </section>
