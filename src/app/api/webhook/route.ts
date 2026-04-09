@@ -129,6 +129,12 @@ export async function POST(req: NextRequest) {
 
             userId = updatedUser.id
 
+            // Send access email to existing user (re-purchase or access restore).
+            // inviteUserByEmail works for both new and existing Supabase auth users.
+            const { error: inviteError } = await supabaseAdmin.auth.admin.inviteUserByEmail(data.email)
+            if (inviteError) {
+                console.error("Error sending access email to existing user (non-fatal):", inviteError.message)
+            }
 
         } else {
             const { data: newUser, error: insertError } = await supabaseAdmin
@@ -159,6 +165,12 @@ export async function POST(req: NextRequest) {
 
             userId = newUser.id
 
+            // Send invite email for new users — creates Supabase auth account + sends magic-link email
+            const { error: inviteError } = await supabaseAdmin.auth.admin.inviteUserByEmail(data.email)
+            if (inviteError) {
+                console.error("Error sending invite email (non-fatal):", inviteError.message)
+                // Non-fatal: user is saved in DB. Fall through to generate link for webhook response.
+            }
 
         }
 
@@ -177,6 +189,9 @@ export async function POST(req: NextRequest) {
         const { data: magicLinkData, error: magicLinkError } = await supabaseAdmin.auth.admin.generateLink({
             email: data.email,
             type: "magiclink",
+            options: {
+                redirectTo: "https://trackmate.allaroundoz.com.au/auth/callback",
+            },
         })
 
         if (magicLinkError) {

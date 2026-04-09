@@ -472,19 +472,53 @@ export async function POST(req: NextRequest) {
       const distFromStart = calculateDistance(startLat, startLng, lat, lng)
       const distFromDest = calculateDistance(destLat, destLng, lat, lng)
       const sumDist = distFromStart + distFromDest
-      const isBetween = sumDist <= (directDistance + config.maxSpacing)
+      const isVerified = Boolean(stop.verification_status && stop.verification_status !== "custom")
+
+      // Tighter ellipse: cap at 120 km over direct distance regardless of pace.
+      const isBetweenEllipse = sumDist <= (directDistance + Math.min(config.maxSpacing, 120))
+
+      // Compute the unclamped projection of the stop onto the A→B route line.
+      // tRaw < 0  → stop is "behind" the start (wrong direction, e.g. Whyalla for PA→CP)
+      // tRaw > 1  → stop is past the destination
+      const avgLatRad = ((startLat + destLat) / 2) * Math.PI / 180
+      const scaleX = Math.cos(avgLatRad)
+      const vx = (destLng - startLng) * scaleX
+      const vy = destLat - startLat
+      const wx = (lng - startLng) * scaleX
+      const wy = lat - startLat
+      const vLenSq = vx * vx + vy * vy
+      const tRaw = vLenSq > 1e-12 ? (wx * vx + wy * vy) / vLenSq : 0
+
+      // Reject stops that are behind the start or past the destination.
+      // Allow a small tolerance (5% of route length) for stops near the endpoints.
+      const isForwardOnRoute = tRaw >= -0.05 && tRaw <= 1.05
+
+      // Lateral distance: use clamped projection for the perpendicular distance.
+      const tClamped = clamp(tRaw, 0, 1)
+      const projLat = startLat + tClamped * (destLat - startLat)
+      const projLng = startLng + tClamped * (destLng - startLng)
+      const lateralKm = calculateDistance(lat, lng, projLat, projLng)
+
+      // Max 100 km off the route line — keeps stops on the actual highway while
+      // excluding detours to the Flinders Ranges, Eyre Peninsula, offshore etc.
+      const isBetween = isBetweenEllipse && isForwardOnRoute && lateralKm <= 100
 
       return {
         ...stop,
         distance_from_start_km: Math.round(distFromStart * 10) / 10,
         distance_from_dest_km: Math.round(distFromDest * 10) / 10,
         is_between: isBetween,
-        is_verified: Boolean(stop.verification_status && stop.verification_status !== "custom"),
+        is_verified: isVerified,
       }
     }).filter((stop) => stop.is_between)
     .sort((a, b) => a.distance_from_start_km - b.distance_from_start_km)
 
-    const corridorFiltered = (routeFiltered ?? []).filter((stop) => corridorMatchesStop(stop.corridor, corridor))
+    // Verified stops (from the stops table) always pass the corridor check — their
+    // corridor field often won't match the 6 coarse auto-detected corridors (e.g.
+    // "Stuart Highway" vs "Outback"), so filtering them would silently drop real stops.
+    const corridorFiltered = routeFiltered.filter((stop) =>
+      stop.is_verified || corridorMatchesStop(stop.corridor, corridor)
+    )
 
     const stopsWithDistance = (tripPreferences
       ? applySuitabilityFilter(corridorFiltered, tripPreferences)
@@ -493,9 +527,8 @@ export async function POST(req: NextRequest) {
     const fuelStationMap = new Map<string, FuelStationOption>()
 
     const segments: PlannedSegment[] = []
-    const usedStopIds = new Set<string>()
-    // Tracks all stops that have been selected as the primary overnight anchor,
-    // used to avoid recommending the same stop as the primary pick on multiple days.
+    // Tracks stops that have been the primary overnight anchor — these are excluded
+    // from being the anchor again on another day, but can still appear as options.
     const anchoredStopIds = new Set<string>()
 
     const totalDistanceKm = drivingInfo?.totalDistanceKm ?? directDistance
@@ -542,21 +575,60 @@ export async function POST(req: NextRequest) {
       northbound
     )
 
-    // Keep segment/day count aligned with planned days.
+    // Reconcile adaptive boundary count with planned day count.
+    // Only override with equal-length segments when the adaptive algorithm is more
+    // than 2× off from the user's requested day count. Otherwise keep the adaptive
+    // boundaries (which respect stop clusters and remote stretches) and trim/extend.
     if (planningDays > 0 && boundaries.length !== planningDays) {
-      const equalBoundaries: Array<{ startKm: number; endKm: number }> = []
-      const segmentLength = totalDistanceKm / planningDays
+      const ratio = boundaries.length / planningDays
 
-      for (let i = 0; i < planningDays; i++) {
-        const startKm = i * segmentLength
-        const endKm = i === planningDays - 1 ? totalDistanceKm : (i + 1) * segmentLength
-        equalBoundaries.push({
-          startKm: Math.round(startKm * 10) / 10,
-          endKm: Math.round(endKm * 10) / 10,
-        })
+      if (ratio < 0.5 || ratio > 2.0) {
+        // Adaptive result is too far off — fall back to equal split.
+        const equalBoundaries: Array<{ startKm: number; endKm: number }> = []
+        const segmentLength = totalDistanceKm / planningDays
+        for (let i = 0; i < planningDays; i++) {
+          const startKm = i * segmentLength
+          const endKm = i === planningDays - 1 ? totalDistanceKm : (i + 1) * segmentLength
+          equalBoundaries.push({
+            startKm: Math.round(startKm * 10) / 10,
+            endKm: Math.round(endKm * 10) / 10,
+          })
+        }
+        boundaries = equalBoundaries
+      } else if (boundaries.length > planningDays) {
+        // Merge the shortest adjacent pair until we reach planningDays.
+        while (boundaries.length > planningDays) {
+          let minIdx = 0
+          let minLen = boundaries[0].endKm - boundaries[0].startKm
+          for (let i = 1; i < boundaries.length; i++) {
+            const len = boundaries[i].endKm - boundaries[i].startKm
+            if (len < minLen) { minLen = len; minIdx = i }
+          }
+          const mergeWith = minIdx === 0 ? 1 : minIdx - 1
+          const lo = Math.min(minIdx, mergeWith)
+          const hi = Math.max(minIdx, mergeWith)
+          boundaries.splice(lo, 2, {
+            startKm: boundaries[lo].startKm,
+            endKm: boundaries[hi].endKm,
+          })
+        }
+      } else {
+        // Need more days — split the longest segment.
+        while (boundaries.length < planningDays) {
+          let maxIdx = 0
+          let maxLen = boundaries[0].endKm - boundaries[0].startKm
+          for (let i = 1; i < boundaries.length; i++) {
+            const len = boundaries[i].endKm - boundaries[i].startKm
+            if (len > maxLen) { maxLen = len; maxIdx = i }
+          }
+          const { startKm, endKm } = boundaries[maxIdx]
+          const mid = Math.round(((startKm + endKm) / 2) * 10) / 10
+          boundaries.splice(maxIdx, 1,
+            { startKm, endKm: mid },
+            { startKm: mid, endKm }
+          )
+        }
       }
-
-      boundaries = equalBoundaries
     }
 
     for (let i = 0; i < boundaries.length; i++) {
@@ -577,9 +649,12 @@ export async function POST(req: NextRequest) {
         (s) => s.distance_from_start_km >= (startKm - 75) && s.distance_from_start_km <= (endKm + 75)
       )
 
-      const inRangeUnused = inRange.filter((s) => !usedStopIds.has(s.id))
+      // Only exclude stops that have already been anchored as a primary overnight pick.
+      // This allows a stop to still appear as an *option* for nearby segments even after
+      // being anchored, which keeps the option count healthy in sparse regions.
+      const inRangeUnused = inRange.filter((s) => !anchoredStopIds.has(s.id))
 
-      const expandedUnused = expandedInRange.filter((s) => !usedStopIds.has(s.id))
+      const expandedUnused = expandedInRange.filter((s) => !anchoredStopIds.has(s.id))
       const isForwardEnough = (s: RouteStopCandidate) => s.distance_from_start_km >= (startKm - 20)
 
       const canIncludeAsOther = (s: RouteStopCandidate) => s.is_verified || includeFreeCamps !== false || s.cost_band !== "Free"
@@ -640,7 +715,7 @@ export async function POST(req: NextRequest) {
 
       if (totalCandidates() < MIN_STOPS_PER_SEGMENT) {
         const nearestGlobalUnused = rankStops(
-          scaledStopsWithDistance.filter((s) => !usedStopIds.has(s.id) && canIncludeAsOther(s) && isForwardEnough(s)),
+          scaledStopsWithDistance.filter((s) => !anchoredStopIds.has(s.id) && canIncludeAsOther(s) && isForwardEnough(s)),
           midKm,
           20,
           preferVerified
@@ -717,7 +792,6 @@ export async function POST(req: NextRequest) {
 
       const overnightAnchor = verifiedInSegment[0] || otherInSegment[0]
       if (overnightAnchor) {
-        usedStopIds.add(overnightAnchor.id)
         anchoredStopIds.add(overnightAnchor.id)
       }
 

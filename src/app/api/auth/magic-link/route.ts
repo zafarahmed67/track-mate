@@ -23,6 +23,9 @@ export async function POST(req: NextRequest) {
     const { data: magicLinkData, error: magicLinkError } = await supabaseAdmin.auth.admin.generateLink({
       email,
       type: "magiclink",
+      options: {
+        redirectTo: "https://trackmate.allaroundoz.com.au/auth/callback",
+      },
     })
 
     if (magicLinkError) {

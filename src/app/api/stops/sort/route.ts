@@ -362,7 +362,36 @@ export async function POST(req: NextRequest) {
         sortedStops,
       })
     } else {
-      polylinePoints = [
+      // No waypoints provided: fetch the direct A→B route polyline from Google Directions
+      // and project each stop onto it. This gives route-following order rather than
+      // straight-line Haversine order, which is critical for curved routes.
+      const apiKey = process.env.NEXT_PUBLIC_GMAPS_API_KEY
+      let routePolyline: Array<{ lat: number; lng: number }> | null = null
+
+      if (apiKey) {
+        try {
+          const urlParams = new URLSearchParams({
+            origin: `${originLat},${originLng}`,
+            destination: `${destinationLat},${destinationLng}`,
+            mode: "driving",
+            key: apiKey,
+          })
+          const directionsUrl = `https://maps.googleapis.com/maps/api/directions/json?${urlParams.toString()}`
+          const dirResponse = await fetch(directionsUrl)
+          const dirData = await dirResponse.json()
+
+          if (dirData.status === "OK" && dirData.routes?.length) {
+            const selectedRoute = selectBestDirectionsRoute(dirData.routes as GoogleDirectionsRoute[])
+            if (selectedRoute?.overview_polyline?.points) {
+              routePolyline = decodePolyline(selectedRoute.overview_polyline.points)
+            }
+          }
+        } catch {
+          // Fall back to straight-line projection below
+        }
+      }
+
+      polylinePoints = routePolyline ?? [
         { lat: originLat, lng: originLng },
         { lat: destinationLat, lng: destinationLng },
       ]
@@ -370,8 +399,18 @@ export async function POST(req: NextRequest) {
       const stopsWithRouteDistance = sanitizedStops.map((stop) => {
         const stopLat = stop.latitude
         const stopLng = stop.longitude
-        const cumulativeDistance = calculateDistance(originLat, originLng, stopLat, stopLng)
-        const distanceFromRoute = calculateDistance(originLat, originLng, stopLat, stopLng)
+
+        let cumulativeDistance: number
+        let distanceFromRoute: number
+
+        if (polylinePoints.length > 2) {
+          const { distance, cumulativeDistance: cumDist } = findNearestPointOnPolyline(stopLat, stopLng, polylinePoints)
+          cumulativeDistance = cumDist
+          distanceFromRoute = distance
+        } else {
+          cumulativeDistance = calculateDistance(originLat, originLng, stopLat, stopLng)
+          distanceFromRoute = calculateDistance(originLat, originLng, stopLat, stopLng)
+        }
 
         return {
           id: stop.id,
@@ -379,7 +418,7 @@ export async function POST(req: NextRequest) {
           lat: stopLat,
           lng: stopLng,
           routeDistance: cumulativeDistance,
-          distanceFromRoute: distanceFromRoute,
+          distanceFromRoute,
         }
       })
 
@@ -391,6 +430,7 @@ export async function POST(req: NextRequest) {
         lat: number
         lng: number
         routeDistance: number
+        distanceFromRoute: number
         order: number
       }> = []
 
@@ -404,6 +444,7 @@ export async function POST(req: NextRequest) {
             lat: stop.lat,
             lng: stop.lng,
             routeDistance: Math.round(stop.routeDistance * 10) / 10,
+            distanceFromRoute: Math.round(stop.distanceFromRoute * 10) / 10,
             order: sortedStops.length + 1,
           })
           lastDistance = stop.routeDistance
@@ -413,6 +454,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({
         success: true,
         sortedStops,
+        degraded: routePolyline === null,
       })
     }
   } catch (error: unknown) {

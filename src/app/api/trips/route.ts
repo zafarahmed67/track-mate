@@ -278,30 +278,54 @@ async function generateStop(
     // Calculate direct distance between start and destination
     const directDistance = calculateDistance(startLat, startLng, destLat, destLng)
 
+    // Calculate the true lateral (perpendicular) distance from a stop to the A→B line.
+    // This is far more reliable than min(distFromStart, distFromDest) or sumDist ellipses,
+    // which either miss on-route stops or allow far-off-route ones through.
+    // Returns { lateralKm, tRaw } for a point relative to the A→B route line.
+    // tRaw < 0 means the stop is "behind" the start; tRaw > 1 means past the destination.
+    const routeProjection = (lat: number, lng: number): { lateralKm: number; tRaw: number } => {
+      if (directDistance <= 0) {
+        return { lateralKm: calculateDistance(startLat, startLng, lat, lng), tRaw: 0 }
+      }
+      const avgLatRad = ((startLat + destLat) / 2) * Math.PI / 180
+      const scaleX = Math.cos(avgLatRad)
+      const vx = (destLng - startLng) * scaleX
+      const vy = destLat - startLat
+      const wx = (lng - startLng) * scaleX
+      const wy = lat - startLat
+      const vLenSq = vx * vx + vy * vy
+      const tRaw = vLenSq > 1e-12 ? (wx * vx + wy * vy) / vLenSq : 0
+      const tClamped = Math.max(0, Math.min(1, tRaw))
+      const projLat = startLat + tClamped * (destLat - startLat)
+      const projLng = startLng + tClamped * (destLng - startLng)
+      return { lateralKm: calculateDistance(lat, lng, projLat, projLng), tRaw }
+    }
+
     // Filter and enrich stops with distance calculations
     const enrichedStops = allStops
       .map((stop) => {
         const distFromStart = calculateDistance(startLat, startLng, stop.latitude, stop.longitude)
         const distFromDest = calculateDistance(stop.latitude, stop.longitude, destLat, destLng)
-        const distanceToRoute = Math.min(distFromStart, distFromDest)
-        const isBetweenStartAndDest = distFromStart + distFromDest <= directDistance + 50
+        const { lateralKm, tRaw } = routeProjection(stop.latitude, stop.longitude)
+        // Reject stops behind the start or past the destination (5% tolerance)
+        const isForwardOnRoute = tRaw >= -0.05 && tRaw <= 1.05
 
         return {
           ...stop,
           distance_from_start_km: Math.round(distFromStart * 10) / 10,
           distance_to_dest_km: Math.round(distFromDest * 10) / 10,
-          distance_to_route_km: Math.round(distanceToRoute * 10) / 10,
-          is_between_start_and_dest: isBetweenStartAndDest,
+          distance_to_route_km: Math.round(lateralKm * 10) / 10,
+          is_between_start_and_dest: lateralKm <= 150 && isForwardOnRoute,
         }
       })
 
-    // Filter: proximity (<=100km from route)
-    const afterProximity = enrichedStops.filter((stop) => stop.distance_to_route_km <= 100)
-    const rejectedByProximity = enrichedStops.filter((stop) => stop.distance_to_route_km > 100)
+    // Filter: lateral proximity ≤150 km AND forward on route (not behind start or past dest).
+    const afterProximity = enrichedStops.filter((stop) => stop.is_between_start_and_dest)
+    const rejectedByProximity = enrichedStops.filter((stop) => !stop.is_between_start_and_dest)
 
-    // Filter: corridor (between-ness logic)
-    const afterCorridor = afterProximity.filter((stop) => stop.is_between_start_and_dest)
-    const rejectedByCorridor = afterProximity.filter((stop) => !stop.is_between_start_and_dest)
+    // No separate corridor filter needed — lateral distance already handles it.
+    const afterCorridor = afterProximity
+    const rejectedByCorridor: typeof afterProximity = []
 
     const orderedStops = afterCorridor
       // Sort by distance from start
@@ -403,8 +427,9 @@ async function generateCustomStop(
 
     const directDistanceKmForProbes = calculateDistance(startLat, startLng, destLat, destLng)
 
-    // More probe points for longer routes. Remote routes need a wider search net.
-    const baseProbeCount = Math.max(4, Math.ceil(directDistanceKmForProbes / 150))
+    // More probe points for longer routes. Minimum is 2× tripDays so each day segment has at
+    // least two probe points, giving enough coverage for stops in sparse outback corridors.
+    const baseProbeCount = Math.max(safeTripDays * 2, Math.ceil(directDistanceKmForProbes / 100))
     const probeCount = directDistanceKmForProbes > 2000 ? Math.min(50, baseProbeCount) : Math.min(30, baseProbeCount)
     const probePoints = Array.from({ length: probeCount }, (_, i) => {
       const fraction = (i + 1) / (probeCount + 1)
@@ -417,22 +442,30 @@ async function generateCustomStop(
     // Irrelevant name patterns to exclude from overnight stop options
     const OVERNIGHT_EXCLUDE = /hotel|motel|hostel|backpacker|resort|inn\b|b&b|bed and breakfast|airbnb/i
 
+    // Search radius scales with route length. Longer remote routes need a wider net since
+    // caravan parks and rest areas are sparser. 60 km covers most highway detours without
+    // pulling in off-route stops (those are still filtered by lateralKm ≤ 100 below).
+    const searchRadius = directDistanceKmForProbes > 1000 ? 80000
+      : directDistanceKmForProbes > 300 ? 60000
+      : 40000
+
     // Search config: [type, keyword, radius]
     // rv_park is Google's type for caravan parks; campground covers national park camps.
-    // Use a larger radius for remote Australian searches so sparse outback routes still return results.
     const overnightSearches: Array<{ type: string; keyword?: string; radius: number }> = [
-      { type: "rv_park", radius: directDistanceKmForProbes > 1000 ? 80000 : 40000 },
-      { type: "campground", radius: directDistanceKmForProbes > 1000 ? 80000 : 40000 },
-      { type: "rv_park", keyword: "caravan park", radius: 50000 },
-      { type: "campground", keyword: "free camp", radius: directDistanceKmForProbes > 1000 ? 80000 : 50000 },
-      { type: "campground", keyword: "roadhouse", radius: directDistanceKmForProbes > 1000 ? 80000 : 50000 },
+      { type: "rv_park", radius: searchRadius },
+      { type: "campground", radius: searchRadius },
+      { type: "rv_park", keyword: "caravan park", radius: Math.max(50000, searchRadius) },
+      { type: "campground", keyword: "free camp", radius: Math.max(50000, searchRadius) },
+      { type: "campground", keyword: "roadhouse", radius: Math.max(50000, searchRadius) },
     ]
 
-    if (directDistanceKmForProbes > 1000) {
+    // For routes > 300 km (medium to long) add rest areas, parking, and truck stops —
+    // these are common overnight spots on remote Australian highways (e.g. Stuart Hwy).
+    if (directDistanceKmForProbes > 300) {
       overnightSearches.push(
-        { type: "parking", radius: 80000 },
-        { type: "gas_station", keyword: "truck stop", radius: 80000 },
-        { type: "point_of_interest", keyword: "rest area", radius: 80000 }
+        { type: "parking", radius: searchRadius },
+        { type: "gas_station", keyword: "truck stop", radius: searchRadius },
+        { type: "point_of_interest", keyword: "rest area", radius: searchRadius }
       )
     }
 
@@ -459,7 +492,7 @@ async function generateCustomStop(
           const data = await response.json()
           if (data.results) {
             totalFetched += data.results.length
-            const maxResultsPerSearch = directDistanceKmForProbes > 1000 ? 20 : 10
+            const maxResultsPerSearch = directDistanceKmForProbes > 300 ? 20 : 10
             data.results.slice(0, maxResultsPerSearch).forEach((place: Record<string, unknown>) => {
               const name = String(place.name ?? "")
               // Skip irrelevant accommodation types (hotels, motels, etc.)
@@ -476,6 +509,26 @@ async function generateCustomStop(
               if (!seenPlaces.has(key)) {
                 seenPlaces.add(key)
                 const distanceFromStart = calculateDistance(startLat, startLng, lat, lng)
+
+                // Reject Google Places results that are too far off the A→B route line.
+                // Probe points are on the line, but the search radius can return stops
+                // 80+ km away in any direction (e.g. Flinders Ranges for Stuart Hwy trips).
+                const avgLatRad = ((startLat + destLat) / 2) * Math.PI / 180
+                const scaleX = Math.cos(avgLatRad)
+                const vx = (destLng - startLng) * scaleX
+                const vy = destLat - startLat
+                const wx = (lng - startLng) * scaleX
+                const wy = lat - startLat
+                const vLenSq = vx * vx + vy * vy
+                const tRaw = vLenSq > 1e-12 ? (wx * vx + wy * vy) / vLenSq : 0
+                // Skip stops behind the start or past the destination (5% tolerance)
+                if (tRaw < -0.05 || tRaw > 1.05) return
+                const tClamped = Math.max(0, Math.min(1, tRaw))
+                const projLat = startLat + tClamped * (destLat - startLat)
+                const projLng = startLng + tClamped * (destLng - startLng)
+                const lateralKm = calculateDistance(lat, lng, projLat, projLng)
+                // 100 km max lateral — keeps stops near the highway corridor
+                if (lateralKm > 100) return
 
                 customStopCandidates.push({
                   trip_id: tripId,

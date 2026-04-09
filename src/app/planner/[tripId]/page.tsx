@@ -175,8 +175,10 @@ interface TripNarrative {
 
 function SortableRouteStopItem({
   stop,
+  onRemove,
 }: {
   stop: RouteStopOption
+  onRemove?: () => void
 }) {
   const { attributes, listeners, setNodeRef, transform, transition } = useSortable({
     id: stop.id,
@@ -206,6 +208,17 @@ function SortableRouteStopItem({
         <div className="text-xs text-muted-foreground mt-1">
           {stop.stay_type || stop.route_type || "Stop"} • {stop.distance_from_start_km ? `${Math.round(stop.distance_from_start_km)} km from start` : ""}
         </div>
+        {onRemove && (
+          <div className="mt-2">
+            <button
+              type="button"
+              onClick={onRemove}
+              className="text-xs text-muted-foreground hover:text-destructive font-medium transition-colors"
+            >
+              Remove from this day
+            </button>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -213,8 +226,10 @@ function SortableRouteStopItem({
 
 function StaticRouteStopItem({
   stop,
+  onRemove,
 }: {
   stop: RouteStopOption
+  onRemove?: () => void
 }) {
   return (
     <div className="flex items-start gap-4">
@@ -233,6 +248,17 @@ function StaticRouteStopItem({
         <div className="text-xs text-muted-foreground mt-1">
           {stop.stay_type || stop.route_type || "Stop"} • {stop.distance_from_start_km ? `${Math.round(stop.distance_from_start_km)} km from start` : ""}
         </div>
+        {onRemove && (
+          <div className="mt-2">
+            <button
+              type="button"
+              onClick={onRemove}
+              className="text-xs text-muted-foreground hover:text-destructive font-medium transition-colors"
+            >
+              Remove from this day
+            </button>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -1587,24 +1613,20 @@ export default function PlannerDetailPage() {
   }
 
   const calculateRoute = useCallback((mapInstance: google.maps.Map) => {
-    if (!trip || !stops.length) return
-
-    const waypoints = stops.slice(0, 23).map((stop) => ({
-      location: new google.maps.LatLng(parseFloat(stop.latitude), parseFloat(stop.longitude)),
-      stopover: true,
-    }))
+    if (!trip) return
 
     const origin = new google.maps.LatLng(trip.start_lat!, trip.start_lng!)
     const destination = new google.maps.LatLng(trip.destination_lat!, trip.destination_lng!)
 
     const directionsService = new google.maps.DirectionsService()
 
+    // Draw the direct A→B corridor only. Stops are rendered as numbered markers
+    // separately. Including stops as waypoints caused the route to detour to each
+    // campsite, creating a second visible branch whenever an option was selected.
     directionsService.route(
       {
         origin: origin,
         destination: destination,
-        waypoints: waypoints,
-        optimizeWaypoints: false,
         travelMode: google.maps.TravelMode.DRIVING,
       },
       (result, status) => {
@@ -1615,13 +1637,13 @@ export default function PlannerDetailPage() {
         }
       }
     )
-  }, [trip, stops])
+  }, [trip])
 
   useEffect(() => {
-    if (map && trip && stops.length > 0) {
+    if (map && trip) {
       calculateRoute(map)
     }
-  }, [map, trip, stops, calculateRoute])
+  }, [map, trip, calculateRoute])
 
   useEffect(() => {
     const user = getStoredUser()
@@ -2222,27 +2244,53 @@ export default function PlannerDetailPage() {
           console.error("Error fetching custom stops:", err)
         }
 
-        // Sort stops by distance from trip start so map markers and waypoints are in route order
-        if (data.trip?.start_lat && data.trip?.start_lng) {
-          const startLat = data.trip.start_lat as number
-          const startLng = data.trip.start_lng as number
-          const toRad = (d: number) => (d * Math.PI) / 180
-          const distFromStart = (lat: number, lng: number) => {
-            const dLat = toRad(lat - startLat)
-            const dLng = toRad(lng - startLng)
-            const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(startLat)) * Math.cos(toRad(lat)) * Math.sin(dLng / 2) ** 2
-            return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
-          }
-          formattedStops.sort((a, b) => {
-            const latA = parseFloat(a.latitude), lngA = parseFloat(a.longitude)
-            const latB = parseFloat(b.latitude), lngB = parseFloat(b.longitude)
-            if (isNaN(latA) || isNaN(lngA)) return 1
-            if (isNaN(latB) || isNaN(lngB)) return -1
-            return distFromStart(latA, lngA) - distFromStart(latB, lngB)
-          })
-        }
+        // Sort stops in route-following order using the actual A→B road polyline.
+        // Haversine (straight-line) sort causes wrong pin order for curved routes
+        // (e.g. Brisbane→Darwin pins jumping to offshore or PNG locations).
+        const tripForSort = data.trip as { start_lat?: number; start_lng?: number; destination_lat?: number; destination_lng?: number } | null
+        if (tripForSort?.start_lat && tripForSort?.start_lng && tripForSort?.destination_lat && tripForSort?.destination_lng && formattedStops.length > 0) {
+          try {
+            const sortResponse = await fetch("/api/stops/sort", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                stops: formattedStops.map((s) => ({
+                  id: s.id,
+                  latitude: s.latitude,
+                  longitude: s.longitude,
+                  location_name: s.location_name,
+                })),
+                origin: { lat: tripForSort.start_lat, lng: tripForSort.start_lng },
+                destination: { lat: tripForSort.destination_lat, lng: tripForSort.destination_lng },
+                // No waypoints — the sort API will fetch the A→B polyline and project stops onto it.
+                minSpacingKm: 0,
+              }),
+            })
+            const sortData = await sortResponse.json()
+            if (sortData.success && sortData.sortedStops?.length > 0) {
+              const orderMap = new Map<string, number>()
+              const distFromRouteMap = new Map<string, number>()
+              sortData.sortedStops.forEach((s: { id: string; order: number; distanceFromRoute?: number }) => {
+                orderMap.set(s.id, s.order)
+                if (s.distanceFromRoute !== undefined) distFromRouteMap.set(s.id, s.distanceFromRoute)
+              })
 
-        console.log("Formatted stops:", formattedStops)
+              // Remove stops that are more than 100 km off the actual road polyline.
+              // This cleans up trips created before the server-side filters were tightened
+              // (e.g. Flinders Ranges stops appearing for a Port Augusta → Coober Pedy trip).
+              if (distFromRouteMap.size > 0) {
+                formattedStops = formattedStops.filter((s) => {
+                  const d = distFromRouteMap.get(s.id)
+                  return d === undefined || d <= 100
+                })
+              }
+
+              formattedStops.sort((a, b) => (orderMap.get(a.id) ?? 999) - (orderMap.get(b.id) ?? 999))
+            }
+          } catch (sortErr) {
+            console.error("Stop sort failed, keeping DB order:", sortErr)
+          }
+        }
 
         setStops(formattedStops)
         setFilteredStops(formattedStops)
@@ -2284,23 +2332,204 @@ export default function PlannerDetailPage() {
     return nearStart || nearDestination
   }, [trip])
 
+  const stopOrderByNormalizedId = useMemo(() => {
+    const order = new Map<string, number>()
+    stops.forEach((stop, idx) => {
+      order.set(normalizeStopId(stop.stop_id || stop.id), idx)
+    })
+    return order
+  }, [stops])
+
+  const stopBelongsToDay = (stop: TripStop, segment: RouteSegment, dayIndex: number) => {
+    if (effectiveDayCount === 1) return true
+
+    if (typeof stop.day_index === "number" && Number.isFinite(stop.day_index)) {
+      const normalizedDayIndex = Math.trunc(stop.day_index)
+      if (normalizedDayIndex >= 0 && normalizedDayIndex < effectiveDayCount) {
+        return normalizedDayIndex === dayIndex
+      }
+    }
+
+    const stopDistance = Number(stop.distance_from_start_km)
+    if (Number.isFinite(stopDistance)) {
+      const isLastDay = dayIndex === effectiveDayCount - 1
+      return stopDistance >= segment.startKm && (isLastDay ? stopDistance <= segment.endKm : stopDistance < segment.endKm)
+    }
+
+    const normalizedId = normalizeStopId(stop.stop_id || stop.id)
+    const orderIndex = stopOrderByNormalizedId.get(normalizedId)
+    if (orderIndex === undefined) return dayIndex === 0
+
+    if (stops.length <= 1) return dayIndex === 0
+    const ratio = orderIndex / Math.max(1, stops.length - 1)
+    const approxDay = Math.min(effectiveDayCount - 1, Math.floor(ratio * effectiveDayCount))
+    return approxDay === dayIndex
+  }
+
+  const unifiedDayRouteData = daySegments.map((segment, index) => {
+    const previousSelectedOption = index > 0 ? resolvedDaySelections[index - 1] : null
+    const selectedOption = resolvedDaySelections[index]
+    const nextSelectedOption = index < daySegments.length - 1 ? resolvedDaySelections[index + 1] : null
+
+    const allStops = filterStopsBySegmentDistance(segment, [...segment.verifiedStops, ...segment.otherStops])
+
+    const persistedTripStopsForSegment: RouteStopOption[] = stops
+      .filter((stop) => stop.verification_status !== "custom")
+      .filter((stop) => stopBelongsToDay(stop, segment, index))
+      .map((stop) => ({
+        id: normalizeStopId(stop.stop_id || stop.id),
+        location_name: stop.location_name,
+        latitude: stop.latitude,
+        longitude: stop.longitude,
+        state: stop.state,
+        region: stop.region,
+        route_type: stop.route_type,
+        stay_type: stop.stay_type,
+        pet_friendly: stop.pet_friendly,
+        water: stop.water,
+        cost_band: stop.cost_band,
+        tier: stop.tier,
+        is_verified: true,
+        distance_from_start_km: Number.isFinite(Number(stop.distance_from_start_km))
+          ? Number(stop.distance_from_start_km)
+          : undefined,
+      }))
+
+    const persistedStopsForSegment = Array.from(
+      new Map(persistedTripStopsForSegment.map((stop) => [normalizeStopId(stop.id), stop])).values()
+    )
+
+    const endpointStopIds = new Set<string>([
+      ...(previousSelectedOption ? [previousSelectedOption.id] : []),
+      ...(selectedOption ? [selectedOption.id] : []),
+      ...(nextSelectedOption ? [nextSelectedOption.id] : []),
+    ].map((id) => normalizeStopId(id)).filter(Boolean))
+    const endpointStopNames = new Set<string>([
+      previousSelectedOption?.location_name,
+      selectedOption?.location_name,
+      nextSelectedOption?.location_name,
+    ].filter(Boolean).map((name) => String(name).toLowerCase().trim()))
+
+    const routeStops = getOrderedRouteStops(index, persistedStopsForSegment)
+    const routeStopIds = new Set(routeStops.map((stop) => normalizeStopId(stop.id)).filter(Boolean))
+
+    const hiddenCustomKeysForDay = new Set(hiddenCustomStopsByDay[index] || [])
+    const customStopsForDay = stops.filter((stop) => {
+      if (stop.verification_status !== "custom") return false
+      if (!stopBelongsToDay(stop, segment, index)) return false
+
+      const normalizedId = normalizeStopId(stop.stop_id || stop.id)
+      const displayKey = getCustomStopDisplayKey(stop)
+
+      return !routeStopIds.has(normalizedId)
+        && !hiddenCustomKeysForDay.has(displayKey)
+    })
+
+    const seenCustomStopKeys = new Set<string>()
+    const dedupedCustomStopsForDay = customStopsForDay.filter((stop) => {
+      const key = getCustomStopDisplayKey(stop)
+
+      if (seenCustomStopKeys.has(key)) return false
+      seenCustomStopKeys.add(key)
+      return true
+    })
+
+    const sortedCustomStopsForDay = [...dedupedCustomStopsForDay].sort(
+      (a, b) => (a.distance_from_start_km ?? 999999) - (b.distance_from_start_km ?? 999999)
+    )
+
+    return {
+      allStops,
+      endpointStopIds,
+      endpointStopNames,
+      routeStops,
+      routeStopIds,
+      customStopsForDay: sortedCustomStopsForDay,
+      dayShownStopCount: routeStops.length + sortedCustomStopsForDay.length,
+    }
+  })
+
+  const unifiedOrderedMapStops = unifiedDayRouteData.flatMap((dayData, dayIndex) => ([
+    ...dayData.routeStops.map((stop) => ({
+      key: `verified-${dayIndex}-${stop.id}`,
+      location_name: stop.location_name,
+      latitude: stop.latitude,
+      longitude: stop.longitude,
+    })),
+    ...dayData.customStopsForDay.map((stop) => ({
+      key: `custom-${dayIndex}-${stop.id}`,
+      location_name: stop.location_name,
+      latitude: stop.latitude,
+      longitude: stop.longitude,
+    })),
+  ]))
+
+  const fallbackMapStopsFromPersisted = stops.map((stop, index) => ({
+    key: `persisted-${index}-${normalizeStopId(stop.stop_id || stop.id) || stop.id}`,
+    location_name: stop.location_name,
+    latitude: stop.latitude,
+    longitude: stop.longitude,
+  }))
+
+  const effectiveMapStops =
+    fallbackMapStopsFromPersisted.length > unifiedOrderedMapStops.length
+      ? fallbackMapStopsFromPersisted
+      : unifiedOrderedMapStops
+
   const mapNumberedStopsCount = useMemo(() => {
     const countRenderable = (latRaw: string | number | undefined, lngRaw: string | number | undefined) => {
       const lat = typeof latRaw === "number" ? latRaw : parseFloat(String(latRaw ?? ""))
       const lng = typeof lngRaw === "number" ? lngRaw : parseFloat(String(lngRaw ?? ""))
       if (isNaN(lat) || isNaN(lng)) return false
-      if (isNearEndpointMarker(lat, lng)) return false
       return true
     }
 
-    if (filteredStops.length > 0) {
-      return filteredStops.filter((stop) => countRenderable(stop.latitude, stop.longitude)).length
-    }
-
-    return daySegments
-      .flatMap((segment) => [...segment.verifiedStops, ...segment.otherStops])
+    return effectiveMapStops
       .filter((stop) => countRenderable(stop.latitude, stop.longitude)).length
-  }, [filteredStops, daySegments, isNearEndpointMarker])
+  }, [effectiveMapStops])
+
+  useEffect(() => {
+    if (loading) return
+
+    const savedStops = stops.filter((stop) => stop.verification_status !== "custom")
+    const customStops = stops.filter((stop) => stop.verification_status === "custom")
+
+    console.log("[PlannerDebug] saved stops", {
+      count: savedStops.length,
+      ids: savedStops.map((stop) => normalizeStopId(stop.stop_id || stop.id)),
+      names: savedStops.map((stop) => stop.location_name),
+    })
+
+    console.log("[PlannerDebug] custom stops", {
+      count: customStops.length,
+      ids: customStops.map((stop) => normalizeStopId(stop.stop_id || stop.id)),
+      names: customStops.map((stop) => stop.location_name),
+      dayIndexes: customStops.map((stop) => stop.day_index ?? null),
+    })
+
+    console.log("[PlannerDebug] central combined source", {
+      unifiedCount: unifiedOrderedMapStops.length,
+      persistedFallbackCount: fallbackMapStopsFromPersisted.length,
+      effectiveCount: effectiveMapStops.length,
+      effectiveNames: effectiveMapStops.map((stop) => stop.location_name),
+      perDay: unifiedDayRouteData.map((day, idx) => ({
+        day: idx + 1,
+        routeCount: day.routeStops.length,
+        customCount: day.customStopsForDay.length,
+        routeNames: day.routeStops.map((stop) => stop.location_name),
+        customNames: day.customStopsForDay.map((stop) => stop.location_name),
+      })),
+      planningAlerts: routeWarnings,
+    })
+  }, [
+    loading,
+    stops,
+    unifiedDayRouteData,
+    unifiedOrderedMapStops,
+    fallbackMapStopsFromPersisted,
+    effectiveMapStops,
+    routeWarnings,
+  ])
 
   if (loading) {
     return (
@@ -2618,37 +2847,13 @@ export default function PlannerDetailPage() {
                       />
                     )}
 
-                    {filteredStops.length > 0 && filteredStops.map((stop, index) => {
-                      const lat = parseFloat(stop.latitude)
-                      const lng = parseFloat(stop.longitude)
+                    {effectiveMapStops.map((stop, index) => {
+                      const lat = parseFloat(String(stop.latitude ?? ""))
+                      const lng = parseFloat(String(stop.longitude ?? ""))
                       if (isNaN(lat) || isNaN(lng)) return null
-                      if (isNearEndpointMarker(lat, lng)) return null
                       return (
                         <Marker
-                          key={stop.id}
-                          position={{ lat, lng }}
-                          label={{
-                            text: String(index + 1),
-                            color: "white",
-                            fontWeight: "bold",
-                            fontSize: "11px",
-                          }}
-                          title={`${index + 1}. ${stop.location_name}`}
-                        />
-                      )
-                    })}
-
-                    {filteredStops.length === 0 && daySegments.map((segment, segIndex) => [
-                      ...segment.verifiedStops,
-                      ...segment.otherStops,
-                    ]).flat().map((stop, index) => {
-                      const lat = parseFloat(stop.latitude ?? "0")
-                      const lng = parseFloat(stop.longitude ?? "0")
-                      if (isNaN(lat) || isNaN(lng)) return null
-                      if (isNearEndpointMarker(lat, lng)) return null
-                      return (
-                        <Marker
-                          key={`segment-stop-${stop.id}`}
+                          key={`segment-stop-${stop.key}`}
                           position={{ lat, lng }}
                           label={{
                             text: String(index + 1),
@@ -2822,117 +3027,15 @@ export default function PlannerDetailPage() {
                 const expanded = expandedSegments.has(index)
                 const active = activeSegmentIndex === index
 
-                const allStops = filterStopsBySegmentDistance(segment, [...segment.verifiedStops, ...segment.otherStops])
-                const overnightStops = allStops.slice(0, 3)
-                const overnightStopsSorted = [...overnightStops].sort(
-                  (a, b) => (a.distance_from_start_km ?? Number.MAX_SAFE_INTEGER) - (b.distance_from_start_km ?? Number.MAX_SAFE_INTEGER)
-                )
-                const persistedStopIds = new Set(
-                  stops
-                    .filter((stop) => stop.verification_status !== "custom")
-                    .map((stop) => normalizeStopId(stop.stop_id || stop.id))
-                    .filter(Boolean)
-                )
-                const persistedTripStopsForSegment: RouteStopOption[] = stops
-                  .filter((stop) => stop.verification_status !== "custom")
-                  .filter((stop) => {
-                    if (effectiveDayCount === 1) return true
-                    const stopDistance = Number(stop.distance_from_start_km)
-                    if (Number.isFinite(stopDistance)) {
-                      return stopDistance >= segment.startKm && stopDistance < segment.endKm
-                    }
-                    return stop.day_index === index
-                  })
-                  .map((stop) => ({
-                    id: normalizeStopId(stop.stop_id || stop.id),
-                    location_name: stop.location_name,
-                    latitude: stop.latitude,
-                    longitude: stop.longitude,
-                    state: stop.state,
-                    region: stop.region,
-                    route_type: stop.route_type,
-                    stay_type: stop.stay_type,
-                    pet_friendly: stop.pet_friendly,
-                    water: stop.water,
-                    cost_band: stop.cost_band,
-                    tier: stop.tier,
-                    is_verified: true,
-                    distance_from_start_km: Number.isFinite(Number(stop.distance_from_start_km))
-                      ? Number(stop.distance_from_start_km)
-                      : undefined,
-                  }))
-
-                const persistedStopsMerged = new Map<string, RouteStopOption>()
-                for (const stop of [...overnightStopsSorted, ...persistedTripStopsForSegment]) {
-                  persistedStopsMerged.set(normalizeStopId(stop.id), stop)
-                }
-                const persistedStopsForSegment = Array.from(persistedStopsMerged.values()).filter((stop) =>
-                  persistedStopIds.has(normalizeStopId(stop.id))
-                )
-                // IDs already shown as A (start) or B (end) — exclude from route waypoint pins
-                const endpointStopIds = new Set<string>([
-                  ...(previousSelectedOption ? [previousSelectedOption.id] : []),
-                  ...(selectedOption ? [selectedOption.id] : []),
-                  ...(nextSelectedOption ? [nextSelectedOption.id] : []),
-                ].map((id) => normalizeStopId(id)).filter(Boolean))
-                const endpointStopNames = new Set<string>([
-                  previousSelectedOption?.location_name,
-                  selectedOption?.location_name,
-                  nextSelectedOption?.location_name,
-                ].filter(Boolean).map((name) => String(name).toLowerCase().trim()))
-                const rawRouteStops = getOrderedRouteStops(
-                  index,
-                  persistedStopsForSegment.length > 0 ? persistedStopsForSegment : allStops.slice(0, 1)
-                )
-                const routeStops = rawRouteStops.filter((stop) => !endpointStopIds.has(normalizeStopId(stop.id)))
-                const routeStopIds = new Set(routeStops.map((stop) => normalizeStopId(stop.id)).filter(Boolean))
-                const hiddenCustomKeysForDay = new Set(hiddenCustomStopsByDay[index] || [])
-                const customStopsForDay = stops.filter((stop) => {
-                  if (stop.verification_status !== "custom") return false
-
-                  const stopDistance = Number(stop.distance_from_start_km)
-                  const inSegmentWindow = effectiveDayCount === 1
-                    ? true
-                    : Number.isFinite(stopDistance)
-                      ? stopDistance >= segment.startKm && stopDistance < segment.endKm
-                      : stop.day_index === index
-
-                  if (!inSegmentWindow) return false
-
-                  const normalizedId = normalizeStopId(stop.stop_id || stop.id)
-                  const normalizedName = stop.location_name.toLowerCase().trim()
-                  const displayKey = getCustomStopDisplayKey(stop)
-                  return !routeStopIds.has(normalizedId)
-                    && !endpointStopIds.has(normalizedId)
-                    && !endpointStopNames.has(normalizedName)
-                    && !hiddenCustomKeysForDay.has(displayKey)
-                })
-                const seenCustomStopKeys = new Set<string>()
-                const dedupedCustomStopsForDay = customStopsForDay.filter((stop) => {
-                  const key = getCustomStopDisplayKey(stop)
-
-                  if (seenCustomStopKeys.has(key)) return false
-                  seenCustomStopKeys.add(key)
-                  return true
-                })
-                // Sort custom stops by route distance to match map order
-                const sortedCustomStopsForDay = [...dedupedCustomStopsForDay].sort(
-                  (a, b) => (a.distance_from_start_km ?? 999999) - (b.distance_from_start_km ?? 999999)
-                )
-                
-                // Compute global stop number for each custom stop (1, 2, 3...)
-                const getGlobalStopNumber = (customStop: TripStop) => {
-                  let count = 0
-                  for (const stop of filteredStops) {
-                    if (stop.id === customStop.id) return count + 1
-                    count++
-                  }
-                  return count
-                }
-                
-                const visibleCustomStopsForDay = sortedCustomStopsForDay
-                const dayShownStopCount = routeStops.length + visibleCustomStopsForDay.length
+                const dayRouteData = unifiedDayRouteData[index]
+                const allStops = dayRouteData?.allStops ?? []
+                const routeStops = dayRouteData?.routeStops ?? []
+                const customStopsForDay = dayRouteData?.customStopsForDay ?? []
+                const visibleCustomStopsForDay = customStopsForDay
+                const dayShownStopCount = dayRouteData?.dayShownStopCount ?? 0
                 const hiddenCustomStopsCount = 0
+                const routeStopIds = dayRouteData?.routeStopIds ?? new Set<string>()
+                const endpointStopIds = dayRouteData?.endpointStopIds ?? new Set<string>()
                 const displayedRouteStopIds = new Set<string>([
                   ...routeStops.map((stop) => normalizeStopId(stop.id)),
                   ...visibleCustomStopsForDay.map((stop) => normalizeStopId(stop.stop_id || stop.id)),
@@ -3035,7 +3138,11 @@ export default function PlannerDetailPage() {
                               {routeStops.length > 0 && (
                                 <div className="space-y-4">
                                   {staticRouteStops.map((stop) => (
-                                    <StaticRouteStopItem key={`fixed-stop-${stop.id}`} stop={stop} />
+                                    <StaticRouteStopItem
+                                      key={`fixed-stop-${stop.id}`}
+                                      stop={stop}
+                                      onRemove={() => handleRemoveStopFromOptions(stop.id)}
+                                    />
                                   ))}
 
                                   {draggableRouteStops.length > 0 && (
@@ -3049,7 +3156,11 @@ export default function PlannerDetailPage() {
                                       <SortableContext items={draggableRouteStops.map((stop) => stop.id)} strategy={verticalListSortingStrategy}>
                                         <div className="space-y-4">
                                           {draggableRouteStops.map((stop) => (
-                                            <SortableRouteStopItem key={`stop-${stop.id}`} stop={stop} />
+                                            <SortableRouteStopItem
+                                              key={`stop-${stop.id}`}
+                                              stop={stop}
+                                              onRemove={() => handleRemoveStopFromOptions(stop.id)}
+                                            />
                                           ))}
                                         </div>
                                       </SortableContext>
