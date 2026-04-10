@@ -1,5 +1,6 @@
 import { supabaseAdmin } from "@/config/supabase"
 import { NextRequest, NextResponse } from "next/server"
+import { decodePolyline, buildCumulativeDistanceTable, samplePolylineAtKm, projectPointOntoPolyline } from "@/lib/routePolyline"
 
 interface UserMetadata {
   defaults?: {
@@ -427,45 +428,80 @@ async function generateCustomStop(
 
     const directDistanceKmForProbes = calculateDistance(startLat, startLng, destLat, destLng)
 
+    // Fetch the actual road polyline so probe points land on the highway, not in the ocean.
+    let routePolyline: Array<{ lat: number; lng: number }> | null = null
+    let routeCumTable: number[] | null = null
+    try {
+      const dirParams = new URLSearchParams({
+        origin: `${startLat},${startLng}`,
+        destination: `${destLat},${destLng}`,
+        mode: "driving",
+        key: apiKey,
+      })
+      const dirRes = await fetch(`https://maps.googleapis.com/maps/api/directions/json?${dirParams}`)
+      const dirData = await dirRes.json()
+      if (dirData.status === "OK" && dirData.routes?.length) {
+        const encoded = dirData.routes[0]?.overview_polyline?.points
+        if (encoded) {
+          routePolyline = decodePolyline(encoded)
+          routeCumTable = buildCumulativeDistanceTable(routePolyline)
+        }
+      }
+    } catch {
+      // Straight-line fallback used below
+    }
+
     // More probe points for longer routes. Minimum is 2× tripDays so each day segment has at
     // least two probe points, giving enough coverage for stops in sparse outback corridors.
     const baseProbeCount = Math.max(safeTripDays * 2, Math.ceil(directDistanceKmForProbes / 100))
     const probeCount = directDistanceKmForProbes > 2000 ? Math.min(50, baseProbeCount) : Math.min(30, baseProbeCount)
+    const totalRouteKm = routeCumTable ? routeCumTable[routeCumTable.length - 1] : directDistanceKmForProbes
     const probePoints = Array.from({ length: probeCount }, (_, i) => {
       const fraction = (i + 1) / (probeCount + 1)
+      if (routePolyline && routeCumTable) {
+        return samplePolylineAtKm(fraction * totalRouteKm, routePolyline, routeCumTable)
+      }
       return {
         lat: startLat + (destLat - startLat) * fraction,
         lng: startLng + (destLng - startLng) * fraction,
       }
     })
 
-    // Irrelevant name patterns to exclude from overnight stop options
-    const OVERNIGHT_EXCLUDE = /hotel|motel|hostel|backpacker|resort|inn\b|b&b|bed and breakfast|airbnb/i
+    // Irrelevant name patterns to exclude from overnight stop options.
+    // Fuel/service stations are excluded by name even when returned under campground searches
+    // (e.g. "BP Bamaga Roadhouse", "Injinoo Fuel Station", "Seisia Service Station").
+    // Roadhouse is NOT excluded — outback roadhouses often have genuine camping.
+    const OVERNIGHT_EXCLUDE = /hotel|motel|hostel|backpacker|resort|inn\b|b&b|bed and breakfast|airbnb|toilet|toilets|amenities|amenity block|public toilet|car park|parking area|day use area|service station|fuel station|petrol station|\bservo\b|\bgas station\b/i
 
-    // Search radius scales with route length. Longer remote routes need a wider net since
-    // caravan parks and rest areas are sparser. 60 km covers most highway detours without
-    // pulling in off-route stops (those are still filtered by lateralKm ≤ 100 below).
-    const searchRadius = directDistanceKmForProbes > 1000 ? 80000
-      : directDistanceKmForProbes > 300 ? 60000
-      : 40000
+    // 30 km radius keeps probes on the highway corridor. Polyline-based probe points
+    // are already on the road, so a tight radius is sufficient and avoids pulling in
+    // off-route locations (e.g. island resorts, offshore campgrounds).
+    const searchRadius = 30000
 
-    // Search config: [type, keyword, radius]
-    // rv_park is Google's type for caravan parks; campground covers national park camps.
+    // Australian caravan / camping focused search types.
+    // rv_park = Google's type for caravan parks, holiday parks, tourist parks.
+    // campground = national park camps, free camps, bush camps, showgrounds.
     const overnightSearches: Array<{ type: string; keyword?: string; radius: number }> = [
       { type: "rv_park", radius: searchRadius },
       { type: "campground", radius: searchRadius },
-      { type: "rv_park", keyword: "caravan park", radius: Math.max(50000, searchRadius) },
-      { type: "campground", keyword: "free camp", radius: Math.max(50000, searchRadius) },
-      { type: "campground", keyword: "roadhouse", radius: Math.max(50000, searchRadius) },
+      { type: "rv_park", keyword: "caravan park", radius: searchRadius },
+      { type: "rv_park", keyword: "holiday park", radius: searchRadius },
+      { type: "rv_park", keyword: "tourist park", radius: searchRadius },
+      { type: "rv_park", keyword: "van park", radius: searchRadius },
+      { type: "campground", keyword: "free camp", radius: searchRadius },
+      { type: "campground", keyword: "bush camp", radius: searchRadius },
+      { type: "campground", keyword: "showground", radius: searchRadius },
+      { type: "campground", keyword: "roadhouse", radius: searchRadius },
+      { type: "campground", keyword: "station stay", radius: searchRadius },
+      { type: "campground", keyword: "national park", radius: searchRadius },
+      { type: "gas_station", keyword: "truck stop", radius: searchRadius },
     ]
 
-    // For routes > 300 km (medium to long) add rest areas, parking, and truck stops —
-    // these are common overnight spots on remote Australian highways (e.g. Stuart Hwy).
     if (directDistanceKmForProbes > 300) {
       overnightSearches.push(
-        { type: "parking", radius: searchRadius },
-        { type: "gas_station", keyword: "truck stop", radius: searchRadius },
-        { type: "point_of_interest", keyword: "rest area", radius: searchRadius }
+        { type: "campground", keyword: "council campsite", radius: searchRadius },
+        { type: "campground", keyword: "lakeside", radius: searchRadius },
+        { type: "campground", keyword: "riverside", radius: searchRadius },
       )
     }
 
@@ -510,25 +546,33 @@ async function generateCustomStop(
                 seenPlaces.add(key)
                 const distanceFromStart = calculateDistance(startLat, startLng, lat, lng)
 
-                // Reject Google Places results that are too far off the A→B route line.
-                // Probe points are on the line, but the search radius can return stops
-                // 80+ km away in any direction (e.g. Flinders Ranges for Stuart Hwy trips).
-                const avgLatRad = ((startLat + destLat) / 2) * Math.PI / 180
-                const scaleX = Math.cos(avgLatRad)
-                const vx = (destLng - startLng) * scaleX
-                const vy = destLat - startLat
-                const wx = (lng - startLng) * scaleX
-                const wy = lat - startLat
-                const vLenSq = vx * vx + vy * vy
-                const tRaw = vLenSq > 1e-12 ? (wx * vx + wy * vy) / vLenSq : 0
-                // Skip stops behind the start or past the destination (5% tolerance)
+                // Reject results too far off the actual road corridor.
+                // Use polyline projection when available (accurate for coastal/curved routes).
+                // 25 km threshold prevents offshore islands (e.g. Whitsunday Island is ~31 km
+                // from the Bruce Highway) while allowing normal highway-adjacent stops.
+                let lateralKm: number
+                let tRaw: number
+                if (routePolyline && routeCumTable) {
+                  const { distanceFromStartKm: dfs, lateralKm: lkm } = projectPointOntoPolyline(lat, lng, routePolyline, routeCumTable)
+                  lateralKm = lkm
+                  const totalKm = routeCumTable[routeCumTable.length - 1]
+                  tRaw = totalKm > 0 ? dfs / totalKm : 0
+                } else {
+                  const avgLatRad = ((startLat + destLat) / 2) * Math.PI / 180
+                  const scaleX = Math.cos(avgLatRad)
+                  const vx = (destLng - startLng) * scaleX
+                  const vy = destLat - startLat
+                  const wx = (lng - startLng) * scaleX
+                  const wy = lat - startLat
+                  const vLenSq = vx * vx + vy * vy
+                  tRaw = vLenSq > 1e-12 ? (wx * vx + wy * vy) / vLenSq : 0
+                  const tClamped = Math.max(0, Math.min(1, tRaw))
+                  const projLat = startLat + tClamped * (destLat - startLat)
+                  const projLng = startLng + tClamped * (destLng - startLng)
+                  lateralKm = calculateDistance(lat, lng, projLat, projLng)
+                }
                 if (tRaw < -0.05 || tRaw > 1.05) return
-                const tClamped = Math.max(0, Math.min(1, tRaw))
-                const projLat = startLat + tClamped * (destLat - startLat)
-                const projLng = startLng + tClamped * (destLng - startLng)
-                const lateralKm = calculateDistance(lat, lng, projLat, projLng)
-                // 100 km max lateral — keeps stops near the highway corridor
-                if (lateralKm > 100) return
+                if (lateralKm > 25) return
 
                 customStopCandidates.push({
                   trip_id: tripId,
@@ -607,21 +651,54 @@ async function generateCustomStop(
         console.log(`[3/4] Adaptive fallback partially filled: ${plannedCustomCandidates.length} of ${targetCustomStops} (initial spacing: ${initialSpacingKm}km)`)
       }
     }
-    const customStopsToInsert = plannedCustomCandidates.map((candidate) => {
-      const progress = directDistanceKm > 0
-        ? Math.max(0, Math.min(0.999, Number(candidate.distance_from_start_km) / directDistanceKm))
-        : 0
-      const dayIndex = Math.min(safeTripDays - 1, Math.floor(progress * safeTripDays))
+    // Sort candidates by distance from start so we assign day indices sequentially
+    // along the route rather than by raw progress fraction (which clusters at extremes).
+    const sortedForDayAssign = [...plannedCustomCandidates].sort(
+      (a, b) => a.distance_from_start_km - b.distance_from_start_km
+    )
 
-      return {
-        trip_id: candidate.trip_id,
-        location_name: candidate.location_name,
-        latitude: candidate.latitude,
-        longitude: candidate.longitude,
-        place_type: candidate.place_type,
-        day_index: dayIndex,
-      }
+    // Divide the full route into equal-km buckets — one per trip day.
+    // Each stop is assigned to the bucket its distance falls into.
+    // If a day bucket ends up empty, the nearest stop from an adjacent bucket
+    // is borrowed to fill it, preventing phantom empty days.
+    const totalKmForDays = directDistanceKm > 0 ? directDistanceKm : 1
+    const kmPerDay = totalKmForDays / safeTripDays
+
+    // First pass: assign by km bucket
+    const dayBuckets: number[] = sortedForDayAssign.map((candidate) => {
+      const distKm = Number(candidate.distance_from_start_km)
+      return Math.min(safeTripDays - 1, Math.floor(distKm / kmPerDay))
     })
+
+    // Second pass: identify empty days and fill from adjacent stops
+    const bucketCounts = Array.from({ length: safeTripDays }, () => 0)
+    dayBuckets.forEach((d) => { bucketCounts[d] = (bucketCounts[d] || 0) + 1 })
+
+    const filledBuckets = [...dayBuckets]
+    for (let day = 0; day < safeTripDays; day++) {
+      if (bucketCounts[day] > 0) continue
+      // Find the nearest stop by km distance to the center of this empty day
+      const dayCenterKm = (day + 0.5) * kmPerDay
+      let bestIdx = -1
+      let bestDelta = Infinity
+      sortedForDayAssign.forEach((candidate, idx) => {
+        const delta = Math.abs(Number(candidate.distance_from_start_km) - dayCenterKm)
+        if (delta < bestDelta) { bestDelta = delta; bestIdx = idx }
+      })
+      if (bestIdx >= 0) {
+        filledBuckets[bestIdx] = day
+        bucketCounts[day] = 1
+      }
+    }
+
+    const customStopsToInsert = sortedForDayAssign.map((candidate, idx) => ({
+      trip_id: candidate.trip_id,
+      location_name: candidate.location_name,
+      latitude: candidate.latitude,
+      longitude: candidate.longitude,
+      place_type: candidate.place_type,
+      day_index: filledBuckets[idx],
+    }))
 
     // Deduplicate generated custom stops before touching DB.
     const uniqueCustomStops = [] as typeof customStopsToInsert
@@ -720,6 +797,227 @@ async function generateCustomStop(
       error: error instanceof Error ? error.message : "Unknown error",
     }
   }
+}
+
+interface TripGenerationJob {
+  tripId: string
+  title: string
+  startLat: number
+  startLng: number
+  destLat: number
+  destLng: number
+  tripDurationDays: number
+}
+
+const tripGenerationQueue: TripGenerationJob[] = []
+let isTripQueueProcessing = false
+
+async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
+  if (!supabaseAdmin) {
+    throw new Error("Database not configured")
+  }
+
+  let generatedStopsCount = 0
+  let customStopsCount = 0
+
+  await supabaseAdmin
+    .from("trips")
+    .update({ status: "in_progress" })
+    .eq("id", job.tripId)
+
+  console.log("[queue] ▶️ Starting trip generation job", {
+    tripId: job.tripId,
+    title: job.title,
+  })
+
+  // ============================================================
+  // [2/4] GENERATE STOPS FROM DATABASE
+  // ============================================================
+  console.log("[2/4] 🔍 Generating stops from DB...", {
+    startCoords: [job.startLat, job.startLng],
+    destCoords: [job.destLat, job.destLng],
+    tripId: job.tripId,
+  })
+
+  const { success: generateSuccess, stops = [], error: generateError } = await generateStop(
+    job.startLat,
+    job.startLng,
+    job.destLat,
+    job.destLng
+  )
+
+  if (generateError) {
+    console.warn("[2/4] ⚠️ Stop generation warning:", generateError)
+  }
+
+  if (generateSuccess && stops.length > 0) {
+    console.log(`[2/4] 📍 Found ${stops.length} filtered stops from DB`)
+
+    const candidateRows = stops.map((stop, index) => {
+      const stopData = stop as {
+        id: string
+        distance_to_route_km: number
+        distance_from_start_km: number
+        distance_to_dest_km: number
+        is_between_start_and_dest: boolean
+      }
+
+      return {
+        trip_id: job.tripId,
+        stop_id: stopData.id,
+        rank_score: index + 1,
+        distance_to_route_km: stopData.distance_to_route_km,
+        detour_minutes: null,
+        suitability_json: {
+          distance_from_start: stopData.distance_from_start_km,
+          distance_to_dest: stopData.distance_to_dest_km,
+          is_between: stopData.is_between_start_and_dest,
+        },
+        generation_version: 1,
+      }
+    })
+
+    const uniqueCandidateRows = Array.from(
+      new Map(candidateRows.map((row) => [row.stop_id, row])).values()
+    )
+
+    const { error: insertError } = await supabaseAdmin
+      .from("trip_candidate_stops")
+      .upsert(uniqueCandidateRows, {
+        onConflict: "trip_id,stop_id,generation_version",
+      })
+
+    if (insertError) {
+      console.error("[2/4] ❌ Failed to save candidate stops:", insertError)
+    } else {
+      generatedStopsCount = uniqueCandidateRows.length
+      console.log(`[2/4] ✅ Saved ${generatedStopsCount} stops to trip_candidate_stops table`)
+    }
+  } else {
+    console.log("[2/4] ⓘ No stops found or generation failed")
+  }
+
+  // ============================================================
+  // [3/4] GENERATE CUSTOM STOPS FROM GOOGLE PLACES
+  // ============================================================
+  console.log("[3/4] 🌐 Generating custom stops from Google Places...", {
+    searchTypes: ["rv_park", "campground", "caravan park keyword"],
+  })
+
+  const dbStopDistancesKm = stops
+    .map((stop) => (stop as { distance_from_start_km?: number }).distance_from_start_km ?? 0)
+    .filter((distance) => distance > 0)
+
+  const safeTripDays = Math.max(1, Math.round(Number(job.tripDurationDays) || 1))
+  const dayBasedStopTarget = safeTripDays * 3
+  const directDistanceKm = calculateDistance(
+    job.startLat,
+    job.startLng,
+    job.destLat,
+    job.destLng
+  )
+  const estimatedDriveDistanceKm = Math.max(
+    directDistanceKm,
+    Math.min(directDistanceKm * 1.45, directDistanceKm + 600)
+  )
+  const distanceBasedStopCap = Math.max(1, Math.ceil(estimatedDriveDistanceKm / 90))
+  const targetTotalStops = Math.min(dayBasedStopTarget, distanceBasedStopCap)
+  const customStopsNeeded = Math.max(0, targetTotalStops - generatedStopsCount)
+
+  console.log("[3/4] target stop quota", {
+    tripDurationDays: safeTripDays,
+    dayBasedStopTarget,
+    directDistanceKm: Math.round(directDistanceKm),
+    estimatedDriveDistanceKm: Math.round(estimatedDriveDistanceKm),
+    distanceBasedStopCap,
+    targetTotalStops,
+    dbStops: generatedStopsCount,
+    googleStopsNeeded: customStopsNeeded,
+  })
+
+  const {
+    success: customSuccess,
+    stopsGenerated = 0,
+    totalFetched = 0,
+    afterDedup = 0,
+    error: customError,
+  } = await generateCustomStop(
+    job.startLat,
+    job.startLng,
+    job.destLat,
+    job.destLng,
+    job.tripId,
+    Number(job.tripDurationDays) || 1,
+    dbStopDistancesKm,
+    customStopsNeeded
+  )
+
+  if (customError) {
+    console.warn("[3/4] ⚠️ Custom stop generation warning:", customError)
+  }
+
+  if (customSuccess) {
+    customStopsCount = stopsGenerated
+    console.log(
+      `[3/4] ✅ Generated and saved ${customStopsCount} custom stops to custom_stops table`,
+      {
+        totalFetched,
+        afterDedup,
+      }
+    )
+  } else {
+    console.log("[3/4] ⓘ Custom stop generation skipped or failed", {
+      totalFetched,
+      afterDedup,
+    })
+  }
+
+  // ============================================================
+  // [4/4] COMPLETE JOB
+  // ============================================================
+  await supabaseAdmin
+    .from("trips")
+    .update({ status: "completed" })
+    .eq("id", job.tripId)
+
+  console.log("[4/4] ✅ Trip generation completed", {
+    tripId: job.tripId,
+    totalStopsGenerated: generatedStopsCount + customStopsCount,
+  })
+}
+
+async function processTripGenerationQueue(): Promise<void> {
+  if (isTripQueueProcessing) return
+  isTripQueueProcessing = true
+
+  while (tripGenerationQueue.length > 0) {
+    const nextJob = tripGenerationQueue.shift()
+    if (!nextJob) continue
+
+    try {
+      await processTripGenerationJob(nextJob)
+    } catch (error) {
+      console.error("[queue] ❌ Trip generation job failed", {
+        tripId: nextJob.tripId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+
+      if (supabaseAdmin) {
+        await supabaseAdmin
+          .from("trips")
+          .update({ status: "planned" })
+          .eq("id", nextJob.tripId)
+      }
+    }
+  }
+
+  isTripQueueProcessing = false
+}
+
+function enqueueTripGeneration(job: TripGenerationJob): number {
+  tripGenerationQueue.push(job)
+  void processTripGenerationQueue()
+  return tripGenerationQueue.length
 }
 
 export async function GET(req: NextRequest) {
@@ -968,174 +1266,56 @@ export async function POST(req: NextRequest) {
       title: data?.title,
     })
 
-    let generatedStopsCount = 0
-    let customStopsCount = 0
-
-    if (data?.id && resolvedStartLat && resolvedStartLng && resolvedDestLat && resolvedDestLng) {
-      // ============================================================
-      // [2/4] GENERATE STOPS FROM DATABASE
-      // ============================================================
-      console.log("[2/4] 🔍 Generating stops from DB...", {
-        startCoords: [resolvedStartLat, resolvedStartLng],
-        destCoords: [resolvedDestLat, resolvedDestLng],
-      })
-
-      const { success: generateSuccess, stops = [], error: generateError } = await generateStop(
-        resolvedStartLat,
-        resolvedStartLng,
-        resolvedDestLat,
-        resolvedDestLng
+    if (!data?.id) {
+      return NextResponse.json(
+        { success: false, error: "Failed to create trip id" },
+        { status: 500 }
       )
-
-      if (generateError) {
-        console.warn("[2/4] ⚠️ Stop generation warning:", generateError)
-      }
-
-      if (generateSuccess && stops.length > 0) {
-        console.log(`[2/4] 📍 Found ${stops.length} filtered stops from DB`)
-
-        // Format and save to trip_candidate_stops
-        const candidateRows = stops.map((stop, index) => {
-          const stopData = stop as {
-            id: string
-            distance_to_route_km: number
-            distance_from_start_km: number
-            distance_to_dest_km: number
-            is_between_start_and_dest: boolean
-          }
-
-          return {
-          trip_id: data.id,
-          stop_id: stopData.id,
-          rank_score: index + 1,
-          distance_to_route_km: stopData.distance_to_route_km,
-          detour_minutes: null,
-          suitability_json: {
-            distance_from_start: stopData.distance_from_start_km,
-            distance_to_dest: stopData.distance_to_dest_km,
-            is_between: stopData.is_between_start_and_dest,
-          },
-          generation_version: 1,
-          }
-        })
-
-        // Ensure each stop_id is only saved once per trip generation.
-        const uniqueCandidateRows = Array.from(
-          new Map(candidateRows.map((row) => [row.stop_id, row])).values()
-        )
-
-        const { error: insertError } = await supabaseAdmin
-          .from("trip_candidate_stops")
-          .upsert(uniqueCandidateRows, {
-            onConflict: "trip_id,stop_id,generation_version",
-          })
-
-        if (insertError) {
-          console.error("[2/4] ❌ Failed to save candidate stops:", insertError)
-        } else {
-          generatedStopsCount = uniqueCandidateRows.length
-          console.log(`[2/4] ✅ Saved ${generatedStopsCount} stops to trip_candidate_stops table`)
-        }
-      } else {
-        console.log("[2/4] ⓘ No stops found or generation failed")
-      }
-
-      // ============================================================
-      // [3/4] GENERATE CUSTOM STOPS FROM GOOGLE PLACES
-      // ============================================================
-      console.log("[3/4] 🌐 Generating custom stops from Google Places...", {
-        searchTypes: ["rv_park", "campground", "caravan park keyword"],
-      })
-
-      const dbStopDistancesKm = stops
-        .map((stop) => (stop as { distance_from_start_km?: number }).distance_from_start_km ?? 0)
-        .filter((distance) => distance > 0)
-
-      const safeTripDays = Math.max(1, Math.round(Number(tripDurationDays) || 1))
-      const dayBasedStopTarget = safeTripDays * 3
-      const directDistanceKm = calculateDistance(
-        resolvedStartLat,
-        resolvedStartLng,
-        resolvedDestLat,
-        resolvedDestLng
-      )
-      // Bound stop density by route distance so short trips do not create oversized itineraries.
-      const estimatedDriveDistanceKm = Math.max(
-        directDistanceKm,
-        Math.min(directDistanceKm * 1.45, directDistanceKm + 600)
-      )
-      const distanceBasedStopCap = Math.max(1, Math.ceil(estimatedDriveDistanceKm / 90))
-      const targetTotalStops = Math.min(dayBasedStopTarget, distanceBasedStopCap)
-      const customStopsNeeded = Math.max(0, targetTotalStops - generatedStopsCount)
-
-      console.log("[3/4] target stop quota", {
-        tripDurationDays: safeTripDays,
-        dayBasedStopTarget,
-        directDistanceKm: Math.round(directDistanceKm),
-        estimatedDriveDistanceKm: Math.round(estimatedDriveDistanceKm),
-        distanceBasedStopCap,
-        targetTotalStops,
-        dbStops: generatedStopsCount,
-        googleStopsNeeded: customStopsNeeded,
-      })
-
-      const {
-        success: customSuccess,
-        stopsGenerated = 0,
-        totalFetched = 0,
-        afterDedup = 0,
-        error: customError,
-      } =
-        await generateCustomStop(
-          resolvedStartLat,
-          resolvedStartLng,
-          resolvedDestLat,
-          resolvedDestLng,
-          data.id,
-          Number(tripDurationDays) || 1,
-          dbStopDistancesKm,
-          customStopsNeeded
-        )
-
-      if (customError) {
-        console.warn("[3/4] ⚠️ Custom stop generation warning:", customError)
-      }
-
-      if (customSuccess) {
-        customStopsCount = stopsGenerated
-        console.log(
-          `[3/4] ✅ Generated and saved ${customStopsCount} custom stops to custom_stops table`,
-          {
-            totalFetched,
-            afterDedup,
-          }
-        )
-      } else {
-        console.log("[3/4] ⓘ Custom stop generation skipped or failed", {
-          totalFetched,
-          afterDedup,
-        })
-      }
     }
 
-    // ============================================================
-    // [4/4] RETURN RESPONSE TO CLIENT
-    // ============================================================
-    console.log("[4/4] 📤 Returning response to client...", {
-      tripId: data?.id,
-      totalStopsGenerated: generatedStopsCount + customStopsCount,
+    const hasResolvedCoords =
+      Number.isFinite(Number(resolvedStartLat)) &&
+      Number.isFinite(Number(resolvedStartLng)) &&
+      Number.isFinite(Number(resolvedDestLat)) &&
+      Number.isFinite(Number(resolvedDestLng))
+
+    if (!hasResolvedCoords) {
+      return NextResponse.json(
+        { success: false, error: "Trip created but missing valid coordinates for planning" },
+        { status: 400 }
+      )
+    }
+
+    await supabaseAdmin
+      .from("trips")
+      .update({ status: "in_progress" })
+      .eq("id", data.id)
+
+    const queueSizeAfterEnqueue = enqueueTripGeneration({
+      tripId: data.id,
+      title: data.title,
+      startLat: Number(resolvedStartLat),
+      startLng: Number(resolvedStartLng),
+      destLat: Number(resolvedDestLat),
+      destLng: Number(resolvedDestLng),
+      tripDurationDays: Number(tripDurationDays) || 1,
     })
 
-    return NextResponse.json({
-      success: true,
-      message: `✅ Trip "${title}" created successfully!`,
-      tripId: data?.id,
-      stopsGenerated: {
-        databaseStops: generatedStopsCount,
-        customStops: customStopsCount,
-        total: generatedStopsCount + customStopsCount,
-      },
+    console.log("[queue] 📨 Trip queued for planning", {
+      tripId: data.id,
+      queueSizeAfterEnqueue,
     })
+
+    return NextResponse.json(
+      {
+        success: true,
+        message: `Trip "${title}" queued for planning`,
+        tripId: data.id,
+        status: "in_progress",
+        queueSize: queueSizeAfterEnqueue,
+      },
+      { status: 202 }
+    )
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Unknown error"
     return NextResponse.json(

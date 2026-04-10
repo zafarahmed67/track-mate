@@ -2,6 +2,13 @@ import { supabaseAdmin } from "@/config/supabase"
 import { NextRequest, NextResponse } from "next/server"
 import { applySuitabilityFilter } from "@/lib/stopSuitabilityFilter"
 import type { TripPreferences } from "@/lib/stopSuitabilityFilter"
+import {
+  decodePolyline,
+  buildCumulativeDistanceTable,
+  projectPointOntoPolyline,
+  samplePolylineAtKm,
+} from "@/lib/routePolyline"
+import type { PolylinePoint } from "@/lib/routePolyline"
 
 interface FuelStationOption {
   id: string
@@ -58,6 +65,11 @@ interface PlannedSegment {
   gapFromLastFuelKm?: number
   gapToNextFuelKm?: number
   fuelWarning?: string
+  // Overnight anchor — the primary stop picked for this segment.
+  // Used to chain day start/end points: anchor of day N = fromLocation of day N+1.
+  overnightAnchorName?: string | null
+  overnightAnchorLat?: number | null
+  overnightAnchorLng?: number | null
 }
 
 function calculateDistance(lat1: number, lng1: number, lat2: number, lng2: number) {
@@ -375,6 +387,10 @@ export async function POST(req: NextRequest) {
 
     const apiKey = process.env.NEXT_PUBLIC_GMAPS_API_KEY
     let drivingInfo: { totalDistanceKm: number; totalDurationMinutes: number } | null = null
+    // Decoded polyline from Google Directions — used for accurate stop positioning
+    // and fuel probe generation instead of straight-line approximations.
+    let routePolyline: PolylinePoint[] | null = null
+    let routeCumTable: number[] | null = null
 
     if (apiKey) {
       try {
@@ -399,6 +415,12 @@ export async function POST(req: NextRequest) {
           drivingInfo = {
             totalDistanceKm: route.distance.value / 1000,
             totalDurationMinutes: route.duration.value / 60,
+          }
+          // Extract and decode the polyline for accurate geometric operations.
+          const encodedPolyline = selectedRoute?.overview_polyline?.points
+          if (encodedPolyline) {
+            routePolyline = decodePolyline(encodedPolyline)
+            routeCumTable = buildCumulativeDistanceTable(routePolyline)
           }
         }
       } catch (err) {
@@ -469,44 +491,67 @@ export async function POST(req: NextRequest) {
     const routeFiltered = allStops.map((stop) => {
       const lat = typeof stop.latitude === "number" ? stop.latitude : parseFloat(stop.latitude)
       const lng = typeof stop.longitude === "number" ? stop.longitude : parseFloat(stop.longitude)
-      const distFromStart = calculateDistance(startLat, startLng, lat, lng)
-      const distFromDest = calculateDistance(destLat, destLng, lat, lng)
-      const sumDist = distFromStart + distFromDest
       const isVerified = Boolean(stop.verification_status && stop.verification_status !== "custom")
 
-      // Tighter ellipse: cap at 120 km over direct distance regardless of pace.
-      const isBetweenEllipse = sumDist <= (directDistance + Math.min(config.maxSpacing, 120))
+      let distanceFromStartKm: number
+      let distanceFromDestKm: number
+      let lateralKm: number
+      let isBetween: boolean
 
-      // Compute the unclamped projection of the stop onto the A→B route line.
-      // tRaw < 0  → stop is "behind" the start (wrong direction, e.g. Whyalla for PA→CP)
-      // tRaw > 1  → stop is past the destination
-      const avgLatRad = ((startLat + destLat) / 2) * Math.PI / 180
-      const scaleX = Math.cos(avgLatRad)
-      const vx = (destLng - startLng) * scaleX
-      const vy = destLat - startLat
-      const wx = (lng - startLng) * scaleX
-      const wy = lat - startLat
-      const vLenSq = vx * vx + vy * vy
-      const tRaw = vLenSq > 1e-12 ? (wx * vx + wy * vy) / vLenSq : 0
+      if (routePolyline && routeCumTable && routeCumTable.length > 0) {
+        // --- Polyline-based projection (accurate for curved routes) ---
+        const totalRouteKm = routeCumTable[routeCumTable.length - 1]
+        const { distanceFromStartKm: routeDistKm, lateralKm: routeLateralKm } =
+          projectPointOntoPolyline(lat, lng, routePolyline, routeCumTable)
 
-      // Reject stops that are behind the start or past the destination.
-      // Allow a small tolerance (5% of route length) for stops near the endpoints.
-      const isForwardOnRoute = tRaw >= -0.05 && tRaw <= 1.05
+        distanceFromStartKm = routeDistKm
+        distanceFromDestKm = Math.max(0, totalRouteKm - routeDistKm)
+        lateralKm = routeLateralKm
 
-      // Lateral distance: use clamped projection for the perpendicular distance.
-      const tClamped = clamp(tRaw, 0, 1)
-      const projLat = startLat + tClamped * (destLat - startLat)
-      const projLng = startLng + tClamped * (destLng - startLng)
-      const lateralKm = calculateDistance(lat, lng, projLat, projLng)
+        // A stop is on the route if it is within the lateral threshold of the actual
+        // road and its projection falls between start (−5%) and end (+5%) of total
+        // route length.
+        // Verified (curated) database stops: 100 km threshold — some verified stops
+        // may be deliberately accessed via a short side road.
+        // Custom/unverified Google Places stops: 25 km threshold — prevents offshore
+        // islands (e.g. Whitsunday Island ~31 km from the Bruce Highway), island
+        // resorts, and other car-inaccessible places from appearing.
+        const lateralThreshold = isVerified ? 100 : 25
+        const tolerance = totalRouteKm * 0.05
+        isBetween = lateralKm <= lateralThreshold &&
+          distanceFromStartKm >= -tolerance &&
+          distanceFromStartKm <= totalRouteKm + tolerance
+      } else {
+        // --- Straight-line fallback (no polyline available) ---
+        const distFromStart = calculateDistance(startLat, startLng, lat, lng)
+        const distFromDest = calculateDistance(destLat, destLng, lat, lng)
+        const sumDist = distFromStart + distFromDest
+        const isBetweenEllipse = sumDist <= (directDistance + Math.min(config.maxSpacing, 120))
 
-      // Max 100 km off the route line — keeps stops on the actual highway while
-      // excluding detours to the Flinders Ranges, Eyre Peninsula, offshore etc.
-      const isBetween = isBetweenEllipse && isForwardOnRoute && lateralKm <= 100
+        const avgLatRad = ((startLat + destLat) / 2) * Math.PI / 180
+        const scaleX = Math.cos(avgLatRad)
+        const vx = (destLng - startLng) * scaleX
+        const vy = destLat - startLat
+        const wx = (lng - startLng) * scaleX
+        const wy = lat - startLat
+        const vLenSq = vx * vx + vy * vy
+        const tRaw = vLenSq > 1e-12 ? (wx * vx + wy * vy) / vLenSq : 0
+        const isForwardOnRoute = tRaw >= -0.05 && tRaw <= 1.05
+        const tClamped = clamp(tRaw, 0, 1)
+        const projLat = startLat + tClamped * (destLat - startLat)
+        const projLng = startLng + tClamped * (destLng - startLng)
+
+        distanceFromStartKm = Math.round(distFromStart * 10) / 10
+        distanceFromDestKm = Math.round(distFromDest * 10) / 10
+        lateralKm = calculateDistance(lat, lng, projLat, projLng)
+        const lateralThresholdFallback = isVerified ? 100 : 25
+        isBetween = isBetweenEllipse && isForwardOnRoute && lateralKm <= lateralThresholdFallback
+      }
 
       return {
         ...stop,
-        distance_from_start_km: Math.round(distFromStart * 10) / 10,
-        distance_from_dest_km: Math.round(distFromDest * 10) / 10,
+        distance_from_start_km: Math.round(distanceFromStartKm * 10) / 10,
+        distance_from_dest_km: Math.round(distanceFromDestKm * 10) / 10,
         is_between: isBetween,
         is_verified: isVerified,
       }
@@ -551,18 +596,25 @@ export async function POST(req: NextRequest) {
       avoidLongDays ? 340 : 450
     )
 
-    // Stop distance_from_start_km is haversine (straight-line). Segment boundaries
-    // use actual driving km. Scale stop distances proportionally so stops land in
-    // the correct segment window (e.g. 2482 km haversine → 3842 km driving).
-    const scaleFactor = totalDistanceKm > 0 && directDistance > 0
-      ? totalDistanceKm / directDistance
-      : 1
-    const scaledStopsWithDistance: RouteStopCandidate[] = scaleFactor !== 1
-      ? stopsWithDistance.map((s) => ({
-          ...s,
-          distance_from_start_km: Math.round(s.distance_from_start_km * scaleFactor * 10) / 10,
-        }))
-      : stopsWithDistance
+    // When the polyline is available, stop distances are already accurate driving-km
+    // values (from projectPointOntoPolyline). The linear scale factor is only needed
+    // as a fallback when we have only the haversine distance.
+    const scaledStopsWithDistance: RouteStopCandidate[] = (() => {
+      if (routePolyline && routeCumTable) {
+        // Polyline path: distances are already in actual driving km — no scaling needed.
+        return stopsWithDistance
+      }
+      // Fallback: scale haversine distances proportionally to actual driving distance.
+      const scaleFactor = totalDistanceKm > 0 && directDistance > 0
+        ? totalDistanceKm / directDistance
+        : 1
+      return scaleFactor !== 1
+        ? stopsWithDistance.map((s) => ({
+            ...s,
+            distance_from_start_km: Math.round(s.distance_from_start_km * scaleFactor * 10) / 10,
+          }))
+        : stopsWithDistance
+    })()
 
     const stopDistances = scaledStopsWithDistance.map((s) => s.distance_from_start_km)
 
@@ -800,6 +852,13 @@ export async function POST(req: NextRequest) {
       const remoteByNorth = northbound && northWeight > 0.42
       const remoteBySparseStops = (verifiedInSegment.length + otherInSegment.length) < MIN_STOPS_PER_SEGMENT
 
+      const anchorLat = overnightAnchor
+        ? parseFloat(String(overnightAnchor.latitude))
+        : null
+      const anchorLng = overnightAnchor
+        ? parseFloat(String(overnightAnchor.longitude))
+        : null
+
       segments.push({
         startKm,
         endKm,
@@ -810,6 +869,9 @@ export async function POST(req: NextRequest) {
         isRemote: remoteByDistance || remoteByNorth || remoteBySparseStops,
         fuelCritical: false,
         degradedMode,
+        overnightAnchorName: overnightAnchor?.location_name ?? null,
+        overnightAnchorLat: Number.isFinite(anchorLat) ? anchorLat : null,
+        overnightAnchorLng: Number.isFinite(anchorLng) ? anchorLng : null,
       })
     }
 
@@ -826,8 +888,14 @@ export async function POST(req: NextRequest) {
         if (!segment) continue
 
         const midKm = (segment.startKm + segment.endKm) / 2
-        const fraction = totalDistanceKm > 0 ? Math.min(0.98, Math.max(0.02, midKm / totalDistanceKm)) : 0.5
-        const point = interpolatePoint(startLat, startLng, destLat, destLng, fraction)
+        // Use the actual polyline to probe along the real road rather than the
+        // straight line (which can be in the ocean for coastal routes).
+        const point = routePolyline && routeCumTable
+          ? samplePolylineAtKm(midKm, routePolyline, routeCumTable)
+          : (() => {
+              const fraction = totalDistanceKm > 0 ? Math.min(0.98, Math.max(0.02, midKm / totalDistanceKm)) : 0.5
+              return interpolatePoint(startLat, startLng, destLat, destLng, fraction)
+            })()
         const pointKey = `${point.lat.toFixed(3)}:${point.lng.toFixed(3)}`
 
         if (seenKeys.has(pointKey)) continue
@@ -854,15 +922,13 @@ export async function POST(req: NextRequest) {
               const stationLat = station.geometry.location.lat
               const stationLng = station.geometry.location.lng
               const key = station.place_id || `${stationLat.toFixed(3)}:${stationLng.toFixed(3)}`
-              const distanceFromStartKm = projectDistanceAlongRouteKm({
-                startLat,
-                startLng,
-                destLat,
-                destLng,
-                pointLat: stationLat,
-                pointLng: stationLng,
-                totalDistanceKm,
-              })
+              const distanceFromStartKm = routePolyline && routeCumTable
+                ? projectPointOntoPolyline(stationLat, stationLng, routePolyline, routeCumTable).distanceFromStartKm
+                : projectDistanceAlongRouteKm({
+                    startLat, startLng, destLat, destLng,
+                    pointLat: stationLat, pointLng: stationLng,
+                    totalDistanceKm,
+                  })
 
               newStations.push({
                 id: key,
@@ -892,6 +958,37 @@ export async function POST(req: NextRequest) {
         (a, b) => a.distanceFromStartKm - b.distanceFromStartKm
       )
 
+      // Assign each fuel station to exactly one segment to prevent the same
+      // station from repeating in adjacent days.  We use strict half-open intervals:
+      // a station belongs to segment i if startKm[i] <= stationKm < endKm[i]
+      // (last segment is closed on both ends).  Ties go to the segment whose
+      // targetFuelKm is closest.
+      const stationOwner = new Map<string, number>()
+      for (const station of allFuelStations) {
+        let bestIdx = -1
+        let bestDelta = Infinity
+        for (let i = 0; i < segments.length; i++) {
+          const seg = segments[i]
+          const isLast = i === segments.length - 1
+          const inInterval = isLast
+            ? station.distanceFromStartKm >= seg.startKm && station.distanceFromStartKm <= seg.endKm
+            : station.distanceFromStartKm >= seg.startKm && station.distanceFromStartKm < seg.endKm
+          if (!inInterval) continue
+          const midKm = (seg.startKm + seg.endKm) / 2
+          const delta = Math.abs(station.distanceFromStartKm - midKm)
+          if (delta < bestDelta) { bestDelta = delta; bestIdx = i }
+        }
+        // Station falls outside all segment ranges (before start or after end):
+        // assign to the nearest segment as a forward-lookahead fallback.
+        if (bestIdx < 0) {
+          for (let i = 0; i < segments.length; i++) {
+            const delta = Math.abs(station.distanceFromStartKm - segments[i].endKm)
+            if (delta < bestDelta) { bestDelta = delta; bestIdx = i }
+          }
+        }
+        if (bestIdx >= 0) stationOwner.set(station.id, bestIdx)
+      }
+
       for (let i = 0; i < segments.length; i++) {
         const segment = segments[i]
         const segmentDistance = Math.max(0, segment.endKm - segment.startKm)
@@ -901,13 +998,10 @@ export async function POST(req: NextRequest) {
         const { fuelSafeKm, leadKm } = getFuelSafetyConfig(northWeight, segment.isRemote)
         const targetFuelKm = clamp(segment.endKm - leadKm, segment.startKm + 15, segment.endKm - 10)
 
-        const bandStart = segment.startKm - 15
-        const bandEnd = segment.endKm + 20
-        const inSegmentBand = allFuelStations.filter(
-          (station) => station.distanceFromStartKm >= bandStart && station.distanceFromStartKm <= bandEnd
-        )
+        // Only include stations assigned to this segment (no cross-day repeats).
+        const ownedStations = allFuelStations.filter((s) => stationOwner.get(s.id) === i)
 
-        const rankedFuel = inSegmentBand
+        const rankedFuel = ownedStations
           .slice()
           .sort((a, b) => {
             const aPenalty = a.isOpenNow === false ? 20 : 0
@@ -918,13 +1012,22 @@ export async function POST(req: NextRequest) {
           })
           .slice(0, 3)
 
-        const extendedBand = allFuelStations.filter(
-          (station) => station.distanceFromStartKm >= (segment.startKm - 50) && station.distanceFromStartKm <= (segment.endKm + 50)
-        )
-        const fallbackFuel = extendedBand
-          .slice()
-          .sort((a, b) => Math.abs(a.distanceFromStartKm - targetFuelKm) - Math.abs(b.distanceFromStartKm - targetFuelKm))
-          .slice(0, 2)
+        // Forward-only lookahead: if this segment has no owned station, look for
+        // an unowned station strictly within this segment's km range.
+        // We never fall back to globally sorted allFuelStations without an interval
+        // check — that caused the same station to repeat across multiple days.
+        const fallbackFuel = rankedFuel.length === 0
+          ? allFuelStations
+              .filter((s) => {
+                // Must be within this segment (no cross-day re-use)
+                if (s.distanceFromStartKm < segment.startKm || s.distanceFromStartKm > segment.endKm + 20) return false
+                // Prefer unowned stations; owned-by-other stations only as last resort
+                const owner = stationOwner.get(s.id)
+                return owner === undefined || owner === i
+              })
+              .sort((a, b) => Math.abs(a.distanceFromStartKm - targetFuelKm) - Math.abs(b.distanceFromStartKm - targetFuelKm))
+              .slice(0, 2)
+          : []
 
         segment.fuelSuggestions = rankedFuel.length > 0 ? rankedFuel : fallbackFuel
         segment.primaryFuelSuggestion = segment.fuelSuggestions[0]
@@ -938,8 +1041,13 @@ export async function POST(req: NextRequest) {
 
         for (const segment of unfueledSegments) {
           const midKm = (segment.startKm + segment.endKm) / 2
-          const fraction = totalDistanceKm > 0 ? Math.min(0.98, Math.max(0.02, midKm / totalDistanceKm)) : 0.5
-          const point = interpolatePoint(startLat, startLng, destLat, destLng, fraction)
+          // Use polyline sampling so gap-fill probes are on the actual road.
+          const point = routePolyline && routeCumTable
+            ? samplePolylineAtKm(midKm, routePolyline, routeCumTable)
+            : (() => {
+                const fraction = totalDistanceKm > 0 ? Math.min(0.98, Math.max(0.02, midKm / totalDistanceKm)) : 0.5
+                return interpolatePoint(startLat, startLng, destLat, destLng, fraction)
+              })()
           const midpointKey = `${point.lat.toFixed(3)}:${point.lng.toFixed(3)}`
 
           if (probedMidpoints.has(midpointKey)) continue
@@ -966,15 +1074,13 @@ export async function POST(req: NextRequest) {
                 const stationLat = station.geometry.location.lat
                 const stationLng = station.geometry.location.lng
                 const key = station.place_id || `${stationLat.toFixed(3)}:${stationLng.toFixed(3)}`
-                const distanceFromStartKm = projectDistanceAlongRouteKm({
-                  startLat,
-                  startLng,
-                  destLat,
-                  destLng,
-                  pointLat: stationLat,
-                  pointLng: stationLng,
-                  totalDistanceKm,
-                })
+                const distanceFromStartKm = routePolyline && routeCumTable
+                  ? projectPointOntoPolyline(stationLat, stationLng, routePolyline, routeCumTable).distanceFromStartKm
+                  : projectDistanceAlongRouteKm({
+                      startLat, startLng, destLat, destLng,
+                      pointLat: stationLat, pointLng: stationLng,
+                      totalDistanceKm,
+                    })
 
                 newStations.push({
                   id: key,
@@ -1004,7 +1110,34 @@ export async function POST(req: NextRequest) {
           (a, b) => a.distanceFromStartKm - b.distanceFromStartKm
         )
 
+        // Re-run ownership assignment with the expanded station list so that
+        // newly discovered stations also don't repeat across segments.
+        const updatedOwner = new Map<string, number>()
+        for (const station of updatedFuelStations) {
+          let bestIdx = -1
+          let bestDelta = Infinity
+          for (let i = 0; i < segments.length; i++) {
+            const seg = segments[i]
+            const isLast = i === segments.length - 1
+            const inInterval = isLast
+              ? station.distanceFromStartKm >= seg.startKm && station.distanceFromStartKm <= seg.endKm
+              : station.distanceFromStartKm >= seg.startKm && station.distanceFromStartKm < seg.endKm
+            if (!inInterval) continue
+            const midKm2 = (seg.startKm + seg.endKm) / 2
+            const delta = Math.abs(station.distanceFromStartKm - midKm2)
+            if (delta < bestDelta) { bestDelta = delta; bestIdx = i }
+          }
+          if (bestIdx < 0) {
+            for (let i = 0; i < segments.length; i++) {
+              const delta = Math.abs(station.distanceFromStartKm - segments[i].endKm)
+              if (delta < bestDelta) { bestDelta = delta; bestIdx = i }
+            }
+          }
+          if (bestIdx >= 0) updatedOwner.set(station.id, bestIdx)
+        }
+
         for (const segment of unfueledSegments) {
+          const segIdx = segments.indexOf(segment)
           const segmentDistance = Math.max(0, segment.endKm - segment.startKm)
           const midKm = (segment.startKm + segment.endKm) / 2
           const progress = totalDistanceKm > 0 ? midKm / totalDistanceKm : 0
@@ -1012,13 +1145,9 @@ export async function POST(req: NextRequest) {
           const { fuelSafeKm, leadKm } = getFuelSafetyConfig(northWeight, segment.isRemote)
           const targetFuelKm = clamp(segment.endKm - leadKm, segment.startKm + 15, segment.endKm - 10)
 
-          const bandStart = segment.startKm - 15
-          const bandEnd = segment.endKm + 20
-          const inSegmentBand = updatedFuelStations.filter(
-            (station) => station.distanceFromStartKm >= bandStart && station.distanceFromStartKm <= bandEnd
-          )
+          const ownedStations = updatedFuelStations.filter((s) => updatedOwner.get(s.id) === segIdx)
 
-          const rankedFuel = inSegmentBand
+          const rankedFuel = ownedStations
             .slice()
             .sort((a, b) => {
               const aPenalty = a.isOpenNow === false ? 20 : 0
@@ -1029,13 +1158,16 @@ export async function POST(req: NextRequest) {
             })
             .slice(0, 3)
 
-          const extendedBand = updatedFuelStations.filter(
-            (station) => station.distanceFromStartKm >= (segment.startKm - 50) && station.distanceFromStartKm <= (segment.endKm + 50)
-          )
-          const fallbackFuel = extendedBand
-            .slice()
-            .sort((a, b) => Math.abs(a.distanceFromStartKm - targetFuelKm) - Math.abs(b.distanceFromStartKm - targetFuelKm))
-            .slice(0, 2)
+          const fallbackFuel = rankedFuel.length === 0
+            ? updatedFuelStations
+                .filter((s) => {
+                  if (s.distanceFromStartKm < segment.startKm || s.distanceFromStartKm > segment.endKm + 20) return false
+                  const owner = updatedOwner.get(s.id)
+                  return owner === undefined || owner === segIdx
+                })
+                .sort((a, b) => Math.abs(a.distanceFromStartKm - targetFuelKm) - Math.abs(b.distanceFromStartKm - targetFuelKm))
+                .slice(0, 2)
+            : []
 
           segment.fuelSuggestions = rankedFuel.length > 0 ? rankedFuel : fallbackFuel
           segment.primaryFuelSuggestion = segment.fuelSuggestions[0]

@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef, useMemo } from "react"
 import { useParams, useRouter } from "next/navigation"
-import { LoadScript, GoogleMap, Marker, DirectionsRenderer, type Libraries } from "@react-google-maps/api"
+import { LoadScript, GoogleMap, Marker, InfoWindow, DirectionsRenderer, type Libraries } from "@react-google-maps/api"
 import { DndContext, PointerSensor, closestCenter, useSensor, useSensors, type DragEndEvent } from "@dnd-kit/core"
 import { SortableContext, useSortable, verticalListSortingStrategy, arrayMove } from "@dnd-kit/sortable"
 import { CSS } from "@dnd-kit/utilities"
@@ -137,6 +137,11 @@ interface RouteSegment {
   gapFromLastFuelKm?: number
   gapToNextFuelKm?: number
   fuelWarning?: string
+  // Anchor: the primary overnight stop chosen by the planner for this segment.
+  // Used to chain consecutive days: anchorName of day N becomes fromLocation of day N+1.
+  overnightAnchorName?: string | null
+  overnightAnchorLat?: number | null
+  overnightAnchorLng?: number | null
 }
 
 interface RouteMeta {
@@ -331,6 +336,7 @@ export default function PlannerDetailPage() {
   const dragSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }))
   const [tripNarrative, setTripNarrative] = useState<TripNarrative | null>(null)
   const [narrativeLoading, setNarrativeLoading] = useState(false)
+  const [hoveredPin, setHoveredPin] = useState<{ lat: number; lng: number; label: string } | null>(null)
   const [hiddenCustomStopsByDay, setHiddenCustomStopsByDay] = useState<Record<number, string[]>>({})
   const [itineraryVersions, setItineraryVersions] = useState<Array<{ id: string; version: number; status: string; model_name: string | null; created_at: string }>>([])
   const [itineraryVersionsLoaded, setItineraryVersionsLoaded] = useState(false)
@@ -510,29 +516,16 @@ export default function PlannerDetailPage() {
     if (targetDays <= 0) return segments
     if (segments.length === targetDays) return segments
 
+    // When we have fewer segments than days, do NOT pad with phantom zero-distance
+    // segments. Instead return the actual segments — they cover the real route.
+    // Phantom days caused empty day cards with no stops and 0 km distances.
     if (segments.length < targetDays) {
-      const padded = [...segments]
-      while (padded.length < targetDays) {
-        const last = padded[padded.length - 1]
-        padded.push({
-          startKm: last?.endKm ?? 0,
-          endKm: last?.endKm ?? 0,
-          verifiedStops: [],
-          otherStops: [],
-          fuelSuggestions: [],
-          primaryFuelSuggestion: undefined,
-          isRemote: false,
-          fuelCritical: false,
-          degradedMode: false,
-          fuelDistanceIntoLegKm: undefined,
-          gapFromLastFuelKm: undefined,
-          gapToNextFuelKm: undefined,
-          fuelWarning: undefined,
-        })
-      }
-      return padded
+      return segments
     }
 
+    // More segments than days: merge by grouping consecutive segments into buckets.
+    // Each bucket keeps only the overnight anchor of the last segment in the group
+    // so stops don't bleed across a wide km range into a single day card.
     const buckets: RouteSegment[][] = Array.from({ length: targetDays }, () => [])
     segments.forEach((segment, index) => {
       const bucket = Math.min(targetDays - 1, Math.floor((index * targetDays) / segments.length))
@@ -555,6 +548,9 @@ export default function PlannerDetailPage() {
           gapFromLastFuelKm: undefined,
           gapToNextFuelKm: undefined,
           fuelWarning: undefined,
+          overnightAnchorName: null,
+          overnightAnchorLat: null,
+          overnightAnchorLng: null,
         }
       }
 
@@ -587,22 +583,17 @@ export default function PlannerDetailPage() {
         gapFromLastFuelKm: group.find((s) => s.gapFromLastFuelKm !== undefined)?.gapFromLastFuelKm,
         gapToNextFuelKm: group.find((s) => s.gapToNextFuelKm !== undefined)?.gapToNextFuelKm,
         fuelWarning: group.find((s) => s.fuelWarning)?.fuelWarning,
+        // Carry the last segment's anchor — it is the overnight stop for this merged day
+        overnightAnchorName: last.overnightAnchorName ?? null,
+        overnightAnchorLat: last.overnightAnchorLat ?? null,
+        overnightAnchorLng: last.overnightAnchorLng ?? null,
       }
     })
   }
 
-  const targetDays = Math.max(
-    1,
-    routeMeta.drivingInfo?.totalDistanceKm
-      ? Math.min(
-        Number(trip?.trip_duration_days || Number.MAX_SAFE_INTEGER),
-        Math.round(
-          routeMeta.drivingInfo.totalDistanceKm /
-          (routeMeta.paceConfig?.kmPerDay || 200)
-        )
-      )
-      : Number(trip?.trip_duration_days || 1)
-  )
+  // Use the user's explicitly requested day count. Do not auto-reduce from driving
+  // pace — that caused a 14-day trip to display as 12 days, dropping the last days.
+  const targetDays = Math.max(1, Number(trip?.trip_duration_days || 1))
 
   const showPlanningSkeleton =
     routeOptionsLoading &&
@@ -615,9 +606,9 @@ export default function PlannerDetailPage() {
         : Array.from({ length: targetDays }, (_, index) => ({
             startKm: Math.round((routeMeta.drivingInfo?.totalDistanceKm || 0) * (index / targetDays)),
             endKm: Math.round((routeMeta.drivingInfo?.totalDistanceKm || 0) * ((index + 1) / targetDays)),
-            verifiedStops: [],
-            otherStops: [],
-            fuelSuggestions: [],
+            verifiedStops: [] as RouteStopOption[],
+            otherStops: [] as RouteStopOption[],
+            fuelSuggestions: [] as FuelStation[],
             primaryFuelSuggestion: undefined,
             isRemote: false,
             fuelCritical: false,
@@ -626,6 +617,9 @@ export default function PlannerDetailPage() {
             gapFromLastFuelKm: undefined,
             gapToNextFuelKm: undefined,
             fuelWarning: undefined,
+            overnightAnchorName: null as string | null,
+            overnightAnchorLat: null as number | null,
+            overnightAnchorLng: null as number | null,
           })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [routeMeta.segments, routeMeta.drivingInfo?.totalDistanceKm, routeMeta.paceConfig?.kmPerDay, targetDays]
@@ -651,42 +645,51 @@ export default function PlannerDetailPage() {
 
     setLoadingPlaces((prev) => new Set(prev).add(dayIndex))
 
-    const segmentStops = segment ? [...segment.verifiedStops, ...segment.otherStops] : []
-    const midStop = segmentStops.length > 0
-      ? segmentStops[Math.floor(segmentStops.length / 2)]
-      : null
+    // Priority order for the nearby search centre:
+    // 1. The explicitly selected overnight stop for this day
+    // 2. The server-computed overnight anchor for this segment
+    // 3. Any stop within the segment (midpoint of the list)
+    // We do NOT fall back to straight-line trip interpolation — for coastal routes
+    // that produces ocean coordinates far from the actual highway.
+    let midLat: number = NaN
+    let midLng: number = NaN
 
-    const stopLat = midStop ? parseFloat(midStop.latitude ?? "0") : NaN
-    const stopLng = midStop ? parseFloat(midStop.longitude ?? "0") : NaN
+    // 1. Explicitly selected stop
+    const selected = segment ? getSelectedOption(segment, dayIndex) : null
+    const selLat = selected ? parseFloat(selected.latitude ?? "0") : NaN
+    const selLng = selected ? parseFloat(selected.longitude ?? "0") : NaN
+    if (isValidLatLng(selLat, selLng)) {
+      midLat = selLat
+      midLng = selLng
+    }
 
-    const totalKm = routeMeta.drivingInfo?.totalDistanceKm || 0
-    const segmentMidKm = segment ? (segment.startKm + segment.endKm) / 2 : 0
-    const segmentProgress = totalKm > 0 ? Math.max(0, Math.min(1, segmentMidKm / totalKm)) : 0
+    // 2. Server-computed anchor (already on the actual road polyline)
+    if (!isValidLatLng(midLat, midLng) && segment?.overnightAnchorLat && segment?.overnightAnchorLng) {
+      if (isValidLatLng(segment.overnightAnchorLat, segment.overnightAnchorLng)) {
+        midLat = segment.overnightAnchorLat
+        midLng = segment.overnightAnchorLng
+      }
+    }
 
-    const interpLat = trip?.start_lat !== null && trip?.start_lat !== undefined && trip?.destination_lat !== null && trip?.destination_lat !== undefined
-      ? trip.start_lat + ((trip.destination_lat - trip.start_lat) * segmentProgress)
-      : NaN
-    const interpLng = trip?.start_lng !== null && trip?.start_lng !== undefined && trip?.destination_lng !== null && trip?.destination_lng !== undefined
-      ? trip.start_lng + ((trip.destination_lng - trip.start_lng) * segmentProgress)
-      : NaN
-
-    const canUseStop = isValidLatLng(stopLat, stopLng)
-    const canUseInterp = isValidLatLng(interpLat, interpLng)
-
-    let midLat = canUseInterp ? interpLat : (trip?.start_lat || -25.2744)
-    let midLng = canUseInterp ? interpLng : (trip?.start_lng || 133.7751)
-
-    if (canUseStop) {
-      if (canUseInterp) {
-        const driftKm = haversineKm(stopLat, stopLng, interpLat, interpLng)
-        if (driftKm <= 600) {
-          midLat = stopLat
-          midLng = stopLng
-        }
-      } else {
+    // 3. Mid-stop from segment stop list
+    if (!isValidLatLng(midLat, midLng) && segment) {
+      const segmentStops = [...segment.verifiedStops, ...segment.otherStops]
+      const midStop = segmentStops.length > 0
+        ? segmentStops[Math.floor(segmentStops.length / 2)]
+        : null
+      const stopLat = midStop ? parseFloat(midStop.latitude ?? "0") : NaN
+      const stopLng = midStop ? parseFloat(midStop.longitude ?? "0") : NaN
+      if (isValidLatLng(stopLat, stopLng)) {
         midLat = stopLat
         midLng = stopLng
       }
+    }
+
+    // If still no valid point, skip the search — searching from 0,0 or an ocean
+    // coordinate will only return irrelevant or offshore results.
+    if (!isValidLatLng(midLat, midLng)) {
+      setLoadingPlaces((prev) => { const next = new Set(prev); next.delete(dayIndex); return next })
+      return
     }
 
     if (isValidLatLng(midLat, midLng)) {
@@ -1054,6 +1057,18 @@ export default function PlannerDetailPage() {
     if (!trip || !userId) return
     setNarrativeLoading(true)
     try {
+      // Build a stable chain of overnight locations before generating the narrative.
+      // Priority: explicitly selected option → server-computed anchor → null.
+      // Each day's toLocation becomes the next day's fromLocation, enforcing continuity.
+      const resolvedChain: Array<string | null> = daySegments.map((segment, index) => {
+        if (index === daySegments.length - 1) return trip.destination_text
+        return (
+          getSelectedOption(segment, index)?.location_name ??
+          segment.overnightAnchorName ??
+          null
+        )
+      })
+
       const daysPayload = daySegments.map((segment, index) => {
         const verifiedStops = segment.verifiedStops.map((s) => ({
           location_name: s.location_name,
@@ -1076,14 +1091,18 @@ export default function PlannerDetailPage() {
 
         const allowedStopNames = Array.from(new Set(optionStops.map((s) => s.location_name).filter(Boolean)))
 
+        // fromLocation: trip start for day 1, previous day's committed overnight for all others
+        const fromLocation = index === 0
+          ? trip.start_location_text
+          : (resolvedChain[index - 1] ?? null)
+
+        // toLocation: trip destination for last day, this day's committed overnight for all others
+        const toLocation = resolvedChain[index]
+
         return {
           dayNumber: index + 1,
-          fromLocation: index === 0
-            ? trip.start_location_text
-            : (getSelectedOption(daySegments[index - 1], index - 1)?.location_name ?? null),
-          toLocation: index === daySegments.length - 1
-            ? trip.destination_text
-            : (getSelectedOption(segment, index)?.location_name ?? null),
+          fromLocation,
+          toLocation,
           distanceKm: estimateSegmentDistance(segment),
           driveTimeMinutes: estimateSegmentDuration(segment),
           verifiedStops,
@@ -1754,19 +1773,21 @@ export default function PlannerDetailPage() {
   }
 
   const getSegmentLabel = (segment: RouteSegment, index: number) => {
-    const allStops = [...segment.verifiedStops, ...segment.otherStops]
-    const firstStop = allStops[0]?.location_name
-    const lastStop = allStops[allStops.length - 1]?.location_name
-    if (firstStop && lastStop) {
-      return `${firstStop} → ${lastStop}`
-    }
-    if (firstStop) {
-      return `${index === 0 ? trip?.start_location_text ?? "Start" : `Day ${index} start`} → ${firstStop}`
-    }
-    if (lastStop) {
-      return `${lastStop} → ${index === daySegments.length - 1 ? trip?.destination_text ?? "Destination" : `Day ${index + 2} start`}`
-    }
-    return `${trip?.start_location_text ?? "Start"} → ${trip?.destination_text ?? "Destination"}`
+    // Use the chained anchor names for accurate from→to labels.
+    // Day N's "from" is Day N-1's anchor; Day N's "to" is this day's anchor.
+    const prevAnchor = index === 0
+      ? (trip?.start_location_text ?? "Start")
+      : (daySegments[index - 1]?.overnightAnchorName ??
+         getSelectedOption(daySegments[index - 1], index - 1)?.location_name ??
+         `Day ${index}`)
+
+    const thisAnchor = index === daySegments.length - 1
+      ? (trip?.destination_text ?? "Destination")
+      : (segment.overnightAnchorName ??
+         getSelectedOption(segment, index)?.location_name ??
+         `Day ${index + 1} stop`)
+
+    return `${prevAnchor} → ${thisAnchor}`
   }
 
   const filterStopsBySegmentDistance = useCallback((segment: RouteSegment, options: RouteStopOption[]) => {
@@ -1854,72 +1875,29 @@ export default function PlannerDetailPage() {
   const getFuelInfoForSegment = (segment: RouteSegment, segmentIndex: number) => {
     if (!includeFuelPlanning) return []
 
-    const pickStationsForSegment = (stations: FuelStation[]) => {
-      const withDistance = stations.filter(
-        (station) => typeof station.distanceFromStartKm === "number" && Number.isFinite(station.distanceFromStartKm)
-      )
+    // Each segment carries its own pre-assigned fuel suggestions from the server.
+    // Never fall back to the global fuelStations list — that caused the same station
+    // to repeat across multiple day cards via modular rotation.
+    if (!segment.fuelSuggestions || segment.fuelSuggestions.length === 0) return []
 
-      if (withDistance.length > 0) {
-        const segmentPaddingKm = 40
-        const segmentStart = Math.max(0, segment.startKm - segmentPaddingKm)
-        const segmentEnd = segment.endKm + segmentPaddingKm
-        const midpoint = (segment.startKm + segment.endKm) / 2
+    const withDistance = segment.fuelSuggestions.filter(
+      (s) => typeof s.distanceFromStartKm === "number" && Number.isFinite(s.distanceFromStartKm)
+    )
 
-        if (withDistance.length === 1) {
-          const onlyStation = withDistance[0]
-          const stationDistance = onlyStation.distanceFromStartKm as number
-          const nearestSegmentIndex = daySegments.reduce((bestIdx, daySegment, idx) => {
-            const dayMidpoint = (daySegment.startKm + daySegment.endKm) / 2
-            const bestMidpoint = (daySegments[bestIdx].startKm + daySegments[bestIdx].endKm) / 2
-            const currentGap = Math.abs(dayMidpoint - stationDistance)
-            const bestGap = Math.abs(bestMidpoint - stationDistance)
-            return currentGap < bestGap ? idx : bestIdx
-          }, 0)
-
-          return segmentIndex === nearestSegmentIndex ? [onlyStation] : []
-        }
-
-        const inSegment = withDistance
-          .filter((station) => {
-            const distance = station.distanceFromStartKm as number
-            return distance >= segmentStart && distance <= segmentEnd
-          })
-          .sort((a, b) => (a.distanceFromStartKm as number) - (b.distanceFromStartKm as number))
-
-        if (inSegment.length > 0) {
-          return inSegment.slice(0, 3)
-        }
-
-        return [...withDistance]
-          .sort(
-            (a, b) =>
-              Math.abs((a.distanceFromStartKm as number) - midpoint) -
-              Math.abs((b.distanceFromStartKm as number) - midpoint)
-          )
-          .slice(0, 3)
-      }
-
-      if (stations.length === 1) {
-        return segmentIndex === 0 ? stations : []
-      }
-
-      // If station distances are unavailable, rotate fallback suggestions by segment
-      // so the same fuel stop does not appear on every single day card.
-      if (stations.length <= 3) {
-        return [stations[segmentIndex % stations.length]]
-      }
-
-      const startIndex = segmentIndex % stations.length
-      const rotated = [...stations.slice(startIndex), ...stations.slice(0, startIndex)]
-      return rotated.slice(0, 2)
+    // If all suggestions have distance data, show only those within this segment's km range.
+    if (withDistance.length > 0) {
+      const segmentPaddingKm = 30
+      const inRange = withDistance
+        .filter((s) => {
+          const d = s.distanceFromStartKm as number
+          return d >= segment.startKm - segmentPaddingKm && d <= segment.endKm + segmentPaddingKm
+        })
+        .sort((a, b) => (a.distanceFromStartKm as number) - (b.distanceFromStartKm as number))
+      return inRange.length > 0 ? inRange.slice(0, 3) : withDistance.slice(0, 3)
     }
 
-    if (segment.fuelSuggestions && segment.fuelSuggestions.length > 0) {
-      return pickStationsForSegment(segment.fuelSuggestions)
-    }
-
-    if (!routeMeta.fuelStations || routeMeta.fuelStations.length === 0) return []
-    return pickStationsForSegment(routeMeta.fuelStations)
+    // No distance data — return the suggestions as-is (already segment-specific from server)
+    return segment.fuelSuggestions.slice(0, 3)
   }
 
   const getFuelStationKey = (station: FuelStation) => {
@@ -2141,6 +2119,12 @@ export default function PlannerDetailPage() {
         const data = await response.json()
 
         if (data.success && data.trip) {
+          // Guard: trip is still being generated — redirect back to the list
+          if (data.trip.status === "in_progress") {
+            router.replace("/planner")
+            return
+          }
+
           setTrip(data.trip)
           const routeJson = (data.trip as TripData).route_data_json ?? {}
           const savedNarrative = routeJson.narrative as TripNarrative | undefined
@@ -2366,7 +2350,8 @@ export default function PlannerDetailPage() {
     return approxDay === dayIndex
   }
 
-  const unifiedDayRouteData = daySegments.map((segment, index) => {
+  const unifiedDayRouteData = (() => {
+    const initialDayRouteData = daySegments.map((segment, index) => {
     const previousSelectedOption = index > 0 ? resolvedDaySelections[index - 1] : null
     const selectedOption = resolvedDaySelections[index]
     const nextSelectedOption = index < daySegments.length - 1 ? resolvedDaySelections[index + 1] : null
@@ -2438,16 +2423,82 @@ export default function PlannerDetailPage() {
       (a, b) => (a.distance_from_start_km ?? 999999) - (b.distance_from_start_km ?? 999999)
     )
 
-    return {
-      allStops,
-      endpointStopIds,
-      endpointStopNames,
-      routeStops,
-      routeStopIds,
-      customStopsForDay: sortedCustomStopsForDay,
-      dayShownStopCount: routeStops.length + sortedCustomStopsForDay.length,
+      return {
+        allStops,
+        endpointStopIds,
+        endpointStopNames,
+        routeStops,
+        routeStopIds,
+        customStopsForDay: sortedCustomStopsForDay,
+        dayShownStopCount: routeStops.length + sortedCustomStopsForDay.length,
+      }
+    })
+
+    const rebalancedDayRouteData = initialDayRouteData.map((day) => ({
+      ...day,
+      customStopsForDay: [...day.customStopsForDay],
+    }))
+
+    // Rebalance overloaded custom-stop days into adjacent empty days.
+    for (let dayIndex = 0; dayIndex < rebalancedDayRouteData.length - 1; dayIndex += 1) {
+      const currentDay = rebalancedDayRouteData[dayIndex]
+      const nextDay = rebalancedDayRouteData[dayIndex + 1]
+
+      const currentShown = currentDay.routeStops.length + currentDay.customStopsForDay.length
+      const nextShown = nextDay.routeStops.length + nextDay.customStopsForDay.length
+
+      if (nextShown > 0) continue
+      if (currentShown <= 1) continue
+      if (currentDay.customStopsForDay.length === 0) continue
+
+      const movedStop = currentDay.customStopsForDay.pop()
+      if (!movedStop) continue
+
+      nextDay.customStopsForDay.unshift(movedStop)
     }
-  })
+
+    // Second pass: fill remaining empty days from the nearest donor day with >1 custom stop.
+    for (let dayIndex = 0; dayIndex < rebalancedDayRouteData.length; dayIndex += 1) {
+      const targetDay = rebalancedDayRouteData[dayIndex]
+      const targetShown = targetDay.routeStops.length + targetDay.customStopsForDay.length
+      if (targetShown > 0) continue
+
+      let donorIndex = -1
+      let donorDistance = Number.MAX_SAFE_INTEGER
+
+      for (let candidateIndex = 0; candidateIndex < rebalancedDayRouteData.length; candidateIndex += 1) {
+        if (candidateIndex === dayIndex) continue
+        const candidateDay = rebalancedDayRouteData[candidateIndex]
+        if (candidateDay.customStopsForDay.length <= 1) continue
+
+        const distance = Math.abs(candidateIndex - dayIndex)
+        if (distance < donorDistance) {
+          donorDistance = distance
+          donorIndex = candidateIndex
+        }
+      }
+
+      if (donorIndex === -1) continue
+
+      const donorDay = rebalancedDayRouteData[donorIndex]
+      const movedStop = donorDay.customStopsForDay.pop()
+      if (!movedStop) continue
+
+      targetDay.customStopsForDay.push(movedStop)
+    }
+
+    return rebalancedDayRouteData.map((day) => {
+      const sortedCustomStopsForDay = [...day.customStopsForDay].sort(
+        (a, b) => (a.distance_from_start_km ?? 999999) - (b.distance_from_start_km ?? 999999)
+      )
+
+      return {
+        ...day,
+        customStopsForDay: sortedCustomStopsForDay,
+        dayShownStopCount: day.routeStops.length + sortedCustomStopsForDay.length,
+      }
+    })
+  })()
 
   const unifiedOrderedMapStops = unifiedDayRouteData.flatMap((dayData, dayIndex) => ([
     ...dayData.routeStops.map((stop) => ({
@@ -2829,6 +2880,8 @@ export default function PlannerDetailPage() {
                           fontWeight: "bold",
                         }}
                         title={trip.start_location_text}
+                        onMouseOver={() => setHoveredPin({ lat: trip.start_lat!, lng: trip.start_lng!, label: trip.start_location_text ?? "Start" })}
+                        onMouseOut={() => setHoveredPin(null)}
                       />
                     )}
 
@@ -2844,6 +2897,8 @@ export default function PlannerDetailPage() {
                           fontWeight: "bold",
                         }}
                         title={trip.destination_text}
+                        onMouseOver={() => setHoveredPin({ lat: trip.destination_lat!, lng: trip.destination_lng!, label: trip.destination_text ?? "Destination" })}
+                        onMouseOut={() => setHoveredPin(null)}
                       />
                     )}
 
@@ -2862,6 +2917,8 @@ export default function PlannerDetailPage() {
                             fontSize: "11px",
                           }}
                           title={`${index + 1}. ${stop.location_name}`}
+                          onMouseOver={() => setHoveredPin({ lat, lng, label: stop.location_name ?? "" })}
+                          onMouseOut={() => setHoveredPin(null)}
                         />
                       )
                     })}
@@ -2883,6 +2940,8 @@ export default function PlannerDetailPage() {
                             fontSize: "10px",
                           }}
                           title={`Day ${index + 1}: ${selected.location_name}`}
+                          onMouseOver={() => setHoveredPin({ lat, lng, label: `Day ${index + 1}: ${selected.location_name ?? ""}` })}
+                          onMouseOut={() => setHoveredPin(null)}
                         />
                       )
                     })}
@@ -2913,6 +2972,8 @@ export default function PlannerDetailPage() {
                             scale: distKm !== null ? 14 : 11,
                           }}
                           title={`${station.name}${distKm !== null ? ` — ${distKm} km from start` : ""}`}
+                          onMouseOver={() => setHoveredPin({ lat: station.lat, lng: station.lng, label: `⛽ ${station.name}${distKm !== null ? ` (${distKm} km)` : ""}` })}
+                          onMouseOut={() => setHoveredPin(null)}
                         />
                       )
                     })}
@@ -2940,6 +3001,18 @@ export default function PlannerDetailPage() {
                         />
                       )
                     })}
+
+                    {hoveredPin && (
+                      <InfoWindow
+                        position={{ lat: hoveredPin.lat, lng: hoveredPin.lng }}
+                        options={{ disableAutoPan: true }}
+                        onCloseClick={() => setHoveredPin(null)}
+                      >
+                        <div style={{ padding: "4px 8px", fontSize: "13px", fontWeight: 500, maxWidth: "220px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                          {hoveredPin.label}
+                        </div>
+                      </InfoWindow>
+                    )}
                   </GoogleMap>
                 </LoadScript>
               </div>

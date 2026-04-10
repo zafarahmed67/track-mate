@@ -194,77 +194,104 @@ export default function PlannerPage() {
           <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
             {visible.map((trip) => {
               const pace = getPaceIcon(trip.travel_pace)
-              return (
-                <Link key={trip.id} href={`/planner/${trip.id}`} className="group">
-                  <Card className="relative overflow-hidden transition-all duration-300 hover:-translate-y-1 hover:shadow-lg border-2 hover:border-primary/20 h-full">
+              const isProcessing = trip.status === "in_progress"
+              const cardContent = (
+                <Card className={`relative overflow-hidden transition-all duration-300 border-2 h-full ${
+                  isProcessing
+                    ? "opacity-70 cursor-not-allowed border-muted"
+                    : "hover:-translate-y-1 hover:shadow-lg hover:border-primary/20 group-hover:border-primary/20"
+                }`}>
+                  {!isProcessing && (
                     <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-bl from-primary/5 to-transparent rounded-bl-full opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
+                  )}
 
-                    <CardContent className="p-0">
-                      <div className="p-6">
-                        <div className="flex items-start justify-between mb-4">
-                          <Badge
-                            variant="outline"
-                            className={`${pace.color} bg-primary/5 border-primary/20`}
-                          >
-                            {trip.status}
-                          </Badge>
+                  <CardContent className="p-0">
+                    <div className="p-6">
+                      <div className="flex items-start justify-between mb-4">
+                        <Badge
+                          variant="outline"
+                          className={isProcessing
+                            ? "text-muted-foreground bg-muted/30 border-muted"
+                            : `${pace.color} bg-primary/5 border-primary/20`}
+                        >
+                          {isProcessing ? "Preparing…" : trip.status}
+                        </Badge>
+                        {isProcessing ? (
+                          <div className="h-5 w-5 rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground animate-spin" />
+                        ) : (
                           <ChevronRight className="h-5 w-5 text-muted-foreground/50 transition-transform group-hover:translate-x-1 group-hover:text-muted-foreground" />
-                        </div>
+                        )}
+                      </div>
 
-                        <h3 className="text-xl font-bold mb-2 group-hover:text-primary transition-colors">
-                          {trip.title}
-                        </h3>
+                      <h3 className={`text-xl font-bold mb-2 transition-colors ${isProcessing ? "text-muted-foreground" : "group-hover:text-primary"}`}>
+                        {trip.title}
+                      </h3>
 
-                        <div className="flex items-center gap-2 text-sm text-muted-foreground mb-6">
-                          <MapPin className="h-4 w-4 shrink-0" />
-                          <span className="truncate">
-                            {trip.start_location_text}
-                          </span>
-                          <span className="shrink-0">→</span>
-                          <span className="truncate">
-                            {trip.destination_text}
-                          </span>
-                        </div>
+                      <div className="flex items-center gap-2 text-sm text-muted-foreground mb-6">
+                        <MapPin className="h-4 w-4 shrink-0" />
+                        <span className="truncate">
+                          {trip.start_location_text}
+                        </span>
+                        <span className="shrink-0">→</span>
+                        <span className="truncate">
+                          {trip.destination_text}
+                        </span>
+                      </div>
 
-                        <div className="flex items-center gap-6 pt-4 border-t">
-                          <div className="flex items-center gap-2">
-                            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/5">
-                              <Calendar className="h-4 w-4 text-primary" />
-                            </div>
-                            <div>
-                              <p className="text-xs text-muted-foreground">
-                                Duration
-                              </p>
-                              <p className="font-semibold text-sm">
-                                {trip.trip_duration_days} days
-                              </p>
-                            </div>
+                      {isProcessing && (
+                        <p className="text-xs text-muted-foreground mb-4">
+                          Your trip is being prepared. This usually takes a moment.
+                        </p>
+                      )}
+
+                      <div className="flex items-center gap-6 pt-4 border-t">
+                        <div className="flex items-center gap-2">
+                          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/5">
+                            <Calendar className="h-4 w-4 text-primary" />
                           </div>
+                          <div>
+                            <p className="text-xs text-muted-foreground">
+                              Duration
+                            </p>
+                            <p className="font-semibold text-sm">
+                              {trip.trip_duration_days} days
+                            </p>
+                          </div>
+                        </div>
 
-                          <div className="flex items-center gap-2">
-                            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/5">
-                              <Clock className="h-4 w-4 text-primary" />
-                            </div>
-                            <div>
-                              <p className="text-xs text-muted-foreground">Pace</p>
-                              <p className="font-semibold text-sm capitalize">
-                                {pace.label}
-                              </p>
-                            </div>
+                        <div className="flex items-center gap-2">
+                          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/5">
+                            <Clock className="h-4 w-4 text-primary" />
+                          </div>
+                          <div>
+                            <p className="text-xs text-muted-foreground">Pace</p>
+                            <p className="font-semibold text-sm capitalize">
+                              {pace.label}
+                            </p>
                           </div>
                         </div>
                       </div>
+                    </div>
 
-                      <div className="px-6 py-3 bg-muted/30 flex items-center justify-between">
-                        <span className="text-xs text-muted-foreground">
-                          Created {formatDate(trip.created_at)}
-                        </span>
+                    <div className="px-6 py-3 bg-muted/30 flex items-center justify-between">
+                      <span className="text-xs text-muted-foreground">
+                        Created {formatDate(trip.created_at)}
+                      </span>
+                      {!isProcessing && (
                         <span className="text-xs font-medium text-primary opacity-0 group-hover:opacity-100 transition-opacity">
                           View Details →
                         </span>
-                      </div>
-                    </CardContent>
-                  </Card>
+                      )}
+                    </div>
+                  </CardContent>
+                </Card>
+              )
+
+              return isProcessing ? (
+                <div key={trip.id}>{cardContent}</div>
+              ) : (
+                <Link key={trip.id} href={`/planner/${trip.id}`} className="group">
+                  {cardContent}
                 </Link>
               )
             })}
