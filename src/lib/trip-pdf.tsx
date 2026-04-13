@@ -478,7 +478,7 @@ export function TripPdfDocument({ trip }: { trip: PdfTrip }) {
           </View>
         )}
 
-        {/* Trip overview from AI narrative */}
+        {/* Trip overview from TrackMate Overview */}
         {trip.narrative?.overview && (
           <View style={styles.overviewCard}>
             <Text style={styles.overviewText}>{trip.narrative.overview}</Text>
@@ -564,7 +564,7 @@ export function TripPdfDocument({ trip }: { trip: PdfTrip }) {
               )
             })}
 
-        {/* Trip notes from AI narrative */}
+        {/* Trip notes from TrackMate Overview */}
         {hasTripNotes && (
           <>
             <Text style={styles.sectionTitle}>Trip Notes</Text>

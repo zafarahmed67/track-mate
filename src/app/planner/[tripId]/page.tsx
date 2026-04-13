@@ -1145,7 +1145,7 @@ export default function PlannerDetailPage() {
       const result = await response.json()
       if (result.success) {
         setTripNarrative(result.narrative)
-        toast.success("AI narrative generated and saved")
+        toast.success("TrackMate Overview generated and saved")
         // Refresh version history after new generation
         if (userId) {
           fetch(`/api/trips/${tripId}/itineraries?user_id=${userId}`)
@@ -2668,7 +2668,7 @@ export default function PlannerDetailPage() {
                 ) : (
                   <Sparkles className="mr-2 h-4 w-4" />
                 )}
-                {narrativeLoading ? "Generating..." : tripNarrative ? "Regenerate" : "AI Narrative"}
+                {narrativeLoading ? "Generating..." : tripNarrative ? "Regenerate" : "TrackMate Overview"}
               </Button>
               <Button variant="outline" size="sm" onClick={handleSaveTrip} disabled={saving}>
                 <Save className="mr-2 h-4 w-4" />
@@ -3559,13 +3559,13 @@ export default function PlannerDetailPage() {
               </CardContent>
             </Card>
 
-            {/* AI Narrative Card */}
+            {/* TrackMate Overview Card */}
             <Card className="border">
               <CardHeader className="pb-3">
                 <div className="flex items-center justify-between">
                   <CardTitle className="text-lg flex items-center gap-2">
                     <Sparkles className="h-5 w-5 text-primary" />
-                    AI Narrative
+                    TrackMate Overview
                     {itineraryVersions.length > 0 && (
                       <span className="text-xs font-normal text-muted-foreground">
                         v{itineraryVersions.find((v) => v.status === "active")?.version ?? itineraryVersions[0]?.version}
@@ -3909,7 +3909,7 @@ export default function PlannerDetailPage() {
                 <div className="flex items-center justify-between">
                   <CardTitle className="text-lg flex items-center gap-2">
                     <MessageSquare className="h-5 w-5 text-primary" />
-                    Ask AI
+                    Ask TrackMate
                     {chatMessages.length > 0 && (
                       <span className="text-xs font-normal text-muted-foreground">{chatMessages.length} messages</span>
                     )}

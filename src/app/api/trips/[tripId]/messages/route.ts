@@ -149,7 +149,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
 
     // Build system prompt — for major changes, instruct AI to acknowledge and guide the user
     const majorAddendum = changeType === "major"
-      ? `\n\nThe user's message has been classified as a MAJOR change that requires different stops to be filtered from the database. Acknowledge their request warmly, confirm what preference you understood (${preferenceHint}), and tell them to use the "Edit Trip" button to update their trip preferences, then click "Rebuild plan" and "AI Narrative" to regenerate with the new stops. Do NOT try to invent or suggest specific stops yourself.`
+      ? `\n\nThe user's message has been classified as a MAJOR change that requires different stops to be filtered from the database. Acknowledge their request warmly, confirm what preference you understood (${preferenceHint}), and tell them to use the "Edit Trip" button to update their trip preferences, then click "Rebuild plan" and "TrackMate Overview" to regenerate with the new stops. Do NOT try to invent or suggest specific stops yourself.`
       : ""
 
     const contextNote = tripContext
