@@ -41,6 +41,10 @@ interface RouteStopCandidate {
   is_alternative?: boolean
   distance_from_start_km: number
   distance_from_dest_km: number
+  lateral_km?: number
+  is_remote_area?: boolean
+  source?: "database" | "google_places"
+  is_recommended?: boolean
 }
 
 interface GoogleDirectionsRoute {
@@ -58,6 +62,8 @@ interface PlannedSegment {
   endKm: number
   verifiedStops: RouteStopCandidate[]
   otherStops: RouteStopCandidate[]
+  options: RouteStopCandidate[]  // Combined 3 options with recommended flag
+  recommendedOption: RouteStopCandidate | null  // The recommended stop for this segment
   fuelSuggestions: FuelStationOption[]
   primaryFuelSuggestion?: FuelStationOption
   isRemote: boolean
@@ -361,9 +367,30 @@ export async function POST(req: NextRequest) {
     }
 
     const paceConfig = {
-      leisurely: { kmPerDay: env.PACE_LEISURELY_KM_PER_DAY, hoursPerLeg: env.PACE_LEISURELY_HOURS_PER_LEG, minSpacing: env.PACE_LEISURELY_MIN_SPACING, maxSpacing: env.PACE_LEISURELY_MAX_SPACING },
-      moderate: { kmPerDay: env.PACE_MODERATE_KM_PER_DAY, hoursPerLeg: env.PACE_MODERATE_HOURS_PER_LEG, minSpacing: env.PACE_MODERATE_MIN_SPACING, maxSpacing: env.PACE_MODERATE_MAX_SPACING },
-      fast: { kmPerDay: env.PACE_FAST_KM_PER_DAY, hoursPerLeg: env.PACE_FAST_HOURS_PER_LEG, minSpacing: env.PACE_FAST_MIN_SPACING, maxSpacing: env.PACE_FAST_MAX_SPACING },
+      leisurely: { 
+        kmPerDay: (env.PACE_LEISURELY_MIN_KM_PER_DAY + env.PACE_LEISURELY_MAX_KM_PER_DAY) / 2, 
+        minKmPerDay: env.PACE_LEISURELY_MIN_KM_PER_DAY,
+        maxKmPerDay: env.PACE_LEISURELY_MAX_KM_PER_DAY,
+        hoursPerLeg: env.PACE_LEISURELY_HOURS_PER_LEG, 
+        minSpacing: env.PACE_LEISURELY_MIN_SPACING, 
+        maxSpacing: env.PACE_LEISURELY_MAX_SPACING 
+      },
+      moderate: { 
+        kmPerDay: (env.PACE_MODERATE_MIN_KM_PER_DAY + env.PACE_MODERATE_MAX_KM_PER_DAY) / 2, 
+        minKmPerDay: env.PACE_MODERATE_MIN_KM_PER_DAY,
+        maxKmPerDay: env.PACE_MODERATE_MAX_KM_PER_DAY,
+        hoursPerLeg: env.PACE_MODERATE_HOURS_PER_LEG, 
+        minSpacing: env.PACE_MODERATE_MIN_SPACING, 
+        maxSpacing: env.PACE_MODERATE_MAX_SPACING 
+      },
+      fast: { 
+        kmPerDay: (env.PACE_FAST_MIN_KM_PER_DAY + env.PACE_FAST_MAX_KM_PER_DAY) / 2, 
+        minKmPerDay: env.PACE_FAST_MIN_KM_PER_DAY,
+        maxKmPerDay: env.PACE_FAST_MAX_KM_PER_DAY,
+        hoursPerLeg: env.PACE_FAST_HOURS_PER_LEG, 
+        minSpacing: env.PACE_FAST_MIN_SPACING, 
+        maxSpacing: env.PACE_FAST_MAX_SPACING 
+      },
     }
 
     const config = paceConfig[travelPace as keyof typeof paceConfig] || paceConfig.moderate
@@ -508,19 +535,23 @@ export async function POST(req: NextRequest) {
         distanceFromDestKm = Math.max(0, totalRouteKm - routeDistKm)
         lateralKm = routeLateralKm
 
-        // A stop is on the route if it is within the lateral threshold of the actual
-        // road and its projection falls between start (−5%) and end (+5%) of total
-        // route length.
-        // Verified (curated) database stops: 100 km threshold — some verified stops
-        // may be deliberately accessed via a short side road.
-        // Custom/unverified Google Places stops: 25 km threshold — prevents offshore
-        // islands (e.g. Whitsunday Island ~31 km from the Bruce Highway), island
-        // resorts, and other car-inaccessible places from appearing.
-        const lateralThreshold = isVerified ? 100 : 25
+        // Tiered lateral distance thresholds:
+        // - Ideal: within env.ROUTE_IDEAL_MAX_KM (10km) - best stops
+        // - Acceptable: within env.ROUTE_ACCEPTABLE_MAX_KM (20km) - good alternative
+        // - Maximum: within env.ROUTE_MAX_KM (30km) - acceptable in normal conditions
+        // - Remote: up to env.ROUTE_REMOTE_MAX_KM (50km) - only when no other options
+        // Verified stops get slightly more lenient thresholds than unverified
+        const baseThreshold = isVerified ? env.ROUTE_MAX_KM : env.ROUTE_ACCEPTABLE_MAX_KM
+        const remoteThreshold = env.ROUTE_REMOTE_MAX_KM
+        
         const tolerance = totalRouteKm * 0.05
-        isBetween = lateralKm <= lateralThreshold &&
+        isBetween = lateralKm <= baseThreshold &&
           distanceFromStartKm >= -tolerance &&
           distanceFromStartKm <= totalRouteKm + tolerance
+
+        // Store lateral distance for priority sorting later
+        stop.lateral_km = lateralKm
+        stop.is_remote_area = lateralKm > env.ROUTE_MAX_KM && lateralKm <= remoteThreshold
       } else {
         // --- Straight-line fallback (no polyline available) ---
         const distFromStart = calculateDistance(startLat, startLng, lat, lng)
@@ -544,8 +575,12 @@ export async function POST(req: NextRequest) {
         distanceFromStartKm = Math.round(distFromStart * 10) / 10
         distanceFromDestKm = Math.round(distFromDest * 10) / 10
         lateralKm = calculateDistance(lat, lng, projLat, projLng)
-        const lateralThresholdFallback = isVerified ? 100 : 25
-        isBetween = isBetweenEllipse && isForwardOnRoute && lateralKm <= lateralThresholdFallback
+        
+        const baseThreshold = isVerified ? env.ROUTE_MAX_KM : env.ROUTE_ACCEPTABLE_MAX_KM
+        isBetween = isBetweenEllipse && isForwardOnRoute && lateralKm <= baseThreshold
+
+        stop.lateral_km = lateralKm
+        stop.is_remote_area = lateralKm > env.ROUTE_MAX_KM && lateralKm <= env.ROUTE_REMOTE_MAX_KM
       }
 
       return {
@@ -859,11 +894,45 @@ export async function POST(req: NextRequest) {
         ? parseFloat(String(overnightAnchor.longitude))
         : null
 
+      // Build combined options array with recommended flag
+      // Priority: 3 DB stops → use 1 as recommended, ignore Google
+      // 2 DB + 1 Google → DB one marked recommended
+      // 0 DB → all 3 from Google, pick 1 as recommended
+      const allSegmentStops: RouteStopCandidate[] = [...verifiedInSegment, ...otherInSegment]
+      
+      // Sort by lateral distance (closest to route first)
+      const sortedByLateral = [...allSegmentStops].sort((a, b) => {
+        const aLateral = a.lateral_km ?? 0
+        const bLateral = b.lateral_km ?? 0
+        return aLateral - bLateral
+      })
+
+      // Take top 3 options, mark first DB stop as recommended
+      const options: RouteStopCandidate[] = sortedByLateral.slice(0, 3).map((stop, idx) => {
+        const isDbStop = stop.is_verified
+        return {
+          ...stop,
+          source: isDbStop ? "database" as const : "google_places" as const,
+          is_recommended: idx === 0 && isDbStop ? true : false,
+        }
+      })
+
+      // If no DB stop is recommended, mark the first option as recommended
+      const hasRecommended = options.some(o => o.is_recommended)
+      if (!hasRecommended && options.length > 0) {
+        options[0].is_recommended = true
+      }
+
+      // Recommended option is the one with is_recommended = true
+      const recommendedOption = options.find(o => o.is_recommended) || null
+
       segments.push({
         startKm,
         endKm,
         verifiedStops: verifiedInSegment,
         otherStops: otherInSegment,
+        options,
+        recommendedOption,
         fuelSuggestions: [],
         primaryFuelSuggestion: undefined,
         isRemote: remoteByDistance || remoteByNorth || remoteBySparseStops,

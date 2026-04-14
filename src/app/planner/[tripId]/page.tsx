@@ -42,6 +42,7 @@ import {
   RotateCcw,
   AlertTriangle,
   X,
+  Star,
 } from "lucide-react"
 
 const mapContainerStyle = {
@@ -122,6 +123,8 @@ interface RouteStopOption {
   aao_tip?: string
   why_stop_here?: string
   why_we_d_stay_again?: string
+  source?: "database" | "google_places"
+  is_recommended?: boolean
 }
 
 interface RouteSegment {
@@ -129,6 +132,8 @@ interface RouteSegment {
   endKm: number
   verifiedStops: RouteStopOption[]
   otherStops: RouteStopOption[]
+  options?: RouteStopOption[]  // 3 options with recommended flag (from API)
+  recommendedOption?: RouteStopOption | null  // The recommended stop for this segment
   fuelSuggestions?: FuelStation[]
   primaryFuelSuggestion?: FuelStation
   isRemote?: boolean
@@ -891,6 +896,11 @@ export default function PlannerDetailPage() {
     await handleAddStopFromOptions(normalizeRouteOption(option))
     await loadRouteOptions()
     toast.success(`${option.location_name} selected for this stop.`)
+    
+    // Recalculate route with waypoints through selected stops
+    if (map) {
+      await calculateRouteWithWaypoints(map)
+    }
   }
 
   const handleChangeStopForSegment = async (segment: RouteSegment, segmentIndex: number) => {
@@ -1659,6 +1669,72 @@ export default function PlannerDetailPage() {
     )
   }, [trip])
 
+  const calculateRouteWithWaypoints = useCallback(async (mapInstance: google.maps.Map) => {
+    if (!trip || !daySegments.length) return
+
+    const origin = new google.maps.LatLng(trip.start_lat!, trip.start_lng!)
+    const destination = new google.maps.LatLng(trip.destination_lat!, trip.destination_lng!)
+
+    // Compute selected stops from segments and user selections
+    const usedIds = new Set<string>()
+    const selectedStops: RouteStopOption[] = daySegments.map((seg, i) => {
+      const allOptions = [...seg.verifiedStops, ...seg.otherStops]
+      const visible = allOptions.filter((o) => !usedIds.has(o.id))
+      const explicitId = selectedSegmentOptionIds[i]
+      if (explicitId) {
+        const explicit = visible.find((o) => o.id === explicitId)
+        if (explicit) { usedIds.add(explicit.id); return explicit }
+      }
+      const pick = visible.find((o) => !usedIds.has(o.id)) ?? null
+      if (pick) usedIds.add(pick.id)
+      return pick
+    }).filter((stop): stop is RouteStopOption => stop !== null)
+
+    // Build waypoints from selected stops
+    const waypoints: google.maps.DirectionsWaypoint[] = selectedStops
+      .map((stop) => ({
+        location: new google.maps.LatLng(
+          parseFloat(stop.latitude || "0"),
+          parseFloat(stop.longitude || "0")
+        ),
+        stopover: true,
+      }))
+
+    const directionsService = new google.maps.DirectionsService()
+
+    directionsService.route(
+      {
+        origin: origin,
+        destination: destination,
+        waypoints: waypoints.length > 0 ? waypoints : undefined,
+        travelMode: google.maps.TravelMode.DRIVING,
+        optimizeWaypoints: false,
+      },
+      (result, status) => {
+        if (status === google.maps.DirectionsStatus.OK && result) {
+          setDirections(result)
+          if (directionsRendererRef.current) {
+            directionsRendererRef.current.setDirections(result)
+          }
+        } else {
+          console.error("Directions request with waypoints failed:", status)
+          directionsService.route(
+            {
+              origin: origin,
+              destination: destination,
+              travelMode: google.maps.TravelMode.DRIVING,
+            },
+            (fallbackResult, fallbackStatus) => {
+              if (fallbackStatus === google.maps.DirectionsStatus.OK && fallbackResult) {
+                setDirections(fallbackResult)
+              }
+            }
+          )
+        }
+      }
+    )
+  }, [trip, daySegments, selectedSegmentOptionIds])
+
   useEffect(() => {
     if (map && trip) {
       calculateRoute(map)
@@ -2079,6 +2155,12 @@ export default function PlannerDetailPage() {
     if (!trip) return
     loadRouteOptions()
   }, [trip?.start_lat, trip?.start_lng, trip?.destination_lat, trip?.destination_lng, trip?.travel_pace, tripId])
+
+  useEffect(() => {
+    if (routeMeta.segments && routeMeta.segments.length > 0 && map) {
+      calculateRouteWithWaypoints(map)
+    }
+  }, [routeMeta.segments, map, calculateRouteWithWaypoints])
 
   useEffect(() => {
     if (routeMeta.fuelStations && routeMeta.fuelStations.length > 0) {
@@ -3410,24 +3492,35 @@ icon={{
                                   optionsToShow.map((option) => {
                                     const selectedId = getSelectedOption(segment, index)?.id
                                     const isSelectedCard = option.id === selectedId
+                                    const isRecommended = option.is_recommended === true
                                     return (
                                       <div
                                         key={option.id}
                                         className={`relative overflow-hidden rounded-3xl border p-4 ${isSelectedCard ? "border-primary bg-primary/5" : "border-muted/30 bg-background"}`}
                                       >
                                         <div className="absolute left-4 top-4 flex h-8 w-8 items-center justify-center rounded-full bg-primary/10">
-                                          <MapPin className="h-4 w-4 text-primary" />
+                                          {isRecommended ? (
+                                            <Star className="h-4 w-4 text-amber-500 fill-amber-500" />
+                                          ) : (
+                                            <MapPin className="h-4 w-4 text-primary" />
+                                          )}
                                         </div>
-                                        <div className="absolute left-6 top-4 h-2 w-2 rounded-full bg-primary" />
-                                        <div className="absolute left-8 top-4 bottom-4 w-px bg-primary/20" />
-                                        <div className="ml-8">
+                                        {isRecommended && (
+                                          <div className="absolute left-6 top-4">
+                                            <Badge className="bg-amber-500 text-white text-xs">Recommended</Badge>
+                                          </div>
+                                        )}
+                                        <div className={`ml-8 ${isRecommended ? "mt-6" : ""}`}>
                                           <div className="flex flex-wrap items-center gap-2">
                                             <h3 className="font-semibold text-sm">{option.location_name}</h3>
                                             <Badge variant="outline" className="text-xs">{option.stay_type || option.route_type || "Stop"}</Badge>
                                             {option.is_verified && <Badge variant="outline" className="text-xs">Verified</Badge>}
+                                            {option.source === "google_places" && <Badge variant="outline" className="text-xs">Google</Badge>}
                                           </div>
                                           <p className="mt-2 text-sm text-muted-foreground">
-                                            Suggested area stop for this leg. Confirm your exact overnight place, booking, and access before travel.
+                                            {isRecommended 
+                                              ? "Best match for this leg - closest to route with good facilities."
+                                              : "Alternative option for this overnight stop."}
                                           </p>
                                           <div className="mt-3 flex flex-wrap gap-2">
                                             <Button variant={getSelectedOption(segment, index)?.id === option.id ? "secondary" : "outline"} size="sm" onClick={() => handleChooseSegmentOption(segment, index, option)}>
