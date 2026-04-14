@@ -2651,6 +2651,36 @@ export default function PlannerDetailPage() {
       ? fallbackMapStopsFromPersisted
       : unifiedOrderedMapStops
 
+  // Only show recommended stops (one per day) on the map, not all stops
+  const recommendedMapStops = useMemo(() => {
+    if (!daySegments || daySegments.length === 0) return []
+    return daySegments
+      .map((segment, index) => {
+        // Use recommendedOption from API if available, otherwise fall back to first selected
+        const seg = segment as RouteSegment | undefined
+        const recommended = seg?.recommendedOption || getSelectedOption(segment, index)
+        if (!recommended) return null
+        const lat = parseFloat(String(recommended.latitude ?? ""))
+        const lng = parseFloat(String(recommended.longitude ?? ""))
+        if (isNaN(lat) || isNaN(lng)) return null
+        return {
+          key: `rec-stop-${index}`,
+          id: recommended.id,
+          location_name: recommended.location_name,
+          latitude: lat,
+          longitude: lng,
+          state: recommended.state,
+          region: recommended.region,
+          route_type: recommended.route_type,
+          stay_type: recommended.stay_type,
+          is_verified: recommended.is_verified ?? false,
+          sourceType: recommended.is_verified ? "verified" : "custom",
+          distance_to_route_km: recommended.distance_to_route_km,
+        }
+      })
+      .filter((stop): stop is NonNullable<typeof stop> => stop !== null)
+  }, [daySegments, getSelectedOption])
+
   const mapNumberedStopsCount = useMemo(() => {
     const countRenderable = (latRaw: string | number | undefined, lngRaw: string | number | undefined) => {
       const lat = typeof latRaw === "number" ? latRaw : parseFloat(String(latRaw ?? ""))
@@ -2659,9 +2689,9 @@ export default function PlannerDetailPage() {
       return true
     }
 
-    return effectiveMapStops
+    return recommendedMapStops
       .filter((stop) => countRenderable(stop.latitude, stop.longitude)).length
-  }, [effectiveMapStops])
+  }, [recommendedMapStops])
 
   useEffect(() => {
     if (loading) return
@@ -3026,10 +3056,10 @@ export default function PlannerDetailPage() {
                       />
                     )}
 
-                    {effectiveMapStops.map((stop, index) => {
+                    {recommendedMapStops.map((stop, index) => {
                       const lat = parseFloat(String(stop.latitude ?? ""))
                       const lng = parseFloat(String(stop.longitude ?? ""))
-if (isNaN(lat) || isNaN(lng)) return null
+                      if (isNaN(lat) || isNaN(lng)) return null
                       const isVerified = stop.sourceType === "verified"
                       const markerColor = isVerified ? "#22c55e" : "#ef4444"
                       const svgUrl = "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><circle cx="10" cy="10" r="8" fill="' + markerColor + '" stroke="#ffffff" strokeWidth="2"/></svg>')
