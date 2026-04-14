@@ -1555,7 +1555,8 @@ async function generateStop(
   startLat: number,
   startLng: number,
   destLat: number,
-  destLng: number
+  destLng: number,
+  travelPace: string = "moderate"
 ): Promise<GenerateStopResult> {
 
   console.log("[0/3] generateStop called", { startLat, startLng, destLat, destLng });
@@ -1566,11 +1567,28 @@ async function generateStop(
 
   try {
     // ============================================================
-    // 🔧 CONSTANTS
+    // 🔧 CONSTANTS - Using new stricter thresholds
+    // Ideal: 5-10km, Acceptable: 20km, Max: 30km (normal), 50km (remote)
     // ============================================================
     const BOUNDING_BUFFER = 1;
-    const MAX_LATERAL_KM = 150;
     const ROUTE_TOLERANCE = 0.05;
+    
+    // Determine if route is "remote" (going north, long distance)
+    const directDistance = calculateDistance(startLat, startLng, destLat, destLng);
+    const isLongTrip = directDistance > 500;
+    const isNorthbound = destLat > startLat;
+    const isRemote = isLongTrip && isNorthbound;
+    
+    // New thresholds
+    const MAX_LATERAL_KM_VERIFIED = isRemote ? 50 : 30;
+    const MAX_LATERAL_KM_GOOGLE = isRemote ? 30 : 20;
+    
+    console.log("[0/3] Distance thresholds", { 
+      directDistance: Math.round(directDistance), 
+      isRemote, 
+      maxVerifiedKm: MAX_LATERAL_KM_VERIFIED,
+      maxGoogleKm: MAX_LATERAL_KM_GOOGLE
+    });
 
     // ============================================================
     // 📏 BASIC CALCULATIONS
@@ -1579,8 +1597,6 @@ async function generateStop(
     const maxLat = Math.max(startLat, destLat) + BOUNDING_BUFFER;
     const minLng = Math.min(startLng, destLng) - BOUNDING_BUFFER;
     const maxLng = Math.max(startLng, destLng) + BOUNDING_BUFFER;
-
-    const directDistance = calculateDistance(startLat, startLng, destLat, destLng);
 
     console.log("[1/3] Bounding box", { minLat, maxLat, minLng, maxLng });
 
@@ -1651,8 +1667,12 @@ async function generateStop(
       const isForward =
         tRaw >= -ROUTE_TOLERANCE && tRaw <= 1 + ROUTE_TOLERANCE;
 
+      // Use appropriate threshold based on verification status
+      const isVerified = stop.verification_status === "AAO Verified";
+      const maxLateralKm = isVerified ? MAX_LATERAL_KM_VERIFIED : MAX_LATERAL_KM_GOOGLE;
+      
       const isValid =
-        lateralKm <= MAX_LATERAL_KM && isForward;
+        lateralKm <= maxLateralKm && isForward;
 
       return {
         id: stop.id,
@@ -1666,6 +1686,7 @@ async function generateStop(
 
         tRaw: Number(tRaw.toFixed(3)),
         is_valid: isValid,
+        is_verified: isVerified,
       };
     });
 

@@ -117,6 +117,8 @@ interface RouteStopOption {
   cost_band?: string
   tier?: string
   is_verified?: boolean
+  isRecommended?: boolean
+  isDbSource?: boolean
   distance_from_start_km?: number
   distance_to_route_km?: number
   aao_tip?: string
@@ -338,6 +340,7 @@ export default function PlannerDetailPage() {
   const [tripNarrative, setTripNarrative] = useState<TripNarrative | null>(null)
   const [narrativeLoading, setNarrativeLoading] = useState(false)
   const [hoveredPin, setHoveredPin] = useState<{ lat: number; lng: number; label: string; distanceFromRoute?: number; sourceType?: "verified" | "custom" } | null>(null)
+  const [focusedFuelStation, setFocusedFuelStation] = useState<{ lat: number; lng: number; name: string } | null>(null)
   const [hiddenCustomStopsByDay, setHiddenCustomStopsByDay] = useState<Record<number, string[]>>({})
   const [itineraryVersions, setItineraryVersions] = useState<Array<{ id: string; version: number; status: string; model_name: string | null; created_at: string }>>([])
   const [itineraryVersionsLoaded, setItineraryVersionsLoaded] = useState(false)
@@ -890,6 +893,12 @@ export default function PlannerDetailPage() {
 
     await handleAddStopFromOptions(normalizeRouteOption(option))
     await loadRouteOptions()
+    
+    // Recalculate route to include selected stops as waypoints
+    if (map) {
+      calculateRoute(map)
+    }
+    
     toast.success(`${option.location_name} selected for this stop.`)
   }
 
@@ -1465,6 +1474,12 @@ export default function PlannerDetailPage() {
         setStops(newStops)
         setFilteredStops(newStops)
         await loadRouteOptions()
+        
+        // Recalculate route after removing stop
+        if (map) {
+          calculateRoute(map)
+        }
+        
         toast.success("Stop removed from trip")
       } else {
         toast.error(result.error || "Failed to remove stop")
@@ -1632,7 +1647,7 @@ export default function PlannerDetailPage() {
     }
   }
 
-  const calculateRoute = useCallback((mapInstance: google.maps.Map) => {
+  const calculateRoute = useCallback(async (mapInstance: google.maps.Map) => {
     if (!trip) return
 
     const origin = new google.maps.LatLng(trip.start_lat!, trip.start_lng!)
@@ -1640,24 +1655,75 @@ export default function PlannerDetailPage() {
 
     const directionsService = new google.maps.DirectionsService()
 
-    // Draw the direct A→B corridor only. Stops are rendered as numbered markers
-    // separately. Including stops as waypoints caused the route to detour to each
-    // campsite, creating a second visible branch whenever an option was selected.
-    directionsService.route(
-      {
-        origin: origin,
-        destination: destination,
-        travelMode: google.maps.TravelMode.DRIVING,
-      },
-      (result, status) => {
-        if (status === google.maps.DirectionsStatus.OK && result) {
-          setDirections(result)
-        } else {
-          console.error("Directions request failed:", status)
+    // Build waypoints from selected overnight stops (in order)
+    const selectedStopsInOrder: { lat: number; lng: number; name: string }[] = []
+    
+    // Get selected stops from segments in order
+    if (routeMeta.segments && stops.length > 0) {
+      for (let i = 0; i < routeMeta.segments.length; i++) {
+        const segment = routeMeta.segments[i]
+        const selectedOptionId = selectedSegmentOptionIds[i]
+        
+        if (selectedOptionId) {
+          // Find the stop in our stops array
+          const selectedStop = stops.find(
+            (s) => s.id === selectedOptionId || s.stop_id === selectedOptionId
+          )
+          
+          if (selectedStop) {
+            const lat = selectedStop.latitude ?? 0
+            const lng = selectedStop.longitude ?? 0
+            if (lat && lng) {
+              selectedStopsInOrder.push({
+                lat: Number(lat),
+                lng: Number(lng),
+                name: selectedStop.location_name || `Stop ${i + 1}`,
+              })
+            }
+          }
         }
       }
-    )
-  }, [trip])
+    }
+
+    // Build route request with or without waypoints
+    const routeRequest: google.maps.DirectionsRequest = {
+      origin,
+      destination,
+      travelMode: google.maps.TravelMode.DRIVING,
+    }
+
+    // If we have selected stops, use them as waypoints
+    if (selectedStopsInOrder.length > 0) {
+      routeRequest.waypoints = selectedStopsInOrder.map((stop) => ({
+        location: new google.maps.LatLng(stop.lat, stop.lng),
+        stopover: true,
+      }))
+      routeRequest.optimizeWaypoints = false // Keep user-selected order
+    }
+
+    directionsService.route(routeRequest, (result, status) => {
+      if (status === google.maps.DirectionsStatus.OK && result) {
+        setDirections(result)
+      } else {
+        console.error("Directions request failed:", status)
+        // Fallback to direct route without waypoints
+        if (selectedStopsInOrder.length > 0) {
+          directionsService.route(
+            {
+              origin,
+              destination,
+              travelMode: google.maps.TravelMode.DRIVING,
+            },
+            (fallbackResult, fallbackStatus) => {
+              if (fallbackStatus === google.maps.DirectionsStatus.OK && fallbackResult) {
+                setDirections(fallbackResult)
+              }
+            }
+          )
+        }
+      }
+    })
+  }, [trip, selectedSegmentOptionIds, routeMeta.segments, stops])
 
   useEffect(() => {
     if (map && trip) {
@@ -3000,13 +3066,14 @@ if (isNaN(lat) || isNaN(lng)) return null
                       )
                     })}
 
-                    {showFuelOverlay && fuelStations.map((station, index) => {
+{showFuelOverlay && fuelStations.map((station, index) => {
                       const distKm = station.distanceFromStartKm
                         ? Math.round(station.distanceFromStartKm)
                         : null
                       const labelText = distKm !== null
                         ? `${distKm}km`
                         : `F${index + 1}`
+                      const isFocused = focusedFuelStation?.lat === station.lat && focusedFuelStation?.lng === station.lng
                       return (
                         <Marker
                           key={station.id}
@@ -3017,12 +3084,21 @@ if (isNaN(lat) || isNaN(lng)) return null
                             fontWeight: "bold",
                             fontSize: distKm !== null ? "9px" : "10px",
                           }}
-icon={{
-                            url: "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><circle cx="10" cy="10" r="8" fill="#ea580c" stroke="#c2410c" strokeWidth="2"/></svg>'),
+                          icon={{
+                            url: isFocused 
+                              ? "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24"><circle cx="12" cy="12" r="10" fill="#dc2626" stroke="#991b1b" strokeWidth="2"/></svg>')
+                              : "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><circle cx="10" cy="10" r="8" fill="#ea580c" stroke="#c2410c" strokeWidth="2"/></svg>'),
                           }}
                           title={`${station.name}${distKm !== null ? ` — ${distKm} km from start` : ""}`}
                           onMouseOver={() => setHoveredPin({ lat: station.lat, lng: station.lng, label: `⛽ ${station.name}${distKm !== null ? ` (${distKm} km)` : ""}` })}
                           onMouseOut={() => setHoveredPin(null)}
+                          onClick={() => {
+                            setFocusedFuelStation({ lat: station.lat, lng: station.lng, name: station.name })
+                            if (map) {
+                              map.panTo({ lat: station.lat, lng: station.lng })
+                              map.setZoom(14)
+                            }
+                          }}
                         />
                       )
                     })}
@@ -3404,45 +3480,68 @@ icon={{
                                 : `No confirmed overnight region yet. Add a stop option to lock this leg.`}
                             </p>
                             <div className="rounded-3xl bg-muted/5">
-                              <div className="text-xl text-muted-foreground mb-3 mt-8">Options</div>
-                              <div className="space-y-3">
+                              <div className="text-xl text-muted-foreground mb-3 mt-8">
+                                Where would you like to stay?
+                              </div>
+                              <div className="grid gap-3">
                                 {optionsToShow.length > 0 ? (
-                                  optionsToShow.map((option) => {
+                                  optionsToShow.map((option, optIdx) => {
                                     const selectedId = getSelectedOption(segment, index)?.id
                                     const isSelectedCard = option.id === selectedId
+                                    const isRecommended = option.isRecommended && optIdx === 0
+                                    const isDbSource = option.isDbSource
                                     return (
                                       <div
                                         key={option.id}
-                                        className={`relative overflow-hidden rounded-3xl border p-4 ${isSelectedCard ? "border-primary bg-primary/5" : "border-muted/30 bg-background"}`}
+                                        className={`relative overflow-hidden rounded-2xl border p-4 transition-all ${isSelectedCard ? "border-primary bg-primary/5 shadow-md" : "border-muted/30 bg-background hover:border-primary/50"}`}
                                       >
-                                        <div className="absolute left-4 top-4 flex h-8 w-8 items-center justify-center rounded-full bg-primary/10">
-                                          <MapPin className="h-4 w-4 text-primary" />
-                                        </div>
-                                        <div className="absolute left-6 top-4 h-2 w-2 rounded-full bg-primary" />
-                                        <div className="absolute left-8 top-4 bottom-4 w-px bg-primary/20" />
-                                        <div className="ml-8">
-                                          <div className="flex flex-wrap items-center gap-2">
-                                            <h3 className="font-semibold text-sm">{option.location_name}</h3>
-                                            <Badge variant="outline" className="text-xs">{option.stay_type || option.route_type || "Stop"}</Badge>
-                                            {option.is_verified && <Badge variant="outline" className="text-xs">Verified</Badge>}
+                                        {isRecommended && (
+                                          <div className="absolute -top-px -right-px">
+                                            <span className="inline-flex items-center rounded-bl-xl rounded-tr-xl bg-green-500 px-2 py-1 text-xs font-semibold text-white shadow-sm">
+                                              ★ Recommended
+                                            </span>
                                           </div>
-                                          <p className="mt-2 text-sm text-muted-foreground">
-                                            Suggested area stop for this leg. Confirm your exact overnight place, booking, and access before travel.
-                                          </p>
-                                          <div className="mt-3 flex flex-wrap gap-2">
-                                            <Button variant={getSelectedOption(segment, index)?.id === option.id ? "secondary" : "outline"} size="sm" onClick={() => handleChooseSegmentOption(segment, index, option)}>
-                                              {getSelectedOption(segment, index)?.id === option.id ? "Selected" : "Choose this stop"}
-                                            </Button>
-                                            <Button
-                                              variant="ghost"
-                                              size="sm"
-                                              onClick={() => {
-                                                toggleSegmentOptions(index)
-                                                void loadNearbyPlacesForDay(index, segment)
-                                              }}
-                                            >
-                                              {expandedSegmentOptions.has(index) ? "Hide alternatives" : "View alternatives"}
-                                            </Button>
+                                        )}
+                                        <div className="flex items-start gap-3">
+                                          <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${isDbSource ? "bg-green-100 text-green-600" : "bg-blue-100 text-blue-600"}`}>
+                                            {isDbSource ? (
+                                              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                                              </svg>
+                                            ) : (
+                                              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                                              </svg>
+                                            )}
+                                          </div>
+                                          <div className="flex-1 min-w-0">
+                                            <div className="flex flex-wrap items-center gap-2">
+                                              <h3 className="font-semibold text-sm truncate">{option.location_name}</h3>
+                                              <Badge variant="outline" className="text-xs">{option.stay_type || option.route_type || "Stop"}</Badge>
+                                              {isDbSource && <Badge className="bg-green-500/10 text-green-600 border-green-200 text-xs">DB</Badge>}
+                                              {!isDbSource && <Badge className="bg-blue-500/10 text-blue-600 border-blue-200 text-xs">Google</Badge>}
+                                            </div>
+                                            <p className="mt-1 text-sm text-muted-foreground">
+                                              {isRecommended 
+                                                ? "Our top pick for this stop - verified by our team"
+                                                : "Alternative option in this area"}
+                                            </p>
+                                            <div className="mt-3 flex flex-wrap gap-2">
+                                              <Button variant={getSelectedOption(segment, index)?.id === option.id ? "secondary" : "default"} size="sm" onClick={() => handleChooseSegmentOption(segment, index, option)}>
+                                                {getSelectedOption(segment, index)?.id === option.id ? "✓ Selected" : "Select this stop"}
+                                              </Button>
+                                              <Button
+                                                variant="ghost"
+                                                size="sm"
+                                                onClick={() => {
+                                                  toggleSegmentOptions(index)
+                                                  void loadNearbyPlacesForDay(index, segment)
+                                                }}
+                                              >
+                                                {expandedSegmentOptions.has(index) ? "Hide alternatives" : "More options"}
+                                              </Button>
+                                            </div>
                                           </div>
                                         </div>
                                       </div>

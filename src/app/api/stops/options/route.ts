@@ -508,15 +508,18 @@ export async function POST(req: NextRequest) {
         distanceFromDestKm = Math.max(0, totalRouteKm - routeDistKm)
         lateralKm = routeLateralKm
 
-        // A stop is on the route if it is within the lateral threshold of the actual
-        // road and its projection falls between start (−5%) and end (+5%) of total
-        // route length.
-        // Verified (curated) database stops: 100 km threshold — some verified stops
-        // may be deliberately accessed via a short side road.
-        // Custom/unverified Google Places stops: 25 km threshold — prevents offshore
-        // islands (e.g. Whitsunday Island ~31 km from the Bruce Highway), island
-        // resorts, and other car-inaccessible places from appearing.
-        const lateralThreshold = isVerified ? 100 : 25
+        // Distance thresholds for stops:
+        // - Ideal: within 5-10 km of route
+        // - Acceptable: up to 20 km if worthwhile
+        // - Maximum: 30 km in normal conditions
+        // - Remote areas only: up to 50 km
+        const progress = totalRouteKm > 0 ? distanceFromStartKm / totalRouteKm : 0
+        const isRemote = northbound && progress > 0.5 && totalRouteKm > 500
+        
+        // Use stricter thresholds - 30km max for normal, 50km for remote
+        const lateralThreshold = isVerified 
+          ? (isRemote ? 50 : 30)
+          : (isRemote ? 30 : 20)
         const tolerance = totalRouteKm * 0.05
         isBetween = lateralKm <= lateralThreshold &&
           distanceFromStartKm >= -tolerance &&
@@ -544,7 +547,8 @@ export async function POST(req: NextRequest) {
         distanceFromStartKm = Math.round(distFromStart * 10) / 10
         distanceFromDestKm = Math.round(distFromDest * 10) / 10
         lateralKm = calculateDistance(lat, lng, projLat, projLng)
-        const lateralThresholdFallback = isVerified ? 100 : 25
+        // Distance thresholds - stricter for fallback (straight-line)
+        const lateralThresholdFallback = isVerified ? 30 : 20
         isBetween = isBetweenEllipse && isForwardOnRoute && lateralKm <= lateralThresholdFallback
       }
 
@@ -842,7 +846,21 @@ export async function POST(req: NextRequest) {
         otherInSegment = otherInSegment.slice(0, 8)
       }
 
-      const overnightAnchor = verifiedInSegment[0] || otherInSegment[0]
+      // Add isRecommended flag to first verified stop (DB source)
+      const verifiedStopsWithFlag = verifiedInSegment.map((stop, idx) => ({
+        ...stop,
+        isRecommended: idx === 0 && stop.is_verified,
+        isDbSource: stop.is_verified,
+      }))
+      
+      // Mark other stops as not recommended and from Google
+      const otherStopsWithFlag = otherInSegment.map((stop) => ({
+        ...stop,
+        isRecommended: false,
+        isDbSource: false,
+      }))
+
+      const overnightAnchor = verifiedStopsWithFlag[0] || otherStopsWithFlag[0]
       if (overnightAnchor) {
         anchoredStopIds.add(overnightAnchor.id)
       }
@@ -850,7 +868,7 @@ export async function POST(req: NextRequest) {
       const segmentDistance = Math.max(0, endKm - startKm)
       const remoteByDistance = segmentDistance > (maxLegKm + 30)
       const remoteByNorth = northbound && northWeight > 0.42
-      const remoteBySparseStops = (verifiedInSegment.length + otherInSegment.length) < MIN_STOPS_PER_SEGMENT
+      const remoteBySparseStops = (verifiedStopsWithFlag.length + otherStopsWithFlag.length) < MIN_STOPS_PER_SEGMENT
 
       const anchorLat = overnightAnchor
         ? parseFloat(String(overnightAnchor.latitude))
@@ -862,8 +880,8 @@ export async function POST(req: NextRequest) {
       segments.push({
         startKm,
         endKm,
-        verifiedStops: verifiedInSegment,
-        otherStops: otherInSegment,
+        verifiedStops: verifiedStopsWithFlag,
+        otherStops: otherStopsWithFlag,
         fuelSuggestions: [],
         primaryFuelSuggestion: undefined,
         isRemote: remoteByDistance || remoteByNorth || remoteBySparseStops,
