@@ -1,0 +1,4 @@
+ALTER TABLE itinerary_days ADD COLUMN IF NOT EXISTS source_type TEXT DEFAULT 'verified';
+ALTER TABLE itinerary_days ADD COLUMN IF NOT EXISTS custom_stop_id UUID REFERENCES custom_stops(id) ON DELETE SET NULL;
+ALTER TABLE itinerary_days ADD COLUMN IF NOT EXISTS is_selected BOOLEAN DEFAULT FALSE;
+ALTER TABLE itinerary_days ADD COLUMN IF NOT EXISTS day_order INTEGER DEFAULT 1;

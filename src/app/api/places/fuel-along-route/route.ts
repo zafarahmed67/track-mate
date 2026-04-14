@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
+import { env } from "@/config/env.config"
 
 interface GoogleDirectionsRoute {
   summary?: string
@@ -119,7 +120,7 @@ export async function GET(req: NextRequest) {
     for (let i = 0; i < coordinates.length; i += step) {
       const point = coordinates[i]
       
-      const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${point.lat},${point.lng}&radius=8000&type=gas_station&key=${apiKey}`
+      const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${point.lat},${point.lng}&radius=${env.FUEL_ALONG_ROUTE_RADIUS}&type=gas_station&key=${apiKey}`
 
       try {
         const response = await fetch(url)

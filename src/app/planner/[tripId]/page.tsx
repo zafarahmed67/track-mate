@@ -118,6 +118,7 @@ interface RouteStopOption {
   tier?: string
   is_verified?: boolean
   distance_from_start_km?: number
+  distance_to_route_km?: number
   aao_tip?: string
   why_stop_here?: string
   why_we_d_stay_again?: string
@@ -336,7 +337,7 @@ export default function PlannerDetailPage() {
   const dragSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }))
   const [tripNarrative, setTripNarrative] = useState<TripNarrative | null>(null)
   const [narrativeLoading, setNarrativeLoading] = useState(false)
-  const [hoveredPin, setHoveredPin] = useState<{ lat: number; lng: number; label: string } | null>(null)
+  const [hoveredPin, setHoveredPin] = useState<{ lat: number; lng: number; label: string; distanceFromRoute?: number; sourceType?: "verified" | "custom" } | null>(null)
   const [hiddenCustomStopsByDay, setHiddenCustomStopsByDay] = useState<Record<number, string[]>>({})
   const [itineraryVersions, setItineraryVersions] = useState<Array<{ id: string; version: number; status: string; model_name: string | null; created_at: string }>>([])
   const [itineraryVersionsLoaded, setItineraryVersionsLoaded] = useState(false)
@@ -695,7 +696,7 @@ export default function PlannerDetailPage() {
     if (isValidLatLng(midLat, midLng)) {
       try {
         const response = await fetch(
-          `/api/places/nearby?lat=${midLat}&lng=${midLng}&radius=35000&types=campground,rv_park,gas_station`
+          `/api/places/nearby?lat=${midLat}&lng=${midLng}&radius=${process.env.NEXT_PUBLIC_PLANNER_NEARBY_RADIUS ?? 35000}&types=campground,rv_park,gas_station`
         )
         const data = await response.json()
 
@@ -1720,6 +1721,20 @@ export default function PlannerDetailPage() {
     return earthRadiusKm * c
   }
 
+  const calculateDistanceToLine = (pointLat: number, pointLng: number, lineStartLat: number, lineStartLng: number, lineEndLat: number, lineEndLng: number) => {
+    const startToEndDist = haversineKm(lineStartLat, lineStartLng, lineEndLat, lineEndLng)
+    if (startToEndDist < 0.01) return haversineKm(pointLat, pointLng, lineStartLat, lineStartLng)
+    
+    const t = Math.max(0, Math.min(1, (
+      (pointLat - lineStartLat) * (lineEndLat - lineStartLat) +
+      (pointLng - lineStartLng) * (lineEndLng - lineStartLng)
+    ) / (startToEndDist * startToEndDist * 6371 * 6371)))
+    
+    const projLat = lineStartLat + t * (lineEndLat - lineStartLat)
+    const projLng = lineStartLng + t * (lineEndLng - lineStartLng)
+    return haversineKm(pointLat, pointLng, projLat, projLng)
+  }
+
   const isValidLatLng = (lat: number, lng: number) =>
     Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180 && !(lat === 0 && lng === 0)
 
@@ -2378,6 +2393,9 @@ export default function PlannerDetailPage() {
         distance_from_start_km: Number.isFinite(Number(stop.distance_from_start_km))
           ? Number(stop.distance_from_start_km)
           : undefined,
+        distance_to_route_km: Number.isFinite(Number(stop.distance_to_route_km))
+          ? Number(stop.distance_to_route_km)
+          : undefined,
       }))
 
     const persistedStopsForSegment = Array.from(
@@ -2506,21 +2524,45 @@ export default function PlannerDetailPage() {
       location_name: stop.location_name,
       latitude: stop.latitude,
       longitude: stop.longitude,
+      sourceType: "verified" as const,
+      distance_to_route_km: stop.distance_to_route_km,
     })),
     ...dayData.customStopsForDay.map((stop) => ({
       key: `custom-${dayIndex}-${stop.id}`,
       location_name: stop.location_name,
       latitude: stop.latitude,
       longitude: stop.longitude,
+      sourceType: "custom" as const,
+      distance_to_route_km: stop.distance_to_route_km,
     })),
   ]))
 
-  const fallbackMapStopsFromPersisted = stops.map((stop, index) => ({
-    key: `persisted-${index}-${normalizeStopId(stop.stop_id || stop.id) || stop.id}`,
-    location_name: stop.location_name,
-    latitude: stop.latitude,
-    longitude: stop.longitude,
-  }))
+  const fallbackMapStopsFromPersisted = stops.map((stop, index) => {
+    const isCustom = stop.verification_status === "custom"
+    let distFromRoute = stop.distance_to_route_km
+    
+    if (isCustom && (distFromRoute === undefined || distFromRoute === null) && trip) {
+      const stopLat = parseFloat(String(stop.latitude || "0"))
+      const stopLng = parseFloat(String(stop.longitude || "0"))
+      const startLat = parseFloat(String(trip.start_lat || "0"))
+      const startLng = parseFloat(String(trip.start_lng || "0"))
+      const destLat = parseFloat(String(trip.destination_lat || "0"))
+      const destLng = parseFloat(String(trip.destination_lng || "0"))
+      
+      if (!isNaN(stopLat) && !isNaN(stopLng) && !isNaN(startLat) && !isNaN(destLat)) {
+        distFromRoute = calculateDistanceToLine(stopLat, stopLng, startLat, startLng, destLat, destLng)
+      }
+    }
+    
+    return {
+      key: `persisted-${index}-${normalizeStopId(stop.stop_id || stop.id) || stop.id}`,
+      location_name: stop.location_name,
+      latitude: stop.latitude,
+      longitude: stop.longitude,
+      sourceType: (stop.verification_status === "custom" ? "custom" : "verified") as "verified" | "custom",
+      distance_to_route_km: distFromRoute,
+    }
+  })
 
   const effectiveMapStops =
     fallbackMapStopsFromPersisted.length > unifiedOrderedMapStops.length
@@ -2905,19 +2947,31 @@ export default function PlannerDetailPage() {
                     {effectiveMapStops.map((stop, index) => {
                       const lat = parseFloat(String(stop.latitude ?? ""))
                       const lng = parseFloat(String(stop.longitude ?? ""))
-                      if (isNaN(lat) || isNaN(lng)) return null
+if (isNaN(lat) || isNaN(lng)) return null
+                      const isVerified = stop.sourceType === "verified"
+                      const markerColor = isVerified ? "#22c55e" : "#ef4444"
+                      const svgUrl = "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><circle cx="10" cy="10" r="8" fill="' + markerColor + '" stroke="#ffffff" strokeWidth="2"/></svg>')
                       return (
                         <Marker
                           key={`segment-stop-${stop.key}`}
                           position={{ lat, lng }}
+                          icon={{
+                            url: svgUrl,
+                          }}
                           label={{
                             text: String(index + 1),
                             color: "white",
                             fontWeight: "bold",
                             fontSize: "11px",
                           }}
-                          title={`${index + 1}. ${stop.location_name}`}
-                          onMouseOver={() => setHoveredPin({ lat, lng, label: stop.location_name ?? "" })}
+                          title={`${index + 1}. ${stop.location_name} (${isVerified ? "Verified" : "Custom"})`}
+                          onMouseOver={() => setHoveredPin({ 
+                            lat, 
+                            lng, 
+                            label: stop.location_name ?? "", 
+                            distanceFromRoute: stop.distance_to_route_km,
+                            sourceType: isVerified ? "verified" : "custom"
+                          })}
                           onMouseOut={() => setHoveredPin(null)}
                         />
                       )
@@ -2963,13 +3017,8 @@ export default function PlannerDetailPage() {
                             fontWeight: "bold",
                             fontSize: distKm !== null ? "9px" : "10px",
                           }}
-                          icon={{
-                            path: google.maps.SymbolPath.CIRCLE,
-                            fillColor: "#ea580c",
-                            fillOpacity: 0.9,
-                            strokeColor: "#c2410c",
-                            strokeWeight: 1,
-                            scale: distKm !== null ? 14 : 11,
+icon={{
+                            url: "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><circle cx="10" cy="10" r="8" fill="#ea580c" stroke="#c2410c" strokeWidth="2"/></svg>'),
                           }}
                           title={`${station.name}${distKm !== null ? ` — ${distKm} km from start` : ""}`}
                           onMouseOver={() => setHoveredPin({ lat: station.lat, lng: station.lng, label: `⛽ ${station.name}${distKm !== null ? ` (${distKm} km)` : ""}` })}
@@ -3005,11 +3054,44 @@ export default function PlannerDetailPage() {
                     {hoveredPin && (
                       <InfoWindow
                         position={{ lat: hoveredPin.lat, lng: hoveredPin.lng }}
-                        options={{ disableAutoPan: true }}
+                        options={{ 
+                          disableAutoPan: true,
+                          pixelOffset: new google.maps.Size(0, -10)
+                        }}
                         onCloseClick={() => setHoveredPin(null)}
                       >
-                        <div style={{ padding: "4px 8px", fontSize: "13px", fontWeight: 500, maxWidth: "220px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                          {hoveredPin.label}
+                        <div style={{ 
+                          padding: "6px 10px", 
+                          minWidth: "160px",
+                          background: "#fff",
+                          borderRadius: "4px",
+                          boxShadow: "0 1px 4px rgba(0,0,0,0.2)"
+                        }}>
+                          <div style={{ fontWeight: 600, marginBottom: "3px", fontSize: "13px", color: "#1f2937" }}>
+                            {hoveredPin.label}
+                          </div>
+                          {hoveredPin.sourceType && (
+                            <div style={{ 
+                              fontSize: "11px", 
+                              color: hoveredPin.sourceType === "verified" ? "#16a34a" : "#dc2626",
+                              fontWeight: 600,
+                              marginBottom: "2px"
+                            }}>
+                              {hoveredPin.sourceType === "verified" ? "✓ Verified" : "⚠ Custom"}
+                            </div>
+                          )}
+                          {hoveredPin.distanceFromRoute !== undefined && hoveredPin.distanceFromRoute !== null && hoveredPin.distanceFromRoute >= 0 && (
+                            <div style={{ 
+                              fontSize: "11px", 
+                              color: hoveredPin.distanceFromRoute > 5 ? "#dc2626" : "#16a34a",
+                              fontWeight: 500 
+                            }}>
+                              {hoveredPin.distanceFromRoute > 0 
+                                ? `${Math.round(hoveredPin.distanceFromRoute)} km from route`
+                                : "On route"
+                              }
+                            </div>
+                          )}
                         </div>
                       </InfoWindow>
                     )}

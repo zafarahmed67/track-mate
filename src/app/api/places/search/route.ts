@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
+import { env } from "@/config/env.config"
 
 export async function GET(req: NextRequest) {
   try {
@@ -26,7 +27,7 @@ export async function GET(req: NextRequest) {
     let url = `https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(query)}&type=gas_station&key=${apiKey}`
     
     if (lat && lng) {
-      url += `&location=${lat},${lng}&radius=50000`
+      url += `&location=${lat},${lng}&radius=${env.PLACES_SEARCH_RADIUS}`
     }
 
     const response = await fetch(url)

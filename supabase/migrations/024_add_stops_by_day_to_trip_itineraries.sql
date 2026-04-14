@@ -1,0 +1,1 @@
+ALTER TABLE trip_itineraries ADD COLUMN IF NOT EXISTS stops_by_day_json JSONB DEFAULT '{}'::JSONB;

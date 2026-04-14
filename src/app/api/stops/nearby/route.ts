@@ -2,6 +2,8 @@ import { supabaseAdmin } from "@/config/supabase"
 import { NextRequest, NextResponse } from "next/server"
 import { applySuitabilityFilter } from "@/lib/stopSuitabilityFilter"
 import type { TripPreferences } from "@/lib/stopSuitabilityFilter"
+import { env } from "@/config/env.config"
+import { getCorridorsFromStops, calculateDistance as calcDistance } from "@/lib/corridorUtils"
 
 // Maximum perpendicular distance a stop can be from the actual route polyline (km)
 const ROUTE_PROXIMITY_THRESHOLD_KM = 30
@@ -144,73 +146,20 @@ async function fetchRoutePolylineWithPreferences(
   }
 }
 
-function findCorridor(startLat: number, startLng: number, destLat: number, destLng: number): string | null {
-  const corridors: Record<string, { lat: number; lng: number }[]> = {
-    "Bruce Highway": [
-      { lat: -33.77, lng: 150.92 }, // Sydney
-      { lat: -27.47, lng: 153.02 }, // Brisbane
-      { lat: -21.07, lng: 149.15 }, // Mackay
-      { lat: -19.25, lng: 146.8 },  // Townsville
-      { lat: -17.5, lng: 146 },      // Innisfail area
-      { lat: -12.4, lng: 130.8 },   // Darwin
-    ],
-    "Pacific Highway": [
-      { lat: -33.87, lng: 151.21 }, // Sydney
-      { lat: -28.12, lng: 153.45 }, // Gold Coast
-      { lat: -29.4, lng: 153.36 },  // Iluka
-      { lat: -30.5, lng: 152.97 },   // Urunga
-    ],
-    "Stuart Highway": [
-      { lat: -25.24, lng: 130.99 }, // Yulara/Uluru
-      { lat: -31.18, lng: 136.82 }, // Woomera
-      { lat: -32.49, lng: 137.78 }, // Port Augusta
-      { lat: -23.7, lng: 133.88 },  // Alice Springs
-      { lat: -16.25, lng: 133.37 }, // Daly Waters
-      { lat: -14.47, lng: 132.27 }, // Katherine
-      { lat: -12.33, lng: 130.9 },  // Darwin
-    ],
-    "Capricorn Highway": [
-      { lat: -23.58, lng: 148.61 }, // Bluff
-      { lat: -23.53, lng: 148.16 }, // Emerald
-      { lat: -23.48, lng: 145.32 }, // Barcaldine/Lara Wetlands
-    ],
-    "Landsborough Highway": [
-      { lat: -23.42, lng: 144.45 }, // Ilfracombe/Wellshot
-      { lat: -22.39, lng: 143.04 }, // Winton
-    ],
-    "Matilda Highway": [
-      { lat: -21.26, lng: 141.27 }, // McKinlay
-    ],
-    "Gulf Savannah Way": [
-      { lat: -18.52, lng: 144.08 }, // Einasleigh
-      { lat: -18.29, lng: 143.55 }, // Georgetown
-      { lat: -18.21, lng: 142.25 }, // Croydon
-      { lat: -17.67, lng: 141.08 }, // Normanton
-      { lat: -17.49, lng: 140.84 }, // Karumba
-    ],
-    "Gulf Developmental Road": [
-      { lat: -18.15, lng: 144.32 }, // Mount Surprise
-      { lat: -18.08, lng: 144.7 },   // Pinnarendi
-    ],
-    "Kennedy Highway": [
-      { lat: -17, lng: 145.42 },    // Mareeba
-    ],
-    "Peninsula Developmental Road": [
-      { lat: -15.77, lng: 144.28 }, // Hann River
-      { lat: -13.43, lng: 142.95 }, // Archer River
-      { lat: -12.13, lng: 142.65 }, // Bramwell
-    ],
+async function findCorridor(startLat: number, startLng: number, destLat: number, destLng: number): Promise<string | null> {
+  const corridorCenters = await getCorridorsFromStops()
+
+  if (Object.keys(corridorCenters).length === 0) {
+    console.log("⚠️ No corridors found in stops table, returning null")
+    return null
   }
 
   let bestCorridor: string | null = null
   let bestScore = Infinity
 
-  for (const [corridor, points] of Object.entries(corridors)) {
-    let score = 0
-    for (const point of points) {
-      score += calculateDistance(startLat, startLng, point.lat, point.lng)
-      score += calculateDistance(destLat, destLng, point.lat, point.lng)
-    }
+  for (const [corridor, coords] of Object.entries(corridorCenters)) {
+    const score = calcDistance(startLat, startLng, coords.lat, coords.lng) +
+                 calcDistance(destLat, destLng, coords.lat, coords.lng)
     if (score < bestScore) {
       bestScore = score
       bestCorridor = corridor
@@ -324,7 +273,7 @@ async function fetchGoogleRelatedStops(startLat: number, startLng: number, destL
 
     for (const type of searchTypes) {
       try {
-        const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${point.lat},${point.lng}&radius=25000&type=${type}&key=${apiKey}`
+        const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${point.lat},${point.lng}&radius=${env.NEARBY_STOPS_SEARCH_RADIUS}&type=${type}&key=${apiKey}`
         const response = await fetch(url)
         const data = await response.json()
 
@@ -387,7 +336,7 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    const corridor = findCorridor(startLat, startLng, destLat, destLng)
+    const corridor = await findCorridor(startLat, startLng, destLat, destLng)
 
     // Fetch trip preferences for suitability filtering (non-fatal if missing)
     let tripPreferences: TripPreferences | null = null

@@ -441,3 +441,206 @@ day 8: 21 stops (start) + 22 stop + end point
 i have not 21 and 22 not have and now require day 8 final 7 days make 
 
 day 7: 18 stops (start) + (19 stop + 20 stop) + end point
+
+
+
+async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
+  if (!supabaseAdmin) {
+    throw new Error("Database not configured")
+  }
+
+  let generatedStopsCount = 0
+  let customStopsCount = 0
+
+  await supabaseAdmin
+    .from("trips")
+    .update({ status: "in_progress" })
+    .eq("id", job.tripId)
+
+  console.log("[queue] ▶️ Starting trip generation job", {
+    tripId: job.tripId,
+    title: job.title,
+  })
+
+  // ============================================================
+  // [2/4] GENERATE STOPS FROM DATABASE
+  // ============================================================
+  console.log("[2/4] 🔍 Generating stops from DB...", {
+    startCoords: [job.startLat, job.startLng],
+    destCoords: [job.destLat, job.destLng],
+    tripId: job.tripId,
+  })
+
+  const { success: generateSuccess, stops = [], error: generateError } = await generateStop(
+    job.startLat,
+    job.startLng,
+    job.destLat,
+    job.destLng
+  )
+
+  if (generateError) {
+    console.warn("[2/4] ⚠️ Stop generation warning:", generateError)
+  }
+
+  // ============================================================
+  // [3/4] GENERATE CUSTOM STOPS FROM GOOGLE PLACES
+  // ============================================================
+  console.log("[3/4] 🌐 Generating custom stops from Google Places...", {
+    searchTypes: ["rv_park", "campground", "caravan park keyword"],
+  })
+
+  const dbStopDistancesKm = stops
+    .map((stop) => (stop as { distance_from_start_km?: number }).distance_from_start_km ?? 0)
+    .filter((distance) => distance > 0)
+
+  const safeTripDays = Math.max(1, Math.round(Number(job.tripDurationDays) || 1))
+  const dayBasedStopTarget = safeTripDays * 3
+  const directDistanceKm = calculateDistance(
+    job.startLat,
+    job.startLng,
+    job.destLat,
+    job.destLng
+  )
+  const estimatedDriveDistanceKm = Math.max(
+    directDistanceKm,
+    Math.min(directDistanceKm * 1.45, directDistanceKm + 600)
+  )
+  const distanceBasedStopCap = Math.max(1, Math.ceil(estimatedDriveDistanceKm / 90))
+  const targetTotalStops = Math.min(dayBasedStopTarget, distanceBasedStopCap)
+  const customStopsNeeded = Math.max(0, targetTotalStops - generatedStopsCount)
+
+  console.log("[3/4] target stop quota", {
+    tripDurationDays: safeTripDays,
+    dayBasedStopTarget,
+    directDistanceKm: Math.round(directDistanceKm),
+    estimatedDriveDistanceKm: Math.round(estimatedDriveDistanceKm),
+    distanceBasedStopCap,
+    targetTotalStops,
+    dbStops: generatedStopsCount,
+    googleStopsNeeded: customStopsNeeded,
+  })
+
+  const {
+    success: customSuccess,
+    stopsGenerated = 0,
+    totalFetched = 0,
+    afterDedup = 0,
+    error: customError,
+  } = await generateCustomStop(
+    job.startLat,
+    job.startLng,
+    job.destLat,
+    job.destLng,
+    job.tripId,
+    Number(job.tripDurationDays) || 1,
+    dbStopDistancesKm,
+    customStopsNeeded
+  )
+
+  if (customError) {
+    console.warn("[3/4] ⚠️ Custom stop generation warning:", customError)
+  }
+
+  if (customSuccess) {
+    customStopsCount = stopsGenerated
+    console.log(
+      `[3/4] ✅ Generated and saved ${customStopsCount} custom stops to custom_stops table`,
+      {
+        totalFetched,
+        afterDedup,
+      }
+    )
+  } else {
+    console.log("[3/4] ⓘ Custom stop generation skipped or failed", {
+      totalFetched,
+      afterDedup,
+    })
+  }
+
+  // ============================================================
+  // [4/4] COMPLETE JOB
+  // ============================================================
+  await supabaseAdmin
+    .from("trips")
+    .update({ status: "completed" })
+    .eq("id", job.tripId)
+
+  console.log("[4/4] ✅ Trip generation completed", {
+    tripId: job.tripId,
+    totalStopsGenerated: generatedStopsCount + customStopsCount,
+  })
+}
+
+same as it is
+if (!supabaseAdmin) {
+    throw new Error("Database not configured")
+  }
+if travelPace
+ • leisure: ~150–200 km per day
+• moderate: ~200–300 km
+• fast: ~300–400 km 
+
+in start store const travelPace(default is leisure), tripDurationDays, totalKm from lat lng.
+ 
+if totalKm is 1200km and   leisure then 1200/175 = sugestion days come 
+
+
+  await supabaseAdmin
+    .from("trips")
+    .update({ status: "in_progress" })
+    .eq("id", job.tripId)
+
+  console.log("[queue] ▶️ Starting trip generation job", {
+    tripId: job.tripId,
+    title: job.title,
+  })
+
+same as it is 
+
+generate stop from db same as it is 
+
+generate stop from google place same as it is 
+
+const {
+    success: customSuccess,
+    stopsGenerated = 0,
+    totalFetched = 0,
+    afterDedup = 0,
+    error: customError,
+  } = await generateCustomStop(
+    job.startLat,
+    job.startLng,
+    job.destLat,
+    job.destLng,
+    job.tripId,
+    Number(job.tripDurationDays) || 1,(tripDurationDays)
+    dbStopDistancesKm, (totalKm),
+(tripDurationSuggestionDays)
+    customStopsNeeded (remove it)
+  )
+now both stops generated and i have travelPace and suggestionDays and startCoords and destCoords 
+
+- always prioirty the verified stop first 
+- now order in days (suppose i have suggest 7 days) 
+- each day have 3 option one is default set as endPoint and 2 other show whihc user select then considered that as endPoint 
+
+now day 1 startCoords and endPoint  (below 3 option one is default and 2 other which near of endPoint)
+
+now day 2 endPoint of day and endPoint  (below 3 option one is default and 2 other which near of endPoint)
+
+full the days and make array and add this is custom and this is verified.
+
+and now save both data in specific table and then 
+
+  // ============================================================
+  // [4/4] COMPLETE JOB
+  // ============================================================
+  await supabaseAdmin
+    .from("trips")
+    .update({ status: "completed" })
+    .eq("id", job.tripId)
+  console.log("[4/4] ✅ Trip generation completed", {
+    tripId: job.tripId,
+    totalStopsGenerated: generatedStopsCount + customStopsCount,
+  })
+

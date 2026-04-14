@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
+import { env } from "@/config/env.config"
 
 export async function GET(req: NextRequest) {
   try {
@@ -49,7 +50,7 @@ export async function GET(req: NextRequest) {
     for (let i = 0; i < samplePoints; i++) {
       const point = coordinates[i * step]
       
-      const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${point.lat},${point.lng}&radius=5000&type=gas_station&key=${apiKey}`
+      const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${point.lat},${point.lng}&radius=${env.FUEL_STATIONS_RADIUS}&type=gas_station&key=${apiKey}`
 
       const response = await fetch(url)
       const data = await response.json()

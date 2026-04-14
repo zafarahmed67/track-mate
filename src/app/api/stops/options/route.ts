@@ -9,6 +9,8 @@ import {
   samplePolylineAtKm,
 } from "@/lib/routePolyline"
 import type { PolylinePoint } from "@/lib/routePolyline"
+import { env } from "@/config/env.config"
+import { getCorridorsFromStops, calculateDistance as calcDistance } from "@/lib/corridorUtils"
 
 interface FuelStationOption {
   id: string
@@ -84,23 +86,21 @@ function calculateDistance(lat1: number, lng1: number, lat2: number, lng2: numbe
   return R * c
 }
 
-function findCorridor(lat1: number, lng1: number, lat2: number, lng2: number): string {
-  const corridors: Record<string, { lat: number; lng: number }> = {
-    "Pacific Highway": { lat: -33.8688, lng: 151.2093 },
-    "Outback": { lat: -25.2744, lng: 133.7751 },
-    "Great Ocean Road": { lat: -38.3405, lng: 142.9790 },
-    "Nullarbor": { lat: -31.0000, lng: 129.0000 },
-    "Cunningham": { lat: -28.0000, lng: 152.0000 },
-    "Bruce": { lat: -19.0000, lng: 146.0000 },
+async function findCorridor(lat1: number, lng1: number, lat2: number, lng2: number): Promise<string> {
+  const corridorCenters = await getCorridorsFromStops()
+  
+  const corridorNames = Object.keys(corridorCenters)
+  if (corridorNames.length === 0) {
+    return "Unknown"
   }
 
-  let closestCorridor = "Unknown"
+  let closestCorridor = corridorNames[0]
   let minDistance = Infinity
   const midLat = (lat1 + lat2) / 2
   const midLng = (lng1 + lng2) / 2
 
-  for (const [name, coords] of Object.entries(corridors)) {
-    const distance = calculateDistance(midLat, midLng, coords.lat, coords.lng)
+  for (const [name, coords] of Object.entries(corridorCenters)) {
+    const distance = calcDistance(midLat, midLng, coords.lat, coords.lng)
     if (distance < minDistance) {
       minDistance = distance
       closestCorridor = name
@@ -247,7 +247,7 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value))
 }
 
-const HARD_FUEL_GAP_KM = 350
+const HARD_FUEL_GAP_KM = env.HARD_FUEL_GAP_KM
 
 function getFuelSafetyConfig(northWeight: number, isRemote: boolean) {
   const riskWeight = clamp(Math.max(northWeight, isRemote ? 0.65 : 0), 0, 1)
@@ -361,13 +361,13 @@ export async function POST(req: NextRequest) {
     }
 
     const paceConfig = {
-      leisurely: { kmPerDay: 150, hoursPerLeg: 2, minSpacing: 80, maxSpacing: 200 },
-      moderate: { kmPerDay: 200, hoursPerLeg: 2.5, minSpacing: 120, maxSpacing: 280 },
-      fast: { kmPerDay: 300, hoursPerLeg: 3.5, minSpacing: 180, maxSpacing: 400 },
+      leisurely: { kmPerDay: env.PACE_LEISURELY_KM_PER_DAY, hoursPerLeg: env.PACE_LEISURELY_HOURS_PER_LEG, minSpacing: env.PACE_LEISURELY_MIN_SPACING, maxSpacing: env.PACE_LEISURELY_MAX_SPACING },
+      moderate: { kmPerDay: env.PACE_MODERATE_KM_PER_DAY, hoursPerLeg: env.PACE_MODERATE_HOURS_PER_LEG, minSpacing: env.PACE_MODERATE_MIN_SPACING, maxSpacing: env.PACE_MODERATE_MAX_SPACING },
+      fast: { kmPerDay: env.PACE_FAST_KM_PER_DAY, hoursPerLeg: env.PACE_FAST_HOURS_PER_LEG, minSpacing: env.PACE_FAST_MIN_SPACING, maxSpacing: env.PACE_FAST_MAX_SPACING },
     }
 
     const config = paceConfig[travelPace as keyof typeof paceConfig] || paceConfig.moderate
-    const corridor = findCorridor(startLat, startLng, destLat, destLng)
+    const corridor = await findCorridor(startLat, startLng, destLat, destLng)
 
     // Fetch trip preferences for suitability filtering and route selection (non-fatal if missing)
     let tripPreferences: TripPreferences | null = null
@@ -586,14 +586,14 @@ export async function POST(req: NextRequest) {
     const remoteMultiplier = northbound && latSpan > 5 ? 0.75 : 1.0
     const targetLegKm = clamp(
       (preferredLegKm ?? config.kmPerDay) * remoteMultiplier,
-      100,
-      avoidLongDays ? 280 : 400
+      env.LEG_TARGET_MIN_KM,
+      avoidLongDays ? env.AVOID_LONG_DAYS_KM : env.DEFAULT_MAX_KM_PER_DAY
     )
-    const minLegKm = clamp(targetLegKm - 50, 140, 220)
+    const minLegKm = clamp(targetLegKm - env.LEG_SPACING_KM, env.LEG_MIN_KM, 220)
     const maxLegKm = clamp(
-      targetLegKm + 50,
-      220,
-      avoidLongDays ? 340 : 450
+      targetLegKm + env.LEG_SPACING_KM,
+      env.LEG_MAX_KM,
+      avoidLongDays ? env.LEG_AVOID_LONG_DAYS_ADD_KM + env.AVOID_LONG_DAYS_KM : 450
     )
 
     // When the polyline is available, stop distances are already accurate driving-km
@@ -905,7 +905,7 @@ export async function POST(req: NextRequest) {
 
       const fuelFetchPromises = uniqueProbePoints.map(async ({ lat, lng }) => {
         try {
-          const fuelUrl = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=30000&type=gas_station&key=${apiKey}`
+          const fuelUrl = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=${env.FUEL_STATION_SEARCH_RADIUS}&type=gas_station&key=${apiKey}`
           const fuelResponse = await fetch(fuelUrl)
           const fuelData = await fuelResponse.json()
 
@@ -1057,7 +1057,7 @@ export async function POST(req: NextRequest) {
 
         const fuelFetchPromises = uniqueProbePoints.map(async ({ lat, lng }) => {
           try {
-            const fuelUrl = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=30000&type=gas_station&key=${apiKey}`
+            const fuelUrl = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=${env.FUEL_STATION_SEARCH_RADIUS}&type=gas_station&key=${apiKey}`
             const fuelResponse = await fetch(fuelUrl)
             const fuelData = await fuelResponse.json()
 
