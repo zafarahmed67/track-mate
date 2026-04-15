@@ -325,10 +325,8 @@ export default function PlannerDetailPage() {
     isOpenNow?: boolean
   }>>>({})
   const [loadingPlaces, setLoadingPlaces] = useState<Set<number>>(new Set())
-  const [deleteConfirm, setDeleteConfirm] = useState<{ show: boolean; stopId: string | null; stopName: string }>({ show: false, stopId: null, stopName: "" })
   const [showAddPlace, setShowAddPlace] = useState<number | null>(null)
   const [selectedStopForDelete, setSelectedStopForDelete] = useState<{ id: string; name: string } | null>(null)
-  const [sortingStops, setSortingStops] = useState(false)
   const [routeMeta, setRouteMeta] = useState<Partial<RouteMeta>>({})
   const [routeOptionsLoading, setRouteOptionsLoading] = useState(false)
   const [routeWarnings, setRouteWarnings] = useState<string[]>([])
@@ -2958,7 +2956,7 @@ export default function PlannerDetailPage() {
 
   return (
     <main className="min-h-screen bg-background">
-      <div className="sticky top-0 z-20 border-b bg-background/95 backdrop-blur-xl">
+      <div className="sticky top-0 z-50 border-b bg-background/95 backdrop-blur-xl">
         <div className="container mx-auto px-6 py-4">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
             <div className="min-w-0">
@@ -3114,7 +3112,7 @@ export default function PlannerDetailPage() {
           </Card>
         </div>
 
-        {showEditWarningBanner && editWarnings.length > 0 && (
+        {showEditWarningBanner && Array.isArray(editWarnings) && editWarnings.length > 0 && (
           <Card className="border-amber-500/40 bg-amber-500/5 mb-4">
             <CardHeader className="pb-2">
               <div className="flex items-center justify-between">
@@ -3622,7 +3620,7 @@ export default function PlannerDetailPage() {
                             </div>
 
                             {/* 3-option card grid */}
-                            {optionsToShow.length > 0 ? (
+                            {Array.isArray(optionsToShow) && optionsToShow.length > 0 ? (
                               <div className="grid grid-cols-1 gap-3">
                                 {optionsToShow.map((option, optIdx) => {
                                   const isSelected = option.id === selectedOption?.id
@@ -3763,7 +3761,7 @@ export default function PlannerDetailPage() {
                                     <div className="rounded-xl border border-dashed border-muted/30 bg-muted/10 p-3 text-xs text-muted-foreground">
                                       Loading nearby places…
                                     </div>
-                                  ) : nearbyAlternatives.length > 0 ? (
+                                  ) : (Array.isArray(nearbyAlternatives) && nearbyAlternatives.length > 0) ? (
                                     nearbyAlternatives.map((place) => (
                                       <div key={`${place.name}-${place.lat}-${place.lng}`} className="flex items-center justify-between gap-3 rounded-xl border border-muted/30 bg-background p-3">
                                         <div className="min-w-0">
@@ -3983,10 +3981,10 @@ export default function PlannerDetailPage() {
               </CardHeader>
               <CardContent className="space-y-4">
                 {/* Version history panel */}
-                {showVersionHistory && itineraryVersions.length > 0 && (
+                {showVersionHistory && Array.isArray(itineraryVersions) && itineraryVersions.length > 0 && (
                   <div className="rounded-2xl border border-muted/30 bg-muted/5 p-3 space-y-2">
                     <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Version History</p>
-                    {itineraryVersions.map((v) => (
+                    {Array.isArray(itineraryVersions) && itineraryVersions.map((v) => (
                       <div
                         key={v.id}
                         className={`flex items-center justify-between rounded-xl px-3 py-2 text-sm ${
@@ -4048,7 +4046,7 @@ export default function PlannerDetailPage() {
                     </div>
 
                     {/* Day-by-day */}
-                    {tripNarrative.days.map((day) => (
+                    {tripNarrative.days && tripNarrative.days.length > 0 && tripNarrative.days.map((day) => (
                       <div key={day.dayNumber} className="rounded-2xl bg-muted/5 border border-muted/20 p-4 space-y-3">
                         <div className="flex items-center gap-2">
                           <div className="flex h-6 w-6 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">
@@ -4086,7 +4084,7 @@ export default function PlannerDetailPage() {
                         )}
 
                         {/* Extra AAO tips */}
-                        {day.aaoTips.length > 0 && (
+                        {day.aaoTips && day.aaoTips.length > 0 && (
                           <ul className="space-y-1">
                             {day.aaoTips.map((tip, i) => (
                               <li key={i} className="flex items-start gap-2 text-xs text-muted-foreground">
@@ -4210,38 +4208,6 @@ export default function PlannerDetailPage() {
 
             <Card className="border">
               <CardHeader className="pb-3">
-                <CardTitle className="text-lg">Stop adjustments</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4 text-sm">
-                {daySegments.map((segment, index) => {
-                  const selectedOption = getSelectedOption(segment, index)
-                  return (
-                    <div key={`adjust-${index}`} className="rounded-3xl bg-muted/5 p-4">
-                      <div className="flex items-center justify-between gap-4">
-                        <div>
-                          <p className="text-sm text-muted-foreground">Day {index + 1}</p>
-                          <p className="font-medium">{selectedOption?.location_name || `No selected stop`}</p>
-                        </div>
-                        {/* <div className="flex flex-wrap gap-2">
-                          <Button variant="ghost" size="sm" onClick={() => handleSwapSegmentOption(segment, index)}>
-                            Swap
-                          </Button>
-                          <Button variant="ghost" size="sm" onClick={() => handleRemoveSegmentSelection(segment, index)}>
-                            Remove
-                          </Button>
-                        </div> */}
-                      </div>
-                      <p className="mt-3 text-xs text-muted-foreground">
-                        {selectedOption ? selectedOption.stay_type || selectedOption.route_type : 'Add an overnight stop to lock this day.'}
-                      </p>
-                    </div>
-                  )
-                })}
-              </CardContent>
-            </Card>
-
-            <Card className="border">
-              <CardHeader className="pb-3">
                 <CardTitle className="text-lg">Route health</CardTitle>
               </CardHeader>
               <CardContent className="space-y-3 text-sm">
@@ -4251,23 +4217,23 @@ export default function PlannerDetailPage() {
                 </div>
                 <div className="flex justify-between">
                   <span>Longest leg</span>
-                  <span>{Math.max(...daySegments.map((seg) => estimateSegmentDistance(seg)), 0).toFixed(2)} km</span>
+                  <span>{Array.isArray(daySegments) ? Math.max(...daySegments.map((seg) => estimateSegmentDistance(seg)), 0).toFixed(2) : '0.00'} km</span>
                 </div>
                 <div className="flex justify-between">
                   <span>Fuel stations</span>
-                  <span>{fuelStationCount()}</span>
+                  <span>{typeof fuelStationCount === 'function' ? fuelStationCount() : 0}</span>
                 </div>
                 <div className="flex justify-between">
                   <span>Longest fuel gap</span>
-                  <span>{longestFuelGapKm()} km</span>
+                  <span>{typeof longestFuelGapKm === 'function' ? longestFuelGapKm() : 0} km</span>
                 </div>
                 <div className="flex justify-between">
                   <span>Fuel-critical days</span>
-                  <span>{fuelCriticalCount()}</span>
+                  <span>{typeof fuelCriticalCount === 'function' ? fuelCriticalCount() : 0}</span>
                 </div>
                 <div className="flex justify-between">
                   <span>Remote overnight areas</span>
-                  <span>{remoteSectionCount()}</span>
+                  <span>{typeof remoteSectionCount === 'function' ? remoteSectionCount() : 0}</span>
                 </div>
               </CardContent>
             </Card>
@@ -4291,14 +4257,14 @@ export default function PlannerDetailPage() {
                   <CardTitle className="text-lg flex items-center gap-2">
                     <MessageSquare className="h-5 w-5 text-primary" />
                     Ask TrackMate
-                    {chatMessages.length > 0 && (
+                    {(chatMessages?.length ?? 0) > 0 && (
                       <span className="text-xs font-normal text-muted-foreground">{chatMessages.length} messages</span>
                     )}
                   </CardTitle>
                 </div>
               </CardHeader>
               <CardContent className="space-y-3">
-                {chatMessages.length > 0 && (
+                {Array.isArray(chatMessages) && chatMessages.length > 0 && (
                   <div className="max-h-72 overflow-y-auto space-y-3 pr-1">
                     {chatMessages.map((msg, i) => (
                       <div
@@ -4321,7 +4287,7 @@ export default function PlannerDetailPage() {
                     <div ref={chatEndRef} />
                   </div>
                 )}
-                {chatMessages.length === 0 && (
+                {Array.isArray(chatMessages) && chatMessages.length === 0 && (
                   <p className="text-xs text-muted-foreground">
                     Ask anything about your trip — stops, fuel, best time to drive, what to expect.
                   </p>
