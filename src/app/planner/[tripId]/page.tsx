@@ -43,6 +43,8 @@ import {
   AlertTriangle,
   X,
   Star,
+  Moon,
+  Locate,
 } from "lucide-react"
 
 const mapContainerStyle = {
@@ -2159,6 +2161,20 @@ export default function PlannerDetailPage() {
     return options[0]
   }
 
+  const handleChooseFuel = useCallback(async (segmentIndex: number, fuelKey: string) => {
+    const next = { ...selectedSegmentFuelIds, [segmentIndex]: fuelKey }
+    setSelectedSegmentFuelIds(next)
+    const currentRouteDataJson = (trip?.route_data_json ?? {}) as Record<string, unknown>
+    await fetch(`/api/trips/${tripId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        userId,
+        route_data_json: { ...currentRouteDataJson, selectedSegmentFuelIds: next },
+      }),
+    })
+  }, [selectedSegmentFuelIds, trip, tripId, userId])
+
   const getFuelGapInfo = (segment: RouteSegment, index: number) => {
     const totalKm = routeMeta.drivingInfo?.totalDistanceKm ?? 0
     const paceConfig = routeMeta.paceConfig
@@ -3091,7 +3107,23 @@ export default function PlannerDetailPage() {
                   <Fuel className="h-5 w-5 text-amber-600" />
                   Fuel Gap Warning
                 </CardTitle>
-                <Button variant="ghost" size="sm" onClick={dismissEditWarning}>Dismiss</Button>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setShowFuelOverlay(true)
+                      map?.panTo(mapCenter)
+                      const firstCriticalIdx = daySegments.findIndex(s => s.fuelCritical)
+                      if (firstCriticalIdx >= 0) setActiveSegmentIndex(firstCriticalIdx)
+                      dismissEditWarning()
+                    }}
+                  >
+                    <Fuel className="mr-1.5 h-4 w-4" />
+                    Show fuel on map
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={dismissEditWarning}>Dismiss</Button>
+                </div>
               </div>
             </CardHeader>
             <CardContent className="space-y-2 text-sm">
@@ -3114,35 +3146,79 @@ export default function PlannerDetailPage() {
 
         <div className="mb-4">
           <Card className="overflow-hidden border py-0 relative">
-            <div className="absolute right-4 top-4 z-20 flex flex-col gap-2">
-              <Button
-                variant={showFuelOverlay ? "default" : "secondary"}
-                size="icon"
-                onClick={() => setShowFuelOverlay(prev => !prev)}
-                title={showFuelOverlay ? "Hide fuel stations" : "Show fuel stations"}
-              >
-                F
-              </Button>
-              <Button
-                variant={showOvernightOverlay ? "default" : "secondary"}
-                size="icon"
-                onClick={() => setShowOvernightOverlay(prev => !prev)}
-                title={showOvernightOverlay ? "Hide overnight options" : "Show overnight options"}
-              >
-                O
-              </Button>
-              <Button
-                variant={showRemoteOverlay ? "default" : "secondary"}
-                size="icon"
-                onClick={() => setShowRemoteOverlay(prev => !prev)}
-                title={showRemoteOverlay ? "Hide remote warnings" : "Show remote warnings"}
-              >
-                R
-              </Button>
-              <Button variant="secondary" size="icon" onClick={() => map?.panTo(mapCenter)} title="Recenter route">⟳</Button>
+            <CardHeader className="py-2 px-4 border-b bg-background/50">
+              <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-2">
+                <Route className="h-4 w-4 text-primary" />
+                Route Map
+              </CardTitle>
+            </CardHeader>
+            <div className="absolute right-3 top-12 z-20">
+              <div className="rounded-xl bg-background/90 backdrop-blur-sm border border-border/60 shadow-md p-1.5 flex flex-col gap-1">
+                <Button
+                  variant={showFuelOverlay ? "default" : "ghost"}
+                  size="sm"
+                  className="h-8 justify-start gap-2 px-2.5 text-xs font-medium w-full"
+                  onClick={() => setShowFuelOverlay(prev => !prev)}
+                >
+                  <Fuel className="h-3.5 w-3.5 shrink-0" />
+                  Fuel
+                </Button>
+                <Button
+                  variant={showOvernightOverlay ? "default" : "ghost"}
+                  size="sm"
+                  className="h-8 justify-start gap-2 px-2.5 text-xs font-medium w-full"
+                  onClick={() => setShowOvernightOverlay(prev => !prev)}
+                >
+                  <Moon className="h-3.5 w-3.5 shrink-0" />
+                  Overnight
+                </Button>
+                <Button
+                  variant={showRemoteOverlay ? "default" : "ghost"}
+                  size="sm"
+                  className="h-8 justify-start gap-2 px-2.5 text-xs font-medium w-full"
+                  onClick={() => setShowRemoteOverlay(prev => !prev)}
+                >
+                  <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                  Remote
+                </Button>
+                <div className="h-px bg-border/40 mx-1" />
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 justify-start gap-2 px-2.5 text-xs font-medium w-full"
+                  onClick={() => map?.panTo(mapCenter)}
+                >
+                  <Locate className="h-3.5 w-3.5 shrink-0" />
+                  Recenter
+                </Button>
+              </div>
+            </div>
+            <div className="absolute left-3 bottom-3 z-20">
+              <div className="rounded-xl bg-background/90 backdrop-blur-sm border border-border/60 shadow-md px-3 py-2 text-xs space-y-1.5">
+                <div className="flex items-center gap-2">
+                  <span className="inline-block h-3 w-3 rounded-full bg-[#22c55e] border-2 border-white" />
+                  <span className="text-muted-foreground">Verified stop</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="inline-block h-3 w-3 rounded-full bg-[#ef4444] border-2 border-white" />
+                  <span className="text-muted-foreground">Custom stop</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="inline-block h-3 w-3 rounded-full bg-[#ea580c] border-2 border-white" />
+                  <span className="text-muted-foreground">Fuel station</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="inline-flex h-4 w-7 items-center justify-center rounded bg-gray-700 text-[9px] font-bold text-white">D1</span>
+                  <span className="text-muted-foreground">Overnight</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-amber-500 text-[10px] font-bold text-white">!</span>
+                  <span className="text-muted-foreground">Remote</span>
+                </div>
+              </div>
             </div>
             <CardContent className="p-0">
-              <div className="h-100 bg-muted/20">
+              <div className="h-130 bg-muted/20">
                 <LoadScript
                   googleMapsApiKey={process.env.NEXT_PUBLIC_GMAPS_API_KEY!}
                   libraries={googleMapsLibraries}
@@ -3166,8 +3242,9 @@ export default function PlannerDetailPage() {
                         options={{
                           suppressMarkers: true,
                           polylineOptions: {
-                            strokeColor: "#2563eb",
-                            strokeWeight: 5,
+                            strokeColor: "#05b8b6",
+                            strokeWeight: 6,
+                            strokeOpacity: 0.85,
                           },
                         }}
                       />
@@ -3270,6 +3347,11 @@ export default function PlannerDetailPage() {
                       const labelText = distKm !== null
                         ? `${distKm}km`
                         : `F${index + 1}`
+                      const stationKey = station.id || `${station.name}-${station.lat}-${station.lng}`
+                      const isSelected = Object.values(selectedSegmentFuelIds).includes(stationKey)
+                      const markerSize = isSelected ? 24 : 20
+                      const fillColor = isSelected ? "#05b8b6" : "#ea580c"
+                      const strokeColor = isSelected ? "#0ea5a3" : "#c2410c"
                       return (
                         <Marker
                           key={station.id}
@@ -3280,8 +3362,8 @@ export default function PlannerDetailPage() {
                             fontWeight: "bold",
                             fontSize: distKm !== null ? "9px" : "10px",
                           }}
-icon={{
-                            url: "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><circle cx="10" cy="10" r="8" fill="#ea580c" stroke="#c2410c" strokeWidth="2"/></svg>'),
+                          icon={{
+                            url: "data:image/svg+xml," + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${markerSize}" height="${markerSize}"><circle cx="${markerSize/2}" cy="${markerSize/2}" r="${markerSize/2 - 2}" fill="${fillColor}" stroke="${strokeColor}" strokeWidth="2"/></svg>`),
                           }}
                           title={`${station.name}${distKm !== null ? ` — ${distKm} km from start` : ""}`}
                           onMouseOver={() => setHoveredPin({ lat: station.lat, lng: station.lng, label: `⛽ ${station.name}${distKm !== null ? ` (${distKm} km)` : ""}` })}
@@ -3323,33 +3405,18 @@ icon={{
                         }}
                         onCloseClick={() => setHoveredPin(null)}
                       >
-                        <div style={{ 
-                          padding: "6px 10px", 
-                          minWidth: "160px",
-                          background: "#fff",
-                          borderRadius: "4px",
-                          boxShadow: "0 1px 4px rgba(0,0,0,0.2)"
-                        }}>
-                          <div style={{ fontWeight: 600, marginBottom: "3px", fontSize: "13px", color: "#1f2937" }}>
+                        <div className="p-2 min-w-40 max-w-55">
+                          <div className="font-semibold text-[13px] text-foreground leading-tight mb-1">
                             {hoveredPin.label}
                           </div>
                           {hoveredPin.sourceType && (
-                            <div style={{ 
-                              fontSize: "11px", 
-                              color: hoveredPin.sourceType === "verified" ? "#16a34a" : "#dc2626",
-                              fontWeight: 600,
-                              marginBottom: "2px"
-                            }}>
+                            <div className={`text-[11px] font-semibold mb-1 ${hoveredPin.sourceType === "verified" ? "text-emerald-600" : "text-rose-600"}`}>
                               {hoveredPin.sourceType === "verified" ? "✓ Verified" : "⚠ Custom"}
                             </div>
                           )}
                           {hoveredPin.distanceFromRoute !== undefined && hoveredPin.distanceFromRoute !== null && hoveredPin.distanceFromRoute >= 0 && (
-                            <div style={{ 
-                              fontSize: "11px", 
-                              color: hoveredPin.distanceFromRoute > 5 ? "#dc2626" : "#16a34a",
-                              fontWeight: 500 
-                            }}>
-                              {hoveredPin.distanceFromRoute > 0 
+                            <div className={`text-[11px] font-medium ${hoveredPin.distanceFromRoute > 5 ? "text-rose-600" : "text-emerald-600"}`}>
+                              {hoveredPin.distanceFromRoute > 0
                                 ? `${Math.round(hoveredPin.distanceFromRoute)} km from route`
                                 : "On route"
                               }
@@ -3764,7 +3831,7 @@ icon={{
                                                 <Button
                                                   variant={isSelected ? "secondary" : "outline"}
                                                   size="sm"
-                                                  onClick={() => setSelectedSegmentFuelIds((prev) => ({ ...prev, [index]: fuelKey }))}
+                                                  onClick={() => handleChooseFuel(index, fuelKey)}
                                                 >
                                                   {isSelected ? "Selected" : "Choose fuel"}
                                                 </Button>
