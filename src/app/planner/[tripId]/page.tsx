@@ -9,6 +9,7 @@ import { CSS } from "@dnd-kit/utilities"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
+import { Skeleton } from "@/components/ui/skeleton"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { toast } from "sonner"
 import type { Stop } from "@/lib/types"
@@ -4041,6 +4042,17 @@ export default function PlannerDetailPage() {
                   </div>
                 </div>
               </CardHeader>
+              {!itineraryVersionsLoaded ? (
+                <CardContent className="space-y-4">
+                  <div className="flex items-center justify-end gap-2">
+                    <Skeleton className="h-8 w-16" />
+                    <Skeleton className="h-8 w-28" />
+                  </div>
+                  <Skeleton className="h-40 w-full rounded-2xl" />
+                  <Skeleton className="h-32 w-full rounded-2xl" />
+                  <Skeleton className="h-32 w-full rounded-2xl" />
+                </CardContent>
+              ) : (
               <CardContent className="space-y-4">
                 {/* Version history panel */}
                 {showVersionHistory && Array.isArray(itineraryVersions) && itineraryVersions.length > 0 && (
@@ -4198,6 +4210,7 @@ export default function PlannerDetailPage() {
                   </div>
                 )}
               </CardContent>
+              )}
             </Card>
           </div>
 
