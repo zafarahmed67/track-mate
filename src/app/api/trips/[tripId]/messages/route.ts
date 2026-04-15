@@ -128,6 +128,29 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     const changeType = classifyMessage(message_text.trim())
     const preferenceHint = changeType === "major" ? extractPreferenceHint(message_text) : null
 
+    // For major changes, persist the detected preference shift to the trip record
+    // so that next time the user rebuilds the plan the new preference is already applied
+    if (changeType === "major") {
+      const preferenceUpdates: Record<string, unknown> = {}
+
+      if (/gravel|dirt.*road/i.test(message_text)) preferenceUpdates.avoid_gravel_roads = true
+      if (/sealed.*road|no.*gravel|no.*dirt/i.test(message_text)) preferenceUpdates.avoid_gravel_roads = false
+      if (/pet.?friend/i.test(message_text)) preferenceUpdates.pet_friendly_required = true
+      if (/no pets?/i.test(message_text)) preferenceUpdates.pet_friendly_required = false
+      if (/free.?camp/i.test(message_text)) preferenceUpdates.stay_preference = "free-camps"
+      if (/caravan park/i.test(message_text)) preferenceUpdates.stay_preference = "caravan-parks"
+      if (/powered site/i.test(message_text)) preferenceUpdates.stay_preference = "caravan-parks"
+      if (/free.*budget|budget.*free/i.test(message_text)) preferenceUpdates.budget_preference = "free"
+
+      if (Object.keys(preferenceUpdates).length > 0) {
+        await supabaseAdmin
+          .from("trips")
+          .update({ ...preferenceUpdates, updated_at: new Date().toISOString() })
+          .eq("id", tripId)
+          .eq("user_id", userId)
+      }
+    }
+
     // Save user message with classification metadata
     await supabaseAdmin.from("trip_messages").insert({
       trip_id: tripId,

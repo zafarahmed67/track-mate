@@ -74,12 +74,14 @@ type InputDay = {
 }
 
 function buildFallbackNarrative(params: {
-  trip: { title?: string; trip_duration_days?: number }
+  trip: { title?: string; trip_duration_days?: number; rig_type?: string | null; rig_length_m?: number | null; avoid_gravel_roads?: boolean }
   totalDistanceKm?: number
   fuelSummary?: { fuelCriticalDays?: number; remoteDays?: number; planningMode?: string }
   days: InputDay[]
+  travelMonth?: string | null
+  roadConditionNote?: string | null
 }) {
-  const { trip, totalDistanceKm, fuelSummary, days } = params
+  const { trip, totalDistanceKm, fuelSummary, days, travelMonth, roadConditionNote } = params
   const roundedDistance = Math.round(Number(totalDistanceKm || 0))
 
   const outDays = days.map((day) => {
@@ -128,7 +130,13 @@ function buildFallbackNarrative(params: {
       remoteWarnings: (fuelSummary?.remoteDays || 0) > 0 || fuelSummary?.planningMode === "degraded-valid"
         ? "Remote sections may have limited services. Confirm overnight access and fuel before each leg."
         : null,
-      roadConditions: null,
+      roadConditions: roadConditionNote ?? null,
+      rigSuitability: trip?.rig_type
+        ? `This route was planned for a ${trip.rig_type}${trip.rig_length_m ? ` (${trip.rig_length_m}m)` : ""}. ${trip.avoid_gravel_roads ? "Gravel roads are avoided in stop selection." : "Verify access conditions at each stop before arrival."}`
+        : null,
+      seasonalNotes: travelMonth
+        ? `Travelling in ${travelMonth}: check seasonal road conditions and campsite availability for this time of year.`
+        : null,
     },
     generatedAt: new Date().toISOString(),
   }
@@ -138,7 +146,7 @@ const SYSTEM_PROMPT = `You are a travel writing assistant for an Australian cara
 Given structured trip data, produce a JSON object with this EXACT shape — no extra keys, no missing keys:
 
 {
-  "overview": "<1-2 sentences summarising the full trip>",
+  "overview": "<1-2 sentences summarising the full trip, mentioning rig type if provided>",
   "days": [
     {
       "dayNumber": 1,
@@ -157,7 +165,9 @@ Given structured trip data, produce a JSON object with this EXACT shape — no e
   "tripNotes": {
     "fuelGuidance": "<overall fuel planning note if fuelCriticalDays>0 or remoteDays>0, otherwise null>",
     "remoteWarnings": "<remote stretch warning if remoteDays>0 or planningMode=degraded-valid, otherwise null>",
-    "roadConditions": "<road condition note if any day has fuelWarning mentioning dirt/gravel/unsealed, otherwise null>"
+    "roadConditions": "<road condition note if roadConditionNote is provided OR any day has fuelWarning mentioning dirt/gravel/unsealed, otherwise null>",
+    "rigSuitability": "<rig suitability note if rig_type/rig_length_m is provided — comment on route suitability for that rig, otherwise null>",
+    "seasonalNotes": "<seasonal tip if travelMonth is provided — note best/worst conditions for that month on this route, otherwise null>"
   },
   "generatedAt": "<ISO timestamp>"
 }
@@ -167,12 +177,14 @@ STRICT RULES — violation will break the app:
 2. FUEL: populate fuelNote and tripNotes.fuelGuidance from the fuelCritical / gapFromLastFuelKm / gapToNextFuelKm / fuelWarning fields provided. Do not invent fuel information.
 3. GAPS: if allowedStopNames is empty for a day, set suggestedStay to null and write a gapNote stating no overnight stop is available on that stretch.
 4. VERIFIED CONTEXT: if verifiedStops is empty but allowedStopNames has values, do NOT claim the leg has no stop options.
-5. OUTPUT: respond with ONLY the raw JSON object. No markdown fences, no explanation, no trailing text.`
+5. OUTPUT: respond with ONLY the raw JSON object. No markdown fences, no explanation, no trailing text.
+6. RIG: if trip.rig_type is provided, note any clearance or length limitations relevant to this route. If avoid_gravel_roads is true, confirm the planned route avoids unsealed roads.
+7. SEASONAL: if travelMonth is provided, add a brief note about seasonal conditions for that month on this corridor (e.g. wet season flooding risk, winter cold, summer heat).`
 
 export async function POST(req: NextRequest, { params }: RouteParams) {
   try {
     const { tripId } = await params
-    const { userId, trip, corridor, totalDistanceKm, fuelSummary, days } = await req.json()
+    const { userId, trip, corridor, totalDistanceKm, fuelSummary, days, travelMonth, roadConditionNote } = await req.json()
 
     if (!tripId || !userId || !days?.length) {
       return NextResponse.json(
@@ -193,10 +205,10 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         {
           role: "user",
           content: `Generate narrative for:\n\n${JSON.stringify(
-            { trip, corridor, totalDistanceKm, fuelSummary, days },
+            { trip, corridor, totalDistanceKm, fuelSummary, days, travelMonth, roadConditionNote },
             null,
             2
-          )}\n\nRespond with ONLY the JSON object. Remember: suggestedStay.name must be an exact value from each day's allowedStopNames array.`,
+          )}\n\nRespond with ONLY the JSON object. Remember: suggestedStay.name must be an exact value from each day's allowedStopNames array. Populate tripNotes.rigSuitability if trip.rig_type is provided. Populate tripNotes.seasonalNotes if travelMonth is provided. Populate tripNotes.roadConditions from roadConditionNote if provided.`,
         },
       ],
     })
@@ -216,7 +228,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       }
     } catch {
       console.error("OpenAI returned non-JSON:", raw.slice(0, 500))
-      narrative = buildFallbackNarrative({ trip, totalDistanceKm, fuelSummary, days })
+      narrative = buildFallbackNarrative({ trip, totalDistanceKm, fuelSummary, days, travelMonth, roadConditionNote })
       console.warn("[narrative] Using deterministic fallback narrative", {
         finishReason,
         dayCount: days.length,
