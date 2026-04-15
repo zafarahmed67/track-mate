@@ -611,6 +611,10 @@ export async function POST(req: NextRequest) {
     // from being the anchor again on another day, but can still appear as options.
     const anchoredStopIds = new Set<string>()
 
+    // Tracks all stops already assigned to a segment's options[] — ensures stops
+    // don't bleed into adjacent day segments as duplicated options.
+    const assignedOptionIds = new Set<string>()
+
     const totalDistanceKm = drivingInfo?.totalDistanceKm ?? directDistance
     const suggestedDays = Math.max(1, Math.round(totalDistanceKm / config.kmPerDay))
     const planningDays = requestedTripDays && requestedTripDays > 0
@@ -736,12 +740,11 @@ export async function POST(req: NextRequest) {
         (s) => s.distance_from_start_km >= (startKm - 75) && s.distance_from_start_km <= (endKm + 75)
       )
 
-      // Only exclude stops that have already been anchored as a primary overnight pick.
-      // This allows a stop to still appear as an *option* for nearby segments even after
-      // being anchored, which keeps the option count healthy in sparse regions.
-      const inRangeUnused = inRange.filter((s) => !anchoredStopIds.has(s.id))
+      // Exclude stops already anchored as primary overnight picks AND stops already
+      // assigned to a previous segment's options[] to prevent cross-day bleeding.
+      const inRangeUnused = inRange.filter((s) => !anchoredStopIds.has(s.id) && !assignedOptionIds.has(s.id))
 
-      const expandedUnused = expandedInRange.filter((s) => !anchoredStopIds.has(s.id))
+      const expandedUnused = expandedInRange.filter((s) => !anchoredStopIds.has(s.id) && !assignedOptionIds.has(s.id))
       const isForwardEnough = (s: RouteStopCandidate) => s.distance_from_start_km >= (startKm - 20)
 
       const canIncludeAsOther = (s: RouteStopCandidate) => s.is_verified || includeFreeCamps !== false || s.cost_band !== "Free"
@@ -929,6 +932,11 @@ export async function POST(req: NextRequest) {
 
       // Recommended option is the one with is_recommended = true
       const recommendedOption = options.find(o => o.is_recommended) || null
+
+      // Register all options[] IDs so they are excluded from subsequent segment pools.
+      for (const opt of options) {
+        assignedOptionIds.add(opt.id)
+      }
 
       segments.push({
         startKm,

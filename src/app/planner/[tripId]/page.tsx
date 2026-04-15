@@ -1739,7 +1739,13 @@ export default function PlannerDetailPage() {
     // Seed usedIds with excludedOptionIds so excluded stops are never used as waypoints.
     const usedIds = new Set<string>(excludedOptionIds)
     const selectedStops: RouteStopOption[] = daySegments.map((seg, i) => {
-      const allOptions = [...seg.verifiedStops, ...seg.otherStops]
+      // Skip arrival day — no waypoint needed for the short final leg
+      if (i === arrivalDayIndex) return null
+
+      // Use segment.options[] first (pre-scoped by API, no cross-day bleeding)
+      const allOptions = seg.options && seg.options.length > 0
+        ? seg.options
+        : [...seg.verifiedStops, ...seg.otherStops]
       // Filter out already-used AND explicitly excluded stops
       const visible = allOptions.filter((o) => !usedIds.has(o.id) && !excludedOptionIds.has(o.id))
       const explicitId = selectedSegmentOptionIds[i]
@@ -1970,7 +1976,8 @@ export default function PlannerDetailPage() {
     if (optionsWithDistance.length === 0) return options
 
     const midpoint = (segment.startKm + segment.endKm) / 2
-    const paddingKm = 80
+    // Trust the API's stop scoping — no extra frontend padding to prevent cross-day bleeding.
+    const paddingKm = 0
     const minKm = Math.max(0, segment.startKm - paddingKm)
     const maxKm = segment.endKm + paddingKm
 
@@ -1990,11 +1997,29 @@ export default function PlannerDetailPage() {
     )
   }, [])
 
+  // Index of the last segment if it is a short "arrival day" (< 40 km or < 20% avg).
+  // Declared before resolvedDaySelections so it can be used as a stable memo dep.
+  const arrivalDayIndex = useMemo(() => {
+    if (daySegments.length === 0) return -1
+    const lastIdx = daySegments.length - 1
+    const seg = daySegments[lastIdx]
+    const legKm = seg.endKm - seg.startKm
+    const totalKm = daySegments.reduce((sum, s) => sum + Math.max(0, s.endKm - s.startKm), 0)
+    const avgKm = daySegments.length > 0 ? totalKm / daySegments.length : 200
+    return legKm < 40 || legKm < avgKm * 0.20 ? lastIdx : -1
+  }, [daySegments])
+
   // Pre-compute each day's selection sequentially — single source of truth for dedup
   const resolvedDaySelections = useMemo(() => {
     const usedIds = new Set<string>(excludedOptionIds)
     return daySegments.map((seg, i) => {
-      const allOptions = filterStopsBySegmentDistance(seg, [...seg.verifiedStops, ...seg.otherStops])
+      // Arrival day: last segment that is too short to need an overnight stop
+      if (i === arrivalDayIndex) return null
+
+      // Prefer segment.options[] from API (already scoped per segment, no bleed)
+      const allOptions = seg.options && seg.options.length > 0
+        ? seg.options
+        : filterStopsBySegmentDistance(seg, [...seg.verifiedStops, ...seg.otherStops])
       const visible = allOptions.filter((o) => !excludedOptionIds.has(o.id))
       const explicitId = selectedSegmentOptionIds[i]
       if (explicitId) {
@@ -2010,7 +2035,7 @@ export default function PlannerDetailPage() {
       if (pick) usedIds.add(pick.id)
       return pick
     })
-  }, [daySegments, selectedSegmentOptionIds, excludedOptionIds, filterStopsBySegmentDistance])
+  }, [daySegments, arrivalDayIndex, selectedSegmentOptionIds, excludedOptionIds, filterStopsBySegmentDistance])
 
   const getSelectedOption = (segment: RouteSegment, segmentIndex?: number) => {
     if (segmentIndex !== undefined) {
@@ -2038,6 +2063,8 @@ export default function PlannerDetailPage() {
     const days = computeEstimatedDays()
     return totalKm && days ? Math.round(totalKm / days) : 0
   }
+
+  const isArrivalDaySegment = (segIndex: number) => segIndex === arrivalDayIndex
 
   const fuelCriticalCount = () => {
     return daySegments.filter((segment) => segment.fuelCritical).length
@@ -2759,9 +2786,11 @@ export default function PlannerDetailPage() {
     if (!daySegments || daySegments.length === 0) return []
     return daySegments
       .map((segment, index) => {
-        // Use recommendedOption from API if available, otherwise fall back to first selected
+        // Skip arrival day — it has no overnight stop
+        if (index === arrivalDayIndex) return null
+        // Use recommendedOption from API if available, otherwise fall back to resolved selection
         const seg = segment as RouteSegment | undefined
-        const recommended = seg?.recommendedOption 
+        const recommended = seg?.recommendedOption
           || (index < resolvedDaySelections.length ? resolvedDaySelections[index] : null)
           || getSelectedOption(segment, index)
         if (!recommended) return null
@@ -2784,7 +2813,7 @@ export default function PlannerDetailPage() {
         }
       })
       .filter((stop): stop is NonNullable<typeof stop> => stop !== null)
-  }, [daySegments, getSelectedOption])
+  }, [daySegments, arrivalDayIndex, resolvedDaySelections, getSelectedOption])
 
   const mapNumberedStopsCount = useMemo(() => {
     const countRenderable = (latRaw: string | number | undefined, lngRaw: string | number | undefined) => {
@@ -3616,6 +3645,12 @@ icon={{
                         <div className="grid gap-4 lg:grid-cols-2">
 
                           {/* ── Day Stop Selector ── */}
+                          {isArrivalDaySegment(index) ? (
+                            <div className="flex items-center gap-2 rounded-2xl border border-dashed border-emerald-500/40 bg-emerald-50/10 p-4 text-sm text-muted-foreground">
+                              <MapPin className="h-4 w-4 shrink-0 text-emerald-600" />
+                              <span><span className="font-medium text-emerald-700 dark:text-emerald-400">Arrival day</span> — you reach your destination on this short leg. No overnight stop needed.</span>
+                            </div>
+                          ) : (
                           <div className="rounded-3xl bg-muted/5 p-4 space-y-4">
                             {/* Header */}
                             <div>
@@ -3808,6 +3843,7 @@ icon={{
                               )}
                             </div>
                           </div>
+                          )}
                           <div className="rounded-3xl bg-muted/5 p-4">
                             <div className="text-sm text-muted-foreground mb-3">Fuel planning</div>
                             {(() => {
