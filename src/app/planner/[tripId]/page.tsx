@@ -2858,17 +2858,6 @@ export default function PlannerDetailPage() {
       .filter((stop): stop is NonNullable<typeof stop> => stop !== null)
   }, [daySegments, arrivalDayIndex, resolvedDaySelections, getSelectedOption])
 
-  const mapNumberedStopsCount = useMemo(() => {
-    const countRenderable = (latRaw: string | number | undefined, lngRaw: string | number | undefined) => {
-      const lat = typeof latRaw === "number" ? latRaw : parseFloat(String(latRaw ?? ""))
-      const lng = typeof lngRaw === "number" ? lngRaw : parseFloat(String(lngRaw ?? ""))
-      if (isNaN(lat) || isNaN(lng)) return false
-      return true
-    }
-
-    return recommendedMapStops
-      .filter((stop) => countRenderable(stop.latitude, stop.longitude)).length
-  }, [recommendedMapStops])
 
   useEffect(() => {
     if (loading) return
@@ -3399,9 +3388,6 @@ export default function PlannerDetailPage() {
               </div>
             </CardContent>
           </Card>
-          <div className="mt-2 text-sm text-muted-foreground">
-            Map markers: A + {mapNumberedStopsCount} numbered stops + B = {mapNumberedStopsCount + 2} total.
-          </div>
         </div>
 
 

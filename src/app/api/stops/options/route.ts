@@ -319,7 +319,7 @@ function buildAdaptiveBoundaries(
 
 function rankStops(
   stops: RouteStopCandidate[],
-  segmentMidKm: number,
+  targetKm: number,
   preferredCount: number,
   preferVerified?: boolean
 ) {
@@ -328,8 +328,8 @@ function rankStops(
     .sort((a, b) => {
       const aVerifiedBonus = preferVerified && a.is_verified ? -50 : 0
       const bVerifiedBonus = preferVerified && b.is_verified ? -50 : 0
-      const aScore = Math.abs(a.distance_from_start_km - segmentMidKm) + (a.stay_type ? 0 : 25) + aVerifiedBonus
-      const bScore = Math.abs(b.distance_from_start_km - segmentMidKm) + (b.stay_type ? 0 : 25) + bVerifiedBonus
+      const aScore = Math.abs(a.distance_from_start_km - targetKm) + (a.stay_type ? 0 : 25) + aVerifiedBonus
+      const bScore = Math.abs(b.distance_from_start_km - targetKm) + (b.stay_type ? 0 : 25) + bVerifiedBonus
       return aScore - bScore
     })
     .slice(0, preferredCount)
@@ -751,20 +751,20 @@ export async function POST(req: NextRequest) {
 
       const nearestUnusedBySegment = rankStops(
         expandedUnused.filter((s) => canIncludeAsOther(s)),
-        midKm,
+        endKm,
         14,
         preferVerified
       )
 
       let verifiedInSegment = rankStops(
         inRangeUnused.filter((s) => s.is_verified),
-        midKm,
+        endKm,
         6,
         preferVerified
       )
       let otherInSegment = rankStops(
         inRangeUnused.filter((s) => !s.is_verified && canIncludeAsOther(s)),
-        midKm,
+        endKm,
         8
       )
 
@@ -791,7 +791,7 @@ export async function POST(req: NextRequest) {
       if (verifiedInSegment.length < 1) {
         const fallbackVerified = rankStops(
           expandedUnused.filter((s) => s.is_verified),
-          midKm,
+          endKm,
           12,
           preferVerified
         ).filter((s) => !verifiedInSegment.some((v) => v.id === s.id))
@@ -806,7 +806,7 @@ export async function POST(req: NextRequest) {
       if (totalCandidates() < MIN_STOPS_PER_SEGMENT) {
         const nearestGlobalUnused = rankStops(
           scaledStopsWithDistance.filter((s) => !anchoredStopIds.has(s.id) && canIncludeAsOther(s) && isForwardEnough(s)),
-          midKm,
+          endKm,
           20,
           preferVerified
         )
@@ -817,7 +817,7 @@ export async function POST(req: NextRequest) {
         // Prefer stops not yet used as overnight anchors to avoid day-to-day repeats
         const nearestGlobal = rankStops(
           scaledStopsWithDistance.filter((s) => canIncludeAsOther(s) && !anchoredStopIds.has(s.id) && isForwardEnough(s)),
-          midKm,
+          endKm,
           20,
           preferVerified
         )
@@ -916,16 +916,21 @@ export async function POST(req: NextRequest) {
       // 2 DB + 1 Google → DB one marked recommended
       // 0 DB → all 3 from Google, pick 1 as recommended
       const allSegmentStops: RouteStopCandidate[] = [...verifiedInSegment, ...otherInSegment]
-      
-      // Sort by lateral distance (closest to route first)
-      const sortedByLateral = [...allSegmentStops].sort((a, b) => {
+
+      // Sort by blended score: lateral distance (route proximity) + proximity to segment end.
+      // Coefficient 0.1 means a stop 100 km earlier needs to be 10 km closer to the route to win.
+      // This keeps stops on/near the route while nudging recommendations toward the day's endpoint
+      // for more even daily distances.
+      const sortedByScore = [...allSegmentStops].sort((a, b) => {
         const aLateral = a.lateral_km ?? 0
         const bLateral = b.lateral_km ?? 0
-        return aLateral - bLateral
+        const aScore = aLateral + Math.abs(a.distance_from_start_km - endKm) * 0.1
+        const bScore = bLateral + Math.abs(b.distance_from_start_km - endKm) * 0.1
+        return aScore - bScore
       })
 
       // Take top 3 options, mark first DB stop as recommended (not Google)
-      const options: RouteStopCandidate[] = sortedByLateral.slice(0, 3).map((stop) => {
+      const options: RouteStopCandidate[] = sortedByScore.slice(0, 3).map((stop) => {
         const isDbStop = stop.is_verified
         return {
           ...stop,
