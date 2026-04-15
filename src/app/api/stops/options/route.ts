@@ -1271,7 +1271,9 @@ export async function POST(req: NextRequest) {
 
           segment.fuelSuggestions = rankedFuel.length > 0 ? rankedFuel : fallbackFuel
           segment.primaryFuelSuggestion = segment.fuelSuggestions[0]
-          segment.fuelCritical = segment.isRemote || segmentDistance >= fuelSafeKm || segment.fuelSuggestions.length === 0
+          segment.fuelCritical = (segment.isRemote && segmentDistance >= fuelSafeKm * 0.6)
+              || segmentDistance >= fuelSafeKm
+              || segment.fuelSuggestions.length === 0
         }
       }
 
