@@ -319,10 +319,10 @@ export default function NewPlannerPage() {
       rigType: rigType || undefined,
       rigLengthM: rigLengthM ? parseFloat(rigLengthM) : undefined,
       petFriendlyRequired: petFriendly,
-      stayPreference: stayPreference || undefined,
+      stayPreference: stayPreference && stayPreference !== "none" ? stayPreference : undefined,
       avoidGravelRoads: avoidGravel,
-      budgetPreference: budgetPreference || undefined,
-      seasonalPreference: seasonalPreference || undefined,
+      budgetPreference: budgetPreference && budgetPreference !== "none" ? budgetPreference : undefined,
+      seasonalPreference: seasonalPreference && seasonalPreference !== "none" ? seasonalPreference : undefined,
       notes: notes || undefined,
       endDate: endDate || undefined,
       status: "planned",
@@ -571,7 +571,7 @@ export default function NewPlannerPage() {
                           <SelectValue placeholder="No preference" />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="">No preference</SelectItem>
+                          <SelectItem value="none">No preference</SelectItem>
                           <SelectItem value="summer">Summer (Dec–Feb)</SelectItem>
                           <SelectItem value="autumn">Autumn (Mar–May)</SelectItem>
                           <SelectItem value="winter">Winter (Jun–Aug)</SelectItem>
