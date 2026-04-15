@@ -2788,11 +2788,10 @@ export default function PlannerDetailPage() {
       .map((segment, index) => {
         // Skip arrival day — it has no overnight stop
         if (index === arrivalDayIndex) return null
-        // Use recommendedOption from API if available, otherwise fall back to resolved selection
+        // Prioritise user's explicit selection; fall back to API recommended
+        const resolved = index < resolvedDaySelections.length ? resolvedDaySelections[index] : null
         const seg = segment as RouteSegment | undefined
-        const recommended = seg?.recommendedOption
-          || (index < resolvedDaySelections.length ? resolvedDaySelections[index] : null)
-          || getSelectedOption(segment, index)
+        const recommended = resolved || seg?.recommendedOption || getSelectedOption(segment, index)
         if (!recommended) return null
         const lat = parseFloat(String(recommended.latitude ?? ""))
         const lng = parseFloat(String(recommended.longitude ?? ""))
@@ -3418,46 +3417,18 @@ icon={{
                 const fuelInfo = getFuelInfoForSegment(segment, index)
                 const selectedOption = getSelectedOption(segment, index)
                 const previousSelectedOption = index > 0 ? getSelectedOption(daySegments[index - 1], index - 1) : null
-                const nextSelectedOption = index < daySegments.length - 1 ? getSelectedOption(daySegments[index + 1], index + 1) : null
                 const dayStartName = index === 0
                   ? trip.start_location_text
                   : (previousSelectedOption?.location_name || getRegionLabel(daySegments[index - 1], index - 1))
-                const dayEndName = index === daySegments.length - 1
-                  ? trip.destination_text
-                  : (selectedOption?.location_name || nextSelectedOption?.location_name || getRegionLabel(segment, index))
                 const expanded = expandedSegments.has(index)
                 const active = activeSegmentIndex === index
 
                 const dayRouteData = unifiedDayRouteData[index]
                 const allStops = dayRouteData?.allStops ?? []
-                const routeStops = dayRouteData?.routeStops ?? []
-                const customStopsForDay = dayRouteData?.customStopsForDay ?? []
-                const visibleCustomStopsForDay = customStopsForDay
                 const dayShownStopCount = dayRouteData?.dayShownStopCount ?? 0
-                const hiddenCustomStopsCount = 0
-                const routeStopIds = dayRouteData?.routeStopIds ?? new Set<string>()
-                const endpointStopIds = dayRouteData?.endpointStopIds ?? new Set<string>()
-                const displayedRouteStopIds = new Set<string>([
-                  ...routeStops.map((stop) => normalizeStopId(stop.id)),
-                  ...visibleCustomStopsForDay.map((stop) => normalizeStopId(stop.stop_id || stop.id)),
-                  normalizeStopId(selectedOption?.id),
-                ].filter(Boolean))
-                const displayedRouteStopNames = new Set<string>([
-                  ...routeStops.map((stop) => stop.location_name.toLowerCase().trim()),
-                  ...visibleCustomStopsForDay.map((stop) => stop.location_name.toLowerCase().trim()),
-                  selectedOption?.location_name?.toLowerCase().trim(),
-                ].filter(Boolean) as string[])
-                const alternateStops = allStops.filter((stop) => {
-                  const normalizedId = normalizeStopId(stop.id)
-                  const normalizedName = stop.location_name.toLowerCase().trim()
-                  return !routeStopIds.has(normalizedId)
-                    && !endpointStopIds.has(normalizedId)
-                    && !displayedRouteStopIds.has(normalizedId)
-                    && !displayedRouteStopNames.has(normalizedName)
-                })
                 const segmentOptionsFromApi = segment.options && segment.options.length > 0
                   ? segment.options
-                  : alternateStops
+                  : allStops.slice(0, 3)
                 const optionsToShow = expandedSegmentOptions.has(index)
                   ? segmentOptionsFromApi
                   : segmentOptionsFromApi.slice(0, 3)
@@ -3471,8 +3442,6 @@ icon={{
                   .filter((place) => !knownNames.has(place.name.toLowerCase()))
                   .slice(0, 5)
                 const selectedFuelSuggestion = getSelectedFuelSuggestion(segment, index)
-                const draggableRouteStops = routeStops.filter((stop) => stop.is_verified)
-                const staticRouteStops = routeStops.filter((stop) => !stop.is_verified)
 
                 return (
                   <Card key={`day-card-${index}`} className={active ? "border-primary shadow-lg" : "border"}>
@@ -3517,127 +3486,6 @@ icon={{
                               {index === daySegments.length - 1 && remainingAfterThisDayKm > 0 && (
                                 <p><span className="font-medium">Remaining to destination:</span> {formatDistance(remainingAfterThisDayKm)}</p>
                               )}
-                            </div>
-                          </div>
-                        </div>
-
-                        <div>
-                          <h3 className="text-sm font-semibold mb-4">Route</h3>
-                          <div className="relative">
-                            <div className="absolute left-5 top-0 bottom-0 w-px bg-border" />
-
-                            <div className="space-y-4">
-                              <div className="flex items-start gap-4">
-                                <div className="relative z-10 flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-green-500 text-white">
-                                  <span className="text-sm font-bold">A</span>
-                                </div>
-                                <div className="flex-1 rounded-2xl bg-background p-3 border border-muted/30">
-                                  <div className="font-medium text-sm">
-                                    {dayStartName}
-                                  </div>
-                                  <div className="text-xs text-muted-foreground">Start point</div>
-                                </div>
-                              </div>
-
-                              {routeStops.length > 0 && (
-                                <div className="space-y-4">
-                                  {staticRouteStops.map((stop) => (
-                                    <StaticRouteStopItem
-                                      key={`fixed-stop-${stop.id}`}
-                                      stop={stop}
-                                      onRemove={() => handleRemoveStopFromOptions(stop.id)}
-                                    />
-                                  ))}
-
-                                  {draggableRouteStops.length > 0 && (
-                                    <DndContext
-                                      sensors={dragSensors}
-                                      collisionDetection={closestCenter}
-                                      onDragEnd={(event) => {
-                                        void handleRouteStopDragEnd(index, draggableRouteStops, event)
-                                      }}
-                                    >
-                                      <SortableContext items={draggableRouteStops.map((stop) => stop.id)} strategy={verticalListSortingStrategy}>
-                                        <div className="space-y-4">
-                                          {draggableRouteStops.map((stop) => (
-                                            <SortableRouteStopItem
-                                              key={`stop-${stop.id}`}
-                                              stop={stop}
-                                              onRemove={() => handleRemoveStopFromOptions(stop.id)}
-                                            />
-                                          ))}
-                                        </div>
-                                      </SortableContext>
-                                    </DndContext>
-                                  )}
-                                </div>
-                              )}
-
-                              {routeStops.length === 0 && customStopsForDay.length === 0 && (
-                                selectedOption ? (
-                                  <div className="rounded-2xl border border-dashed border-muted/30 bg-muted/10 p-3 text-xs text-muted-foreground">
-                                    Overnight anchor is set for this leg at point B. Add additional alternatives from Options if needed.
-                                  </div>
-                                ) : segment.verifiedStops.length === 0 ? (
-                                  <div className="rounded-2xl border border-dashed border-amber-400/40 bg-amber-50/5 p-3 text-xs text-amber-700 dark:text-amber-400">
-                                    No AAO verified stop on this stretch. This leg has no database-verified overnight options — check nearby alternatives below or add a custom stop.
-                                  </div>
-                                ) : (
-                                  <div className="rounded-2xl border border-dashed border-muted/30 bg-muted/10 p-3 text-xs text-muted-foreground">
-                                    No saved route stops for this day yet. Pick from Options to add stops.
-                                  </div>
-                                )
-                              )}
-
-                              {customStopsForDay.length > 0 && (
-                                <div className="space-y-4">
-                                  {visibleCustomStopsForDay.map((stop) => (
-                                    <div key={`custom-stop-${stop.id}`} className="flex items-start gap-4">
-                                      <div className="relative z-10 flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-amber-500/20">
-                                        <MapPin className="h-5 w-5 text-amber-700" />
-                                      </div>
-                                      <div className="flex-1 rounded-2xl bg-background p-3 border border-muted/30">
-                                        <div className="flex items-center gap-2">
-                                          <span className="font-medium text-sm">{stop.location_name}</span>
-                                          <Badge variant="outline" className="text-xs">Custom</Badge>
-                                          {normalizeStopId(stop.stop_id || stop.id) === normalizeStopId(selectedOption?.id) && (
-                                            <Badge variant="secondary" className="text-xs">Selected</Badge>
-                                          )}
-                                        </div>
-                                        <div className="text-xs text-muted-foreground mt-1">
-                                          Added from nearby alternatives for Day {index + 1}
-                                        </div>
-                                        <div className="mt-2">
-                                          <Button
-                                            size="sm"
-                                            variant="ghost"
-                                            onClick={() => hideCustomStopFromDay(index, stop)}
-                                          >
-                                            Remove from this day
-                                          </Button>
-                                        </div>
-                                      </div>
-                                    </div>
-                                  ))}
-                                  {hiddenCustomStopsCount > 0 && (
-                                    <div className="rounded-2xl border border-dashed border-muted/30 bg-muted/10 p-3 text-xs text-muted-foreground">
-                                      +{hiddenCustomStopsCount} more custom alternatives hidden to keep this day route readable.
-                                    </div>
-                                  )}
-                                </div>
-                              )}
-
-                              <div className="flex items-start gap-4">
-                                <div className="relative z-10 flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-red-500 text-white">
-                                  <span className="text-sm font-bold">B</span>
-                                </div>
-                                <div className="flex-1 rounded-2xl bg-background p-3 border border-muted/30">
-                                  <div className="font-medium text-sm">
-                                    {dayEndName}
-                                  </div>
-                                  <div className="text-xs text-muted-foreground">End point</div>
-                                </div>
-                              </div>
                             </div>
                           </div>
                         </div>
