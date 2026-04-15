@@ -1137,8 +1137,8 @@ export default function PlannerDetailPage() {
           dayNumber: index + 1,
           fromLocation,
           toLocation,
-          distanceKm: estimateSegmentDistance(segment),
-          driveTimeMinutes: estimateSegmentDuration(segment),
+          distanceKm: estimateSegmentDistance(segment, index),
+          driveTimeMinutes: estimateSegmentDuration(segment, index),
           verifiedStops,
           optionStops,
           // Explicit list for AI enforcement — AI must only pick from these names
@@ -1927,12 +1927,41 @@ export default function PlannerDetailPage() {
     return "Remote"
   }
 
-  const estimateSegmentDistance = (segment: RouteSegment) => {
+  const estimateSegmentDistance = (segment: RouteSegment, index?: number) => {
+    if (typeof index === 'number') {
+      // Arrival day: no overnight stop, drive from previous stop to destination
+      if (index === arrivalDayIndex) {
+        const prevStop = index > 0 ? resolvedDaySelections[index - 1] : null
+        const prevKm = prevStop?.distance_from_start_km != null
+          ? Number(prevStop.distance_from_start_km)
+          : segment.startKm
+        if (Number.isFinite(prevKm) && totalRouteDistanceKm > 0) {
+          return Math.max(0, totalRouteDistanceKm - prevKm)
+        }
+      }
+
+      const currentStop = resolvedDaySelections[index]
+      const prevStop = index > 0 ? resolvedDaySelections[index - 1] : null
+
+      const endKm = currentStop?.distance_from_start_km != null
+        ? Number(currentStop.distance_from_start_km)
+        : NaN
+      const startKm = index === 0
+        ? 0
+        : prevStop?.distance_from_start_km != null
+          ? Number(prevStop.distance_from_start_km)
+          : NaN
+
+      if (Number.isFinite(endKm) && Number.isFinite(startKm)) {
+        return Math.max(0, endKm - startKm)
+      }
+    }
+
     return Math.max(0, segment.endKm - segment.startKm)
   }
 
-  const estimateSegmentDuration = (segment: RouteSegment) => {
-    const dist = estimateSegmentDistance(segment)
+  const estimateSegmentDuration = (segment: RouteSegment, index?: number) => {
+    const dist = estimateSegmentDistance(segment, index)
 
     if (routeMeta.drivingInfo?.totalDistanceKm && routeMeta.drivingInfo?.totalDurationMinutes) {
       return Math.round((dist / routeMeta.drivingInfo.totalDistanceKm) * routeMeta.drivingInfo.totalDurationMinutes)
@@ -3410,8 +3439,8 @@ icon={{
                 </Card>
               ))
               : daySegments.map((segment, index) => {
-                const distance = estimateSegmentDistance(segment)
-                const duration = estimateSegmentDuration(segment)
+                const distance = estimateSegmentDistance(segment, index)
+                const duration = estimateSegmentDuration(segment, index)
                 const region = getRegionLabel(segment, index)
                 const remainingAfterThisDayKm = Math.max(0, totalRouteDistanceKm - segment.endKm)
                 const fuelInfo = getFuelInfoForSegment(segment, index)
