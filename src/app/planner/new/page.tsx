@@ -338,7 +338,7 @@ export default function NewPlannerPage() {
       if (response.ok) {
         const data = await response.json()
         if (data.tripId) {
-          router.push(`/planner/${data.tripId}`)
+          router.push(`/planner`)
         }
       } else {
         const error = await response.json()

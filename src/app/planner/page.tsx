@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useState, useCallback, useRef } from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
@@ -17,6 +17,7 @@ import {
   ChevronRight,
 } from "lucide-react"
 import { hasAccess } from "@/lib/auth"
+import { toast } from "sonner"
 
 interface Trip {
   id: string
@@ -37,6 +38,61 @@ export default function PlannerPage() {
   const [trips, setTrips] = useState<Trip[]>([])
   const [loading, setLoading] = useState(true)
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all")
+  const [pollingTripIds, setPollingTripIds] = useState<Set<string>>(new Set())
+  const pollingTripIdsRef = useRef<Set<string>>(new Set())
+  const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null)
+  const [userId, setUserId] = useState<string | null>(null)
+
+  const startPolling = useCallback(() => {
+    if (pollingIntervalRef.current) return
+
+    pollingIntervalRef.current = setInterval(async () => {
+      const currentPollingIds = pollingTripIdsRef.current
+      if (currentPollingIds.size === 0) {
+        if (pollingIntervalRef.current) {
+          clearInterval(pollingIntervalRef.current)
+          pollingIntervalRef.current = null
+        }
+        return
+      }
+
+      try {
+        const response = await fetch(`/api/trips?user_id=${userId}`)
+        const data = await response.json()
+
+        if (data.trips) {
+          const completedTrips = data.trips.filter((t: Trip) =>
+            currentPollingIds.has(t.id) && (t.status === "completed" || t.status === "saved")
+          )
+
+          if (completedTrips.length > 0) {
+            completedTrips.forEach((trip: Trip) => {
+              toast.success(`"${trip.title}" is ready!`)
+            })
+            setTrips(data.trips)
+            completedTrips.forEach((t: Trip) => {
+              pollingTripIdsRef.current.delete(t.id)
+            })
+            setPollingTripIds(new Set(pollingTripIdsRef.current))
+
+            if (pollingTripIdsRef.current.size === 0 && pollingIntervalRef.current) {
+              clearInterval(pollingIntervalRef.current)
+              pollingIntervalRef.current = null
+            }
+
+            const firstReady = completedTrips.find((t: Trip) => t.status === "planned")
+            if (firstReady) {
+              setTimeout(() => {
+                router.push(`/planner/${firstReady.id}`)
+              }, 1500)
+            }
+          }
+        }
+      } catch (error) {
+        console.error("Polling error:", error)
+      }
+    }, 5000)
+  }, [userId, router])
 
   useEffect(() => {
     async function fetchTrips() {
@@ -54,11 +110,20 @@ export default function PlannerPage() {
           return
         }
 
+        setUserId(user.id)
+
         const response = await fetch(`/api/trips?user_id=${user.id}`)
         const data = await response.json()
 
         if (data.trips) {
           setTrips(data.trips)
+
+          const inProgressTrips = data.trips.filter((t: Trip) => t.status === "in_progress")
+          if (inProgressTrips.length > 0) {
+            const tripIds: Set<string> = new Set(inProgressTrips.map((t: Trip) => t.id))
+            pollingTripIdsRef.current = tripIds
+            setPollingTripIds(tripIds)
+          }
         }
       } catch (error) {
         console.error("Error fetching trips:", error)
@@ -69,6 +134,21 @@ export default function PlannerPage() {
 
     fetchTrips()
   }, [router])
+
+  useEffect(() => {
+    if (pollingTripIds.size > 0 && userId && !pollingIntervalRef.current) {
+      startPolling()
+    }
+  }, [pollingTripIds.size, userId, startPolling])
+
+  useEffect(() => {
+    return () => {
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current)
+        pollingIntervalRef.current = null
+      }
+    }
+  }, [])
 
   const formatDate = (dateString: string) => {
     return new Date(dateString).toLocaleDateString("en-AU", {

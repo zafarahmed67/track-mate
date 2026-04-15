@@ -294,6 +294,9 @@ export default function PlannerDetailPage() {
   const directionsRendererRef = useRef<google.maps.DirectionsRenderer | null>(null)
 
   const [loading, setLoading] = useState(true)
+  const [isPolling, setIsPolling] = useState(false)
+  const [tripNotFound, setTripNotFound] = useState(false)
+  const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null)
   const [trip, setTrip] = useState<TripData | null>(null)
   const [stops, setStops] = useState<TripStop[]>([])
   const [filteredStops, setFilteredStops] = useState<TripStop[]>([])
@@ -2391,38 +2394,43 @@ export default function PlannerDetailPage() {
         const response = await fetch(`/api/trips/${tripId}${uid ? `?user_id=${uid}` : ""}`)
         const data = await response.json()
 
-        if (data.success && data.trip) {
-          // Guard: trip is still being generated — redirect back to the list
-          if (data.trip.status === "in_progress") {
-            router.replace("/planner")
-            return
-          }
+        if (!data.success || !data.trip) {
+          setTripNotFound(true)
+          setLoading(false)
+          return
+        }
 
-          setTrip(data.trip)
-          const routeJson = (data.trip as TripData).route_data_json ?? {}
-          const savedNarrative = routeJson.narrative as TripNarrative | undefined
-          if (savedNarrative?.days?.length) {
-            setTripNarrative(savedNarrative)
-          }
-          // Restore segment selections saved from previous session (§7.9)
-          if (routeJson.selectedSegmentOptionIds) {
-            setSelectedSegmentOptionIds(routeJson.selectedSegmentOptionIds as Record<number, string>)
-          }
-          if (routeJson.selectedSegmentFuelIds) {
-            setSelectedSegmentFuelIds(routeJson.selectedSegmentFuelIds as Record<number, string>)
-          }
-          // Restore computed segments + route meta so stop options are immediately available without re-fetching
-          if (routeJson.savedSegments && Array.isArray(routeJson.savedSegments) && (routeJson.savedSegments as unknown[]).length > 0) {
-            const savedMeta = (routeJson.savedRouteMeta ?? {}) as Partial<RouteMeta>
-            setRouteMeta({
-              corridor: savedMeta.corridor,
-              drivingInfo: savedMeta.drivingInfo,
-              paceConfig: savedMeta.paceConfig,
-              fuelStations: savedMeta.fuelStations,
-              planningMode: savedMeta.planningMode,
-              segments: routeJson.savedSegments as RouteSegment[],
-            })
-          }
+        if (data.trip.status === "in_progress") {
+          setIsPolling(true)
+          setLoading(false)
+          return
+        }
+
+        setIsPolling(false)
+        setTrip(data.trip)
+        const routeJson = (data.trip as TripData).route_data_json ?? {}
+        const savedNarrative = routeJson.narrative as TripNarrative | undefined
+        if (savedNarrative?.days?.length) {
+          setTripNarrative(savedNarrative)
+        }
+        // Restore segment selections saved from previous session (§7.9)
+        if (routeJson.selectedSegmentOptionIds) {
+          setSelectedSegmentOptionIds(routeJson.selectedSegmentOptionIds as Record<number, string>)
+        }
+        if (routeJson.selectedSegmentFuelIds) {
+          setSelectedSegmentFuelIds(routeJson.selectedSegmentFuelIds as Record<number, string>)
+        }
+        // Restore computed segments + route meta so stop options are immediately available without re-fetching
+        if (routeJson.savedSegments && Array.isArray(routeJson.savedSegments) && (routeJson.savedSegments as unknown[]).length > 0) {
+          const savedMeta = (routeJson.savedRouteMeta ?? {}) as Partial<RouteMeta>
+          setRouteMeta({
+            corridor: savedMeta.corridor,
+            drivingInfo: savedMeta.drivingInfo,
+            paceConfig: savedMeta.paceConfig,
+            fuelStations: savedMeta.fuelStations,
+            planningMode: savedMeta.planningMode,
+            segments: routeJson.savedSegments as RouteSegment[],
+          })
         }
 
         // Load itinerary versions + chat history in parallel with stops
@@ -2572,6 +2580,40 @@ export default function PlannerDetailPage() {
 
     fetchTripData()
   }, [tripId])
+
+  useEffect(() => {
+    if (!isPolling || !tripId) return
+
+    if (pollingIntervalRef.current) return
+
+    pollingIntervalRef.current = setInterval(async () => {
+      try {
+        const response = await fetch(`/api/trips/${tripId}`)
+        const data = await response.json()
+
+        if (data.success && data.trip && (data.trip.status === "completed" || data.trip.status === "saved")) {
+          if (pollingIntervalRef.current) {
+            clearInterval(pollingIntervalRef.current)
+            pollingIntervalRef.current = null
+          }
+          setIsPolling(false)
+          setTrip(data.trip)
+          setLoading(false)
+        }
+      } catch (error) {
+        console.error("Polling error:", error)
+      }
+    }, 5000)
+  }, [isPolling, tripId])
+
+  useEffect(() => {
+    return () => {
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current)
+        pollingIntervalRef.current = null
+      }
+    }
+  }, [])
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -2955,6 +2997,18 @@ export default function PlannerDetailPage() {
   }
 
   return (
+    <>
+      {isPolling && (
+        <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
+          <div className="h-16 w-16 rounded-full border-4 border-primary/20 border-t-primary animate-spin" />
+          <h2 className="text-xl font-semibold">Preparing your trip...</h2>
+          <p className="text-muted-foreground text-sm">
+            This usually takes less than a minute.
+          </p>
+        </div>
+      )}
+
+      {!isPolling && (
     <main className="min-h-screen bg-background">
       <div className="sticky top-0 z-50 border-b bg-background/95 backdrop-blur-xl">
         <div className="container mx-auto px-6 py-4">
@@ -4400,5 +4454,7 @@ export default function PlannerDetailPage() {
         </AlertDialogContent>
       </AlertDialog>
     </main>
+      )}
+    </>
   )
 }
