@@ -74,8 +74,8 @@ export default function EditTripPage() {
         setTravelPace((trip.travel_pace || "moderate") as TravelPace)
         setAvoidGravelRoads(Boolean(trip.avoid_gravel_roads))
         setPetFriendlyRequired(Boolean(trip.pet_friendly_required))
-        setStayPreference(trip.stay_preference || "")
-        setBudgetPreference(trip.budget_preference || "")
+        setStayPreference(trip.stay_preference || "none")
+        setBudgetPreference(trip.budget_preference || "none")
         setRigType(trip.rig_type || "")
         setRigLengthM(trip.rig_length_m != null ? String(trip.rig_length_m) : "")
       } catch (error) {
@@ -117,8 +117,8 @@ export default function EditTripPage() {
           travel_pace: travelPace,
           avoid_gravel_roads: avoidGravelRoads,
           pet_friendly_required: petFriendlyRequired,
-          stay_preference: stayPreference || null,
-          budget_preference: budgetPreference || null,
+          stay_preference: stayPreference === "none" ? null : stayPreference || null,
+          budget_preference: budgetPreference === "none" ? null : budgetPreference || null,
           rig_type: rigType || null,
           rig_length_m: rigLengthM ? parseFloat(rigLengthM) : null,
         }),
@@ -275,7 +275,7 @@ export default function EditTripPage() {
                       <SelectValue placeholder="No preference" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="">No preference</SelectItem>
+                      <SelectItem value="none">No preference</SelectItem>
                       <SelectItem value="free-camps">Free camps</SelectItem>
                       <SelectItem value="caravan-parks">Caravan parks</SelectItem>
                     </SelectContent>
@@ -288,7 +288,7 @@ export default function EditTripPage() {
                       <SelectValue placeholder="No preference" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="">No preference</SelectItem>
+                      <SelectItem value="none">No preference</SelectItem>
                       <SelectItem value="free">Free only</SelectItem>
                       <SelectItem value="budget">Budget (no premium)</SelectItem>
                       <SelectItem value="any">Any</SelectItem>
