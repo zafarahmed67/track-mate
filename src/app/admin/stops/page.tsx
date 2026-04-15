@@ -72,6 +72,13 @@ interface StopFull extends StopRow {
   corridor: string | null
   road_suitability: string | null
   max_rig_length: string | null
+  // Affiliate / partner fields
+  affiliate_partner: string | null
+  partner_type: string | null
+  affiliate_url: string | null
+  direct_booking_url: string | null
+  discount_code: string | null
+  partner_notes: string | null
 }
 
 interface ImportSummary {
@@ -112,6 +119,12 @@ const EMPTY_FORM: StopFormData = {
   max_rig_length: "",
   cost_band: "",
   verification_status: "unverified",
+  affiliate_partner: "",
+  partner_type: "",
+  affiliate_url: "",
+  direct_booking_url: "",
+  discount_code: "",
+  partner_notes: "",
 }
 
 export default function AdminStopsPage() {
@@ -246,6 +259,12 @@ export default function AdminStopsPage() {
         max_rig_length: s.max_rig_length ?? "",
         cost_band: s.cost_band ?? "",
         verification_status: s.verification_status ?? "unverified",
+        affiliate_partner: s.affiliate_partner ?? "",
+        partner_type: s.partner_type ?? "",
+        affiliate_url: s.affiliate_url ?? "",
+        direct_booking_url: s.direct_booking_url ?? "",
+        discount_code: s.discount_code ?? "",
+        partner_notes: s.partner_notes ?? "",
       })
       setSheetOpen(true)
     } catch {
@@ -896,6 +915,46 @@ export default function AdminStopsPage() {
               <div className="space-y-2">
                 <Label>AAO Tip</Label>
                 <Textarea rows={2} value={form.aao_tip ?? ""} onChange={(e) => setField("aao_tip", e.target.value)} />
+              </div>
+            </div>
+
+            <Separator />
+
+            {/* Affiliate / Partner */}
+            <div className="space-y-3">
+              <h3 className="text-xs font-semibold uppercase text-gray-400 tracking-wide">Affiliate & Partner</h3>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-2">
+                  <Label>Affiliate Partner</Label>
+                  <Input value={form.affiliate_partner ?? ""} onChange={(e) => setField("affiliate_partner", e.target.value)} placeholder="e.g. Hipcamp" />
+                </div>
+                <div className="space-y-2">
+                  <Label>Partner Type</Label>
+                  <Select value={form.partner_type ?? ""} onValueChange={(v) => setField("partner_type", v)}>
+                    <SelectTrigger><SelectValue placeholder="—" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="affiliate">Affiliate</SelectItem>
+                      <SelectItem value="direct">Direct</SelectItem>
+                      <SelectItem value="sponsored">Sponsored</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Label>Affiliate URL</Label>
+                <Input value={form.affiliate_url ?? ""} onChange={(e) => setField("affiliate_url", e.target.value)} placeholder="https://..." />
+              </div>
+              <div className="space-y-2">
+                <Label>Direct Booking URL</Label>
+                <Input value={form.direct_booking_url ?? ""} onChange={(e) => setField("direct_booking_url", e.target.value)} placeholder="https://..." />
+              </div>
+              <div className="space-y-2">
+                <Label>Discount Code</Label>
+                <Input value={form.discount_code ?? ""} onChange={(e) => setField("discount_code", e.target.value)} placeholder="e.g. TRACKMATE10" />
+              </div>
+              <div className="space-y-2">
+                <Label>Partner Notes</Label>
+                <Textarea rows={2} value={form.partner_notes ?? ""} onChange={(e) => setField("partner_notes", e.target.value)} />
               </div>
             </div>
           </div>

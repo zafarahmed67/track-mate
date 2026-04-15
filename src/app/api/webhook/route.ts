@@ -99,25 +99,32 @@ export async function POST(req: NextRequest) {
 
         let userId: string
 
+        const isSale = data.order.submissionType === "Sale"
+
         if (existingUser) {
+            const updatePayload: Record<string, unknown> = {
+                contact_id: data.contactId,
+                first_name: data.firstName,
+                last_name: data.lastName,
+                full_name: data.fullName,
+                phone: data.phone,
+                tags: data.tags || [],
+                timezone: data.timezone,
+                company_name: data.companyName,
+                contact_type: data.contactType,
+                location: data.location,
+                order_data: data.order,
+                workflow: data.workflow,
+                updated_at: new Date().toISOString(),
+            }
+            // Only grant access on confirmed sales — not refunds or other events
+            if (isSale) {
+                updatePayload.access_status = "active"
+            }
+
             const { data: updatedUser, error: updateError } = await supabaseAdmin
                 .from("users")
-                .update({
-                    contact_id: data.contactId,
-                    first_name: data.firstName,
-                    last_name: data.lastName,
-                    full_name: data.fullName,
-                    phone: data.phone,
-                    tags: data.tags || [],
-                    timezone: data.timezone,
-                    company_name: data.companyName,
-                    contact_type: data.contactType,
-                    location: data.location,
-                    order_data: data.order,
-                    workflow: data.workflow,
-                    access_status: "active",
-                    updated_at: new Date().toISOString(),
-                })
+                .update(updatePayload)
                 .eq("id", existingUser.id)
                 .select("id")
                 .single()
@@ -128,6 +135,12 @@ export async function POST(req: NextRequest) {
             }
 
             userId = updatedUser.id
+
+            // Only send access email on confirmed sales
+            if (!isSale) {
+                console.log(`Non-sale event (${data.order.submissionType}) for existing user — skipping access grant and email`)
+                return NextResponse.json({ success: true, message: "Non-sale event recorded", userId })
+            }
 
             // Send access email to existing user (re-purchase or access restore).
             // inviteUserByEmail works for both new and existing Supabase auth users.
@@ -153,7 +166,8 @@ export async function POST(req: NextRequest) {
                     location: data.location,
                     order_data: data.order,
                     workflow: data.workflow,
-                    access_status: "active",
+                    // Only grant access on confirmed sales
+                    access_status: isSale ? "active" : "inactive",
                 })
                 .select("id")
                 .single()
@@ -164,6 +178,12 @@ export async function POST(req: NextRequest) {
             }
 
             userId = newUser.id
+
+            // Only send invite/access email on confirmed sales
+            if (!isSale) {
+                console.log(`Non-sale event (${data.order.submissionType}) for new user — created record without access`)
+                return NextResponse.json({ success: true, message: "Non-sale event recorded", userId })
+            }
 
             // Send invite email for new users — creates Supabase auth account + sends magic-link email
             const { error: inviteError } = await supabaseAdmin.auth.admin.inviteUserByEmail(data.email)

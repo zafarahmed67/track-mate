@@ -22,7 +22,43 @@ import {
     SelectTrigger,
     SelectValue,
 } from "@/components/ui/select"
+import { toast } from "sonner"
 import type { Stop } from "@/lib/types"
+
+// Decode a Google Maps encoded polyline into lat/lng pairs
+function decodePolyline(encoded: string): { lat: number; lng: number }[] {
+  const points: { lat: number; lng: number }[] = []
+  let index = 0
+  let lat = 0
+  let lng = 0
+
+  while (index < encoded.length) {
+    let b: number
+    let shift = 0
+    let result = 0
+    do {
+      b = encoded.charCodeAt(index++) - 63
+      result |= (b & 0x1f) << shift
+      shift += 5
+    } while (b >= 0x20)
+    const dlat = result & 1 ? ~(result >> 1) : result >> 1
+    lat += dlat
+
+    shift = 0
+    result = 0
+    do {
+      b = encoded.charCodeAt(index++) - 63
+      result |= (b & 0x1f) << shift
+      shift += 5
+    } while (b >= 0x20)
+    const dlng = result & 1 ? ~(result >> 1) : result >> 1
+    lng += dlng
+
+    points.push({ lat: lat / 1e5, lng: lng / 1e5 })
+  }
+
+  return points
+}
 
 const mapContainerStyle = {
   width: "100%",
@@ -56,8 +92,10 @@ export default function NewPlannerPage() {
   const [rigLengthM, setRigLengthM] = useState("")
   const [stayPreference, setStayPreference] = useState("")
   const [budgetPreference, setBudgetPreference] = useState("")
+  const [seasonalPreference, setSeasonalPreference] = useState("")
   const [endDate, setEndDate] = useState("")
   const [notes, setNotes] = useState("")
+  const [geocodeError, setGeocodeError] = useState<string | null>(null)
 
   useEffect(() => {
     async function loadDefaults() {
@@ -144,26 +182,48 @@ export default function NewPlannerPage() {
 
   async function handleProceedToDetails() {
     if (!canProceedToDetails) return
-    
+
     setGeocoding(true)
+    setGeocodeError(null)
     try {
       const [startResult, destResult] = await Promise.all([
         fetchGeocode(startLocation),
         fetchGeocode(destination),
       ])
 
-      if (startResult) {
-        setStartCoords({ lat: startResult.lat, lng: startResult.lng })
+      if (!startResult && !destResult) {
+        setGeocodeError(`Could not find coordinates for "${startLocation}" or "${destination}". Please check the spelling and try again.`)
+        return
       }
-      if (destResult) {
-        setDestCoords({ lat: destResult.lat, lng: destResult.lng })
+      if (!startResult) {
+        setGeocodeError(`Could not find "${startLocation}". Please check the spelling and try again.`)
+        return
+      }
+      if (!destResult) {
+        setGeocodeError(`Could not find "${destination}". Please check the spelling and try again.`)
+        return
       }
 
-      if (startResult || destResult) {
-        setStep("details")
+      setStartCoords({ lat: startResult.lat, lng: startResult.lng })
+      setDestCoords({ lat: destResult.lat, lng: destResult.lng })
+
+      // Fetch route polyline for the map preview (Gap 10)
+      try {
+        const directionsUrl = `https://maps.googleapis.com/maps/api/directions/json?origin=${startResult.lat},${startResult.lng}&destination=${destResult.lat},${destResult.lng}&key=${process.env.NEXT_PUBLIC_GMAPS_API_KEY}`
+        const dirResponse = await fetch(directionsUrl)
+        const dirData = await dirResponse.json()
+        if (dirData.routes?.[0]?.overview_polyline?.points) {
+          const decoded = decodePolyline(dirData.routes[0].overview_polyline.points)
+          setRouteCoords(decoded)
+        }
+      } catch {
+        // Non-fatal — map preview just won't show the polyline
       }
+
+      setStep("details")
     } catch (error) {
       console.error("Geocoding error:", error)
+      setGeocodeError("An error occurred while looking up locations. Please try again.")
     } finally {
       setGeocoding(false)
     }
@@ -223,6 +283,18 @@ export default function NewPlannerPage() {
   }
 
   async function handleSubmitTrip() {
+    // Validate duration is provided and valid (Gap 11)
+    const parsedDuration = parseInt(tripDuration)
+    if (!tripDuration || isNaN(parsedDuration) || parsedDuration < 1) {
+      toast.error("Trip duration is required and must be at least 1 day")
+      return
+    }
+
+    if (!travelPace) {
+      toast.error("Please select a travel pace")
+      return
+    }
+
     setLoading(true)
 
     const stored = localStorage.getItem("trackmate_user")
@@ -242,7 +314,7 @@ export default function NewPlannerPage() {
       startLng: startCoords.lng,
       destLat: destCoords.lat,
       destLng: destCoords.lng,
-      tripDurationDays: parseInt(tripDuration) || 14,
+      tripDurationDays: parsedDuration,
       travelPace: travelPace || "moderate",
       rigType: rigType || undefined,
       rigLengthM: rigLengthM ? parseFloat(rigLengthM) : undefined,
@@ -250,6 +322,7 @@ export default function NewPlannerPage() {
       stayPreference: stayPreference || undefined,
       avoidGravelRoads: avoidGravel,
       budgetPreference: budgetPreference || undefined,
+      seasonalPreference: seasonalPreference || undefined,
       notes: notes || undefined,
       endDate: endDate || undefined,
       status: "planned",
@@ -270,9 +343,11 @@ export default function NewPlannerPage() {
       } else {
         const error = await response.json()
         console.error("Error creating trip:", error)
+        toast.error(error.error || "Failed to create trip")
       }
     } catch (error) {
       console.error("Error generating route:", error)
+      toast.error("An error occurred. Please try again.")
     } finally {
       setLoading(false)
     }
@@ -324,13 +399,19 @@ export default function NewPlannerPage() {
                     />
                   </div>
 
-                  <Button 
-                    onClick={handleProceedToDetails} 
+                  <Button
+                    onClick={handleProceedToDetails}
                     disabled={!canProceedToDetails || geocoding}
                     className="w-full"
                   >
-                    {geocoding ? "Getting coordinates..." : "Continue"}
+                    {geocoding ? "Looking up locations..." : "Continue"}
                   </Button>
+
+                  {geocodeError && (
+                    <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                      {geocodeError}
+                    </div>
+                  )}
                 </>
               )}
 
@@ -382,13 +463,17 @@ export default function NewPlannerPage() {
 
                   <div className="grid gap-5 md:grid-cols-2">
                     <div className="space-y-2">
-                      <Label htmlFor="tripDuration">Trip Duration (days)</Label>
+                      <Label htmlFor="tripDuration">
+                        Trip Duration (days) <span className="text-red-500">*</span>
+                      </Label>
                       <Input
                         id="tripDuration"
                         value={tripDuration}
                         onChange={(e) => setTripDuration(e.target.value)}
                         placeholder="e.g. 14"
                         type="number"
+                        min={1}
+                        required
                       />
                     </div>
 
@@ -478,6 +563,23 @@ export default function NewPlannerPage() {
                         onChange={(e) => setEndDate(e.target.value)}
                         type="date"
                       />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="seasonalPreference">Seasonal Preference</Label>
+                      <Select value={seasonalPreference} onValueChange={setSeasonalPreference}>
+                        <SelectTrigger id="seasonalPreference">
+                          <SelectValue placeholder="No preference" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="">No preference</SelectItem>
+                          <SelectItem value="summer">Summer (Dec–Feb)</SelectItem>
+                          <SelectItem value="autumn">Autumn (Mar–May)</SelectItem>
+                          <SelectItem value="winter">Winter (Jun–Aug)</SelectItem>
+                          <SelectItem value="spring">Spring (Sep–Nov)</SelectItem>
+                          <SelectItem value="dry-season">Dry Season (Apr–Oct)</SelectItem>
+                          <SelectItem value="wet-season">Wet Season (Nov–Mar)</SelectItem>
+                        </SelectContent>
+                      </Select>
                     </div>
                   </div>
 

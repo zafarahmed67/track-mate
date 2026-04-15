@@ -2,7 +2,7 @@ import { supabaseAdmin } from "@/config/supabase"
 import { NextRequest, NextResponse } from "next/server"
 import { renderToBuffer, type DocumentProps } from "@react-pdf/renderer"
 import { createElement, type ReactElement, type JSXElementConstructor } from "react"
-import { TripPdfDocument, type PdfTrip } from "@/lib/trip-pdf"
+import { TripPdfDocument, type PdfTrip, type PdfSelectedStop } from "@/lib/trip-pdf"
 
 interface RouteParams {
   params: Promise<{ tripId: string }>
@@ -98,6 +98,46 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
     }
 
     if (format === "pdf") {
+      // Build resolved selections from saved segment data (Gap 8)
+      const routeJson = (trip.route_data_json ?? {}) as Record<string, unknown>
+      const savedSegments = Array.isArray(routeJson.savedSegments) ? routeJson.savedSegments : []
+      const selectedIds = (routeJson.selectedSegmentOptionIds ?? {}) as Record<string, string>
+      const resolvedSelections: PdfSelectedStop[] = []
+
+      for (let i = 0; i < savedSegments.length; i++) {
+        const seg = savedSegments[i] as Record<string, unknown>
+        const options = (Array.isArray(seg.options) ? seg.options : []) as Array<Record<string, unknown>>
+        const recommendedOption = (seg.recommendedOption ?? null) as Record<string, unknown> | null
+
+        // Find the selected stop for this segment
+        const explicitId = selectedIds[String(i)]
+        let selected: Record<string, unknown> | null = null
+
+        if (explicitId) {
+          selected = options.find((o) => o.id === explicitId) ?? null
+        }
+        if (!selected && recommendedOption) {
+          selected = recommendedOption
+        }
+        if (!selected && options.length > 0) {
+          selected = options[0]
+        }
+
+        if (selected) {
+          resolvedSelections.push({
+            dayIndex: i,
+            location_name: String(selected.location_name ?? selected.name ?? ""),
+            stay_type: selected.stay_type ? String(selected.stay_type) : undefined,
+            cost_band: selected.cost_band ? String(selected.cost_band) : undefined,
+            pet_friendly: selected.pet_friendly ? String(selected.pet_friendly) : undefined,
+            water: selected.water ? String(selected.water) : undefined,
+            distance_to_route_km: typeof selected.distance_to_route_km === "number" ? selected.distance_to_route_km : null,
+            why_stop_here: selected.why_stop_here ? String(selected.why_stop_here) : undefined,
+            source: selected.source ? String(selected.source) : undefined,
+          })
+        }
+      }
+
       const pdfTrip: PdfTrip = {
         title: trip.title,
         start_location_text: trip.start_location_text,
@@ -126,6 +166,7 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
           water: s.stop?.water,
           distance_to_route_km: s.distance_to_route_km,
         })),
+        resolvedSelections: resolvedSelections.length > 0 ? resolvedSelections : undefined,
         exportedAt: new Date().toISOString(),
       }
 

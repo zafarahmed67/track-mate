@@ -67,6 +67,11 @@ interface TripData {
   created_at: string
   notes: string | null
   route_data_json?: Record<string, unknown> | null
+  end_date?: string | null
+  rig_type?: string | null
+  rig_length_m?: number | null
+  avoid_gravel_roads?: boolean
+  pet_friendly_required?: boolean
 }
 
 interface TripStop extends Omit<Stop, "id"> {
@@ -127,6 +132,7 @@ interface RouteStopOption {
   why_we_d_stay_again?: string
   source?: "database" | "google_places"
   is_recommended?: boolean
+  road_suitability?: string
 }
 
 interface RouteSegment {
@@ -1167,16 +1173,44 @@ export default function PlannerDetailPage() {
         planningMode: routeMeta.planningMode ?? "standard",
       }
 
+      // Derive travel month for seasonal notes (Gap 9)
+      let travelMonth: string | null = null
+      if (trip.end_date) {
+        const halfMs = ((trip.trip_duration_days || 1) / 2) * 24 * 60 * 60 * 1000
+        const midpoint = new Date(new Date(trip.end_date).getTime() - halfMs)
+        travelMonth = midpoint.toLocaleString("en-AU", { month: "long" })
+      }
+
+      // Derive road conditions from segments (Gap 9)
+      const hasGravelSegments = daySegments.some((s) =>
+        s.verifiedStops.some((v) => v.road_suitability?.toLowerCase() === "gravel" || v.road_suitability?.toLowerCase() === "4wd") ||
+        s.otherStops.some((v) => v.road_suitability?.toLowerCase() === "gravel" || v.road_suitability?.toLowerCase() === "4wd")
+      )
+      const roadConditionNote = hasGravelSegments
+        ? "Some overnight stop options on this route require gravel or 4WD access. Verify road conditions before committing to each leg."
+        : null
+
       const response = await fetch(`/api/trips/${tripId}/narrative`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           userId,
-          trip: { title: trip.title, travel_pace: trip.travel_pace, trip_duration_days: trip.trip_duration_days },
+          trip: {
+            title: trip.title,
+            travel_pace: trip.travel_pace,
+            trip_duration_days: trip.trip_duration_days,
+            rig_type: trip.rig_type ?? null,
+            rig_length_m: trip.rig_length_m ?? null,
+            avoid_gravel_roads: trip.avoid_gravel_roads ?? false,
+            pet_friendly_required: trip.pet_friendly_required ?? false,
+          },
           corridor: routeMeta.corridor,
           totalDistanceKm: routeMeta.drivingInfo?.totalDistanceKm,
           fuelSummary,
           days: daysPayload,
+          // Enrichment data for Gap 9
+          travelMonth,
+          roadConditionNote,
         }),
       })
       const result = await response.json()
@@ -1295,7 +1329,7 @@ export default function PlannerDetailPage() {
   const handleSaveTrip = async () => {
     setSaving(true)
     try {
-      // Persist segment selections alongside the narrative so they survive page reload (§7.9)
+      // Persist segment selections + computed segments alongside the narrative so they survive page reload (§7.9)
       const currentRouteDataJson = (trip?.route_data_json ?? {}) as Record<string, unknown>
       const response = await fetch(`/api/trips/${tripId}`, {
         method: "PATCH",
@@ -1308,6 +1342,15 @@ export default function PlannerDetailPage() {
             selectedSegmentOptionIds,
             selectedSegmentFuelIds,
             narrative: tripNarrative ?? currentRouteDataJson.narrative,
+            // Persist the computed segments so stop options survive page reload without re-fetching
+            savedSegments: routeMeta.segments ?? null,
+            savedRouteMeta: {
+              corridor: routeMeta.corridor,
+              drivingInfo: routeMeta.drivingInfo,
+              paceConfig: routeMeta.paceConfig,
+              fuelStations: routeMeta.fuelStations,
+              planningMode: routeMeta.planningMode,
+            },
           },
         }),
       })
@@ -2297,6 +2340,18 @@ export default function PlannerDetailPage() {
           }
           if (routeJson.selectedSegmentFuelIds) {
             setSelectedSegmentFuelIds(routeJson.selectedSegmentFuelIds as Record<number, string>)
+          }
+          // Restore computed segments + route meta so stop options are immediately available without re-fetching
+          if (routeJson.savedSegments && Array.isArray(routeJson.savedSegments) && (routeJson.savedSegments as unknown[]).length > 0) {
+            const savedMeta = (routeJson.savedRouteMeta ?? {}) as Partial<RouteMeta>
+            setRouteMeta({
+              corridor: savedMeta.corridor,
+              drivingInfo: savedMeta.drivingInfo,
+              paceConfig: savedMeta.paceConfig,
+              fuelStations: savedMeta.fuelStations,
+              planningMode: savedMeta.planningMode,
+              segments: routeJson.savedSegments as RouteSegment[],
+            })
           }
         }
 

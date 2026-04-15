@@ -271,6 +271,31 @@ const styles = StyleSheet.create({
     color: "#166534",
     lineHeight: 1.4,
   },
+  // Selected stop (user's chosen overnight stop)
+  selectedStopBox: {
+    backgroundColor: "#f0fdf4",
+    borderRadius: 4,
+    padding: 8,
+    marginTop: 6,
+    borderLeftWidth: 3,
+    borderLeftColor: "#16a34a",
+  },
+  selectedStopLabel: {
+    fontSize: 8,
+    fontFamily: "Helvetica-Bold",
+    color: "#14532d",
+    marginBottom: 3,
+  },
+  selectedStopName: {
+    fontSize: 10,
+    fontFamily: "Helvetica-Bold",
+    color: "#166534",
+    marginBottom: 2,
+  },
+  selectedStopMeta: {
+    fontSize: 8,
+    color: "#166534",
+  },
   // Footer
   footer: {
     position: "absolute",
@@ -319,7 +344,25 @@ export interface PdfNarrativeDay {
 export interface PdfNarrative {
   overview?: string
   days?: PdfNarrativeDay[]
-  tripNotes?: { fuelGuidance: string | null; remoteWarnings: string | null; roadConditions: string | null }
+  tripNotes?: {
+    fuelGuidance: string | null
+    remoteWarnings: string | null
+    roadConditions: string | null
+    rigSuitability?: string | null
+    seasonalNotes?: string | null
+  }
+}
+
+export interface PdfSelectedStop {
+  dayIndex: number // 0-based
+  location_name: string
+  stay_type?: string
+  cost_band?: string
+  pet_friendly?: string
+  water?: string
+  distance_to_route_km?: number | null
+  why_stop_here?: string
+  source?: string // "database" | "google_places"
 }
 
 export interface PdfTrip {
@@ -337,6 +380,8 @@ export interface PdfTrip {
   notes?: string | null
   narrative?: PdfNarrative
   stops: PdfStop[]
+  // User's resolved stop selections per segment (Gap 8)
+  resolvedSelections?: PdfSelectedStop[]
   exportedAt: string
 }
 
@@ -413,6 +458,27 @@ function StopEntry({ stop, isLast }: { stop: PdfStop; isLast: boolean }) {
   )
 }
 
+function SelectedStopBox({ sel }: { sel: PdfSelectedStop }) {
+  const details = [
+    sel.stay_type ? capitalize(sel.stay_type) : null,
+    sel.cost_band ? `Cost: ${capitalize(sel.cost_band)}` : null,
+    sel.pet_friendly === "Yes" ? "Pet friendly" : null,
+    sel.water === "Yes" ? "Water available" : null,
+    sel.distance_to_route_km != null ? `${sel.distance_to_route_km.toFixed(1)} km off route` : null,
+  ]
+    .filter(Boolean)
+    .join("  ·  ")
+
+  return (
+    <View style={styles.selectedStopBox}>
+      <Text style={styles.selectedStopLabel}>Overnight Stop</Text>
+      <Text style={styles.selectedStopName}>{sel.location_name}</Text>
+      {details ? <Text style={styles.selectedStopMeta}>{details}</Text> : null}
+      {sel.why_stop_here ? <Text style={[styles.selectedStopMeta, { marginTop: 3, fontStyle: "italic" }]}>{sel.why_stop_here}</Text> : null}
+    </View>
+  )
+}
+
 export function TripPdfDocument({ trip }: { trip: PdfTrip }) {
   const rawDays = buildDays(trip)
   const exportDate = new Date(trip.exportedAt).toLocaleDateString("en-AU", {
@@ -422,6 +488,11 @@ export function TripPdfDocument({ trip }: { trip: PdfTrip }) {
   })
   const narrativeDays = trip.narrative?.days
   const useNarrative = Array.isArray(narrativeDays) && narrativeDays.length > 0
+  // Build lookup by 0-based day index for user's resolved selections
+  const selectionsByDay = new Map<number, PdfSelectedStop>()
+  for (const sel of trip.resolvedSelections ?? []) {
+    selectionsByDay.set(sel.dayIndex, sel)
+  }
 
   const prefs = [
     trip.travel_pace ? `Pace: ${formatPace(trip.travel_pace)}` : null,
@@ -434,7 +505,7 @@ export function TripPdfDocument({ trip }: { trip: PdfTrip }) {
   ].filter(Boolean) as string[]
 
   const tripNotes = trip.narrative?.tripNotes
-  const hasTripNotes = tripNotes && (tripNotes.fuelGuidance || tripNotes.remoteWarnings || tripNotes.roadConditions)
+  const hasTripNotes = tripNotes && (tripNotes.fuelGuidance || tripNotes.remoteWarnings || tripNotes.roadConditions || tripNotes.rigSuitability || tripNotes.seasonalNotes)
 
   return (
     <Document title={trip.title || "Trip Itinerary"} author="TrackMate">
@@ -508,29 +579,36 @@ export function TripPdfDocument({ trip }: { trip: PdfTrip }) {
                 )
               }
 
-              return (
-                <View key={day.dayNumber} style={styles.dayCard} wrap={false}>
-                  <Text style={styles.dayHeader}>{dayLabel}</Text>
-                  {day.narrative ? <Text style={styles.narrativeText}>{day.narrative}</Text> : null}
-                  {day.suggestedStay && (
-                    <StopEntry
-                      stop={{
-                        id: `day-${day.dayNumber}`,
-                        location_name: day.suggestedStay.name,
-                        stay_type: day.suggestedStay.stopType,
-                        why_stop_here: day.suggestedStay.whyStopHere,
-                        aao_tip: day.suggestedStay.aaoTip || undefined,
-                      }}
-                      isLast
-                    />
-                  )}
-                  {day.fuelNote && (
-                    <View style={styles.fuelNote}>
-                      <Text style={styles.fuelNoteText}>⛽ {day.fuelNote}</Text>
-                    </View>
-                  )}
-                </View>
-              )
+              {
+                const userSel = selectionsByDay.get(day.dayNumber - 1)
+                return (
+                  <View key={day.dayNumber} style={styles.dayCard} wrap={false}>
+                    <Text style={styles.dayHeader}>{dayLabel}</Text>
+                    {day.narrative ? <Text style={styles.narrativeText}>{day.narrative}</Text> : null}
+                    {/* Show user's resolved selection first (most accurate), fallback to narrative suggested stay */}
+                    {userSel
+                      ? <SelectedStopBox sel={userSel} />
+                      : day.suggestedStay && (
+                          <StopEntry
+                            stop={{
+                              id: `day-${day.dayNumber}`,
+                              location_name: day.suggestedStay.name,
+                              stay_type: day.suggestedStay.stopType,
+                              why_stop_here: day.suggestedStay.whyStopHere,
+                              aao_tip: day.suggestedStay.aaoTip || undefined,
+                            }}
+                            isLast
+                          />
+                        )
+                    }
+                    {day.fuelNote && (
+                      <View style={styles.fuelNote}>
+                        <Text style={styles.fuelNoteText}>⛽ {day.fuelNote}</Text>
+                      </View>
+                    )}
+                  </View>
+                )
+              }
             })
           : rawDays.map(({ day, stops }) => {
               const isFirst = day === 1
@@ -540,8 +618,9 @@ export function TripPdfDocument({ trip }: { trip: PdfTrip }) {
                 : isLast
                 ? `Day ${day}: Arrive ${trip.destination_text}`
                 : `Day ${day}`
+              const userSel = selectionsByDay.get(day - 1)
 
-              if (stops.length === 0) {
+              if (stops.length === 0 && !userSel) {
                 return (
                   <View key={day} style={styles.gapCard}>
                     <Text style={styles.gapHeader}>{dayLabel}</Text>
@@ -556,10 +635,15 @@ export function TripPdfDocument({ trip }: { trip: PdfTrip }) {
               return (
                 <View key={day} style={styles.dayCard} wrap={false}>
                   <Text style={styles.dayHeader}>{dayLabel}</Text>
-                  <Text style={styles.dayMeta}>{stops.length} stop{stops.length !== 1 ? "s" : ""}</Text>
-                  {stops.map((stop, i) => (
-                    <StopEntry key={stop.id} stop={stop} isLast={i === stops.length - 1} />
-                  ))}
+                  {userSel && <SelectedStopBox sel={userSel} />}
+                  {stops.length > 0 && (
+                    <>
+                      <Text style={[styles.dayMeta, { marginTop: userSel ? 8 : 0 }]}>{stops.length} nearby stop{stops.length !== 1 ? "s" : ""}</Text>
+                      {stops.map((stop, i) => (
+                        <StopEntry key={stop.id} stop={stop} isLast={i === stops.length - 1} />
+                      ))}
+                    </>
+                  )}
                 </View>
               )
             })}
@@ -585,6 +669,18 @@ export function TripPdfDocument({ trip }: { trip: PdfTrip }) {
                 <>
                   <Text style={styles.tripNoteLabel}>Road Conditions</Text>
                   <Text style={styles.tripNoteText}>{tripNotes!.roadConditions}</Text>
+                </>
+              )}
+              {tripNotes!.rigSuitability && (
+                <>
+                  <Text style={styles.tripNoteLabel}>Rig Suitability</Text>
+                  <Text style={styles.tripNoteText}>{tripNotes!.rigSuitability}</Text>
+                </>
+              )}
+              {tripNotes!.seasonalNotes && (
+                <>
+                  <Text style={styles.tripNoteLabel}>Seasonal Notes</Text>
+                  <Text style={styles.tripNoteText}>{tripNotes!.seasonalNotes}</Text>
                 </>
               )}
             </View>
