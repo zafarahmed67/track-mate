@@ -1330,6 +1330,7 @@ import { supabaseAdmin } from "@/config/supabase"
 import { NextRequest, NextResponse } from "next/server"
 import { decodePolyline, buildCumulativeDistanceTable, samplePolylineAtKm, projectPointOntoPolyline } from "@/lib/routePolyline"
 import { env } from "@/config/env.config"
+import OpenAI from "openai"
 
 interface UserMetadata {
   defaults?: {
@@ -2323,6 +2324,33 @@ async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
     totalStops: generatedStopsCount + customStopsCount,
     suggestedDays,
   })
+
+  const { data: itineraryCheck } = await supabaseAdmin
+    .from("trip_itineraries")
+    .select("version, source")
+    .eq("trip_id", job.tripId)
+    .eq("source", "system")
+    .order("version", { ascending: false })
+    .limit(1)
+    .single()
+
+  if (itineraryCheck && itineraryCheck.version === 1) {
+    console.log("[narrative] Auto-generating TrackMate Overview for v1 trip", { tripId: job.tripId })
+    try {
+      await generateNarrativeForNewTrip(
+        job.tripId,
+        job.startLat,
+        job.startLng,
+        job.destLat,
+        job.destLng,
+        estimatedDriveDistanceKm,
+        cappedTripDays
+      )
+      console.log("[narrative] TrackMate Overview auto-generated successfully for trip", job.tripId)
+    } catch (narrativeError) {
+      console.error("[narrative] Failed to auto-generate TrackMate Overview:", narrativeError)
+    }
+  }
 }
 
 async function processTripGenerationQueue(): Promise<void> {
@@ -2608,6 +2636,362 @@ async function organizeStopsByDay(
       options: d.options.map(o => ({ name: o.name, source: o.sourceType }))
     }))
   })
+}
+
+async function generateNarrativeForNewTrip(
+  tripId: string,
+  startLat: number,
+  startLng: number,
+  destLat: number,
+  destLng: number,
+  totalDistanceKm: number,
+  tripDays: number
+): Promise<void> {
+  if (!supabaseAdmin) {
+    throw new Error("Database not configured")
+  }
+
+  console.log("[narrative] Starting auto-generation for trip", { tripId })
+
+  const { data: tripData } = await supabaseAdmin
+    .from("trips")
+    .select("*")
+    .eq("id", tripId)
+    .single()
+
+  if (!tripData) {
+    throw new Error("Trip not found")
+  }
+
+  const { data: itineraryDays } = await supabaseAdmin
+    .from("itinerary_days")
+    .select("*")
+    .eq("itinerary_id", (
+      await supabaseAdmin
+        .from("trip_itineraries")
+        .select("id")
+        .eq("trip_id", tripId)
+        .eq("source", "system")
+        .eq("status", "active")
+        .single()
+    )?.data?.id ?? "")
+    .order("day_number", { ascending: true })
+
+  const { data: candidateStops } = await supabaseAdmin
+    .from("trip_candidate_stops")
+    .select("*, stops:stops(id, location_name, stay_type, route_type, aao_tip, why_stop_here, why_we_d_stay_again, road_suitability)")
+    .eq("trip_id", tripId)
+    .eq("source_type", "verified")
+
+  const { data: customStopsData } = await supabaseAdmin
+    .from("custom_stops")
+    .select("id, name, stay_type, route_type, road_suitability, distance_from_start_km")
+    .eq("trip_id", tripId)
+
+  const kmPerDay = totalDistanceKm / tripDays
+
+  interface DayPayload {
+    dayNumber: number
+    fromLocation: string | null
+    toLocation: string | null
+    distanceKm: number
+    driveTimeMinutes: number
+    verifiedStops: Array<{
+      location_name: string
+      stay_type: string | null
+      route_type: string | null
+      aao_tip: string | null
+      why_stop_here: string | null
+      why_we_d_stay_again: string | null
+    }>
+    optionStops: Array<{
+      location_name: string
+      stay_type: string | null
+      route_type: string | null
+      aao_tip: string | null
+      why_stop_here: string | null
+      why_we_d_stay_again: string | null
+      is_verified: boolean
+    }>
+    allowedStopNames: string[]
+    fuelCritical: boolean
+    isRemote: boolean
+    fuelWarning: string | null
+    primaryFuelStop: null
+    gapFromLastFuelKm: number | null
+    gapToNextFuelKm: number | null
+    degradedMode: boolean
+  }
+
+  const daysPayload: DayPayload[] = []
+  for (let dayNum = 1; dayNum <= tripDays; dayNum++) {
+    const dayItineraryRows = itineraryDays?.filter(row => row.day_number === dayNum) ?? []
+
+    const verifiedStops = candidateStops
+      ?.filter(cs => {
+        const stop = cs.stops as { id: string; location_name: string; stay_type?: string; route_type?: string; aao_tip?: string; why_stop_here?: string; why_we_d_stay_again?: string; road_suitability?: string } | null
+        if (!stop) return false
+        const distFromStart = cs.distance_from_start_km ?? 0
+        const dayTargetKm = kmPerDay * dayNum
+        const dayMinKm = kmPerDay * (dayNum - 1)
+        return distFromStart >= dayMinKm - kmPerDay * 0.2 && distFromStart <= dayTargetKm + kmPerDay * 0.5
+      })
+      .map(cs => {
+        const stop = cs.stops as { location_name: string; stay_type?: string; route_type?: string; aao_tip?: string; why_stop_here?: string; why_we_d_stay_again?: string; road_suitability?: string }
+        return {
+          location_name: stop.location_name,
+          stay_type: stop.stay_type ?? null,
+          route_type: stop.route_type ?? null,
+          aao_tip: stop.aao_tip ?? null,
+          why_stop_here: stop.why_stop_here ?? null,
+          why_we_d_stay_again: stop.why_we_d_stay_again ?? null,
+        }
+      }) ?? []
+
+    const otherStops = customStopsData
+      ?.filter(cs => {
+        const distFromStart = cs.distance_from_start_km ?? 0
+        const dayTargetKm = kmPerDay * dayNum
+        const dayMinKm = kmPerDay * (dayNum - 1)
+        return distFromStart >= dayMinKm - kmPerDay * 0.2 && distFromStart <= dayTargetKm + kmPerDay * 0.5
+      })
+      .map(cs => ({
+        location_name: cs.name,
+        stay_type: cs.stay_type ?? null,
+        route_type: cs.route_type ?? null,
+        aao_tip: null,
+        why_stop_here: null,
+        why_we_d_stay_again: null,
+        road_suitability: cs.road_suitability ?? null,
+      })) ?? []
+
+    const optionStops = [...verifiedStops, ...otherStops].map(s => ({
+      location_name: s.location_name,
+      stay_type: s.stay_type ?? null,
+      route_type: s.route_type ?? null,
+      aao_tip: s.aao_tip ?? null,
+      why_stop_here: s.why_stop_here ?? null,
+      why_we_d_stay_again: s.why_we_d_stay_again ?? null,
+      is_verified: verifiedStops.some(vs => vs.location_name === s.location_name),
+    }))
+
+    const allowedStopNames = Array.from(new Set(optionStops.map(s => s.location_name).filter(Boolean)))
+
+    const fromLocation = dayNum === 1
+      ? tripData.start_location_text
+      : dayItineraryRows[0]?.to_location ?? null
+
+    const toLocation = dayNum === tripDays
+      ? tripData.destination_text
+      : dayItineraryRows[0]?.to_location ?? null
+
+    daysPayload.push({
+      dayNumber: dayNum,
+      fromLocation,
+      toLocation,
+      distanceKm: Math.round(kmPerDay),
+      driveTimeMinutes: Math.round(kmPerDay / 80 * 60),
+      verifiedStops,
+      optionStops,
+      allowedStopNames,
+      fuelCritical: false,
+      isRemote: false,
+      fuelWarning: null,
+      primaryFuelStop: null,
+      gapFromLastFuelKm: null,
+      gapToNextFuelKm: null,
+      degradedMode: false,
+    })
+  }
+
+  let travelMonth: string | null = null
+  if (tripData.end_date) {
+    const halfMs = ((tripData.trip_duration_days || 1) / 2) * 24 * 60 * 60 * 1000
+    const midpoint = new Date(new Date(tripData.end_date).getTime() - halfMs)
+    travelMonth = midpoint.toLocaleString("en-AU", { month: "long" })
+  }
+
+  const hasGravelSegments = candidateStops?.some(cs => {
+    const stop = cs.stops as { road_suitability?: string } | null
+    return stop?.road_suitability?.toLowerCase() === "gravel" || stop?.road_suitability?.toLowerCase() === "4wd"
+  }) ?? false
+  const roadConditionNote = hasGravelSegments
+    ? "Some overnight stop options on this route require gravel or 4WD access. Verify road conditions before committing to each leg."
+    : null
+
+  const corridor = `${tripData.start_location_text} to ${tripData.destination_text}`
+
+  const fuelSummary = {
+    totalFuelStations: 0,
+    fuelCriticalDays: 0,
+    remoteDays: 0,
+    planningMode: "standard",
+  }
+
+  const openai = new OpenAI({ apiKey: process.env.OPENAI_KEY })
+
+  const SYSTEM_PROMPT = `You are a travel writing assistant for an Australian caravan/RV road trip planner called TrackMate.
+Given structured trip data, produce a JSON object with this EXACT shape — no extra keys, no missing keys:
+
+{
+  "overview": "<1-2 sentences summarising the full trip, mentioning rig type if provided>",
+  "days": [
+    {
+      "dayNumber": 1,
+      "narrative": "<2-3 sentences about the day's drive — terrain, region highlights, character. Do NOT name a stop here.>",
+      "suggestedStay": {
+        "name": "<exact location_name from this day's allowedStopNames, or null if allowedStopNames is empty>",
+        "stopType": "<stay_type or route_type value from optionStops record for that stop>",
+        "whyStopHere": "<why_stop_here value from that stop, or a 1-sentence reason if field is empty>",
+        "aaoTip": "<aao_tip value from that stop, or empty string if none>"
+      },
+      "aaoTips": ["<tip drawn from aao_tip / why_stop_here / why_we_d_stay_again of verifiedStops>"],
+      "gapNote": "<1-sentence planning caution if degradedMode=true OR allowedStopNames is empty, otherwise null>",
+      "fuelNote": "<1-sentence fuel guidance if fuelCritical=true OR gapFromLastFuelKm>200 OR gapToNextFuelKm>200, otherwise null>"
+    }
+  ],
+  "tripNotes": {
+    "fuelGuidance": "<overall fuel planning note if fuelCriticalDays>0 or remoteDays>0, otherwise null>",
+    "remoteWarnings": "<remote stretch warning if remoteDays>0 or planningMode=degraded-valid, otherwise null>",
+    "roadConditions": "<road condition note if roadConditionNote is provided OR any day has fuelWarning mentioning dirt/gravel/unsealed, otherwise null>",
+    "rigSuitability": "<rig suitability note if rig_type/rig_length_m is provided — comment on route suitability for that rig, otherwise null>",
+    "seasonalNotes": "<seasonal tip if travelMonth is provided — note best/worst conditions for that month on this route, otherwise null>"
+  },
+  "generatedAt": "<ISO timestamp>"
+}
+
+STRICT RULES — violation will break the app:
+1. STOP ENFORCEMENT: suggestedStay.name MUST be an exact value from that day's allowedStopNames array. If allowedStopNames is empty, set suggestedStay to null. NEVER invent a stop name not in allowedStopNames.
+2. FUEL: populate fuelNote and tripNotes.fuelGuidance from the fuelCritical / gapFromLastFuelKm / gapToNextFuelKm / fuelWarning fields provided. Do not invent fuel information.
+3. GAPS: if allowedStopNames is empty for a day, set suggestedStay to null and write a gapNote stating no overnight stop is available on that stretch.
+4. VERIFIED CONTEXT: if verifiedStops is empty but allowedStopNames has values, do NOT claim the leg has no stop options.
+5. OUTPUT: respond with ONLY the raw JSON object. No markdown fences, no explanation, no trailing text.
+6. RIG: if trip.rig_type is provided, note any clearance or length limitations relevant to this route. If avoid_gravel_roads is true, confirm the planned route avoids unsealed roads.
+7. SEASONAL: if travelMonth is provided, add a brief note about seasonal conditions for that month on this corridor (e.g. wet season flooding risk, winter cold, summer heat).`
+
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    temperature: 0,
+    max_tokens: 2048,
+    response_format: { type: "json_object" },
+    messages: [
+      { role: "system", content: SYSTEM_PROMPT },
+      {
+        role: "user",
+        content: `Generate narrative for:\n\n${JSON.stringify(
+          {
+            trip: {
+              title: tripData.title,
+              travel_pace: tripData.travel_pace,
+              trip_duration_days: tripData.trip_duration_days,
+              rig_type: tripData.rig_type ?? null,
+              rig_length_m: tripData.rig_length_m ?? null,
+              avoid_gravel_roads: tripData.avoid_gravel_roads ?? false,
+              pet_friendly_required: tripData.pet_friendly_required ?? false,
+            },
+            corridor,
+            totalDistanceKm,
+            fuelSummary,
+            days: daysPayload,
+            travelMonth,
+            roadConditionNote,
+          },
+          null,
+          2
+        )}\n\nRespond with ONLY the JSON object. Remember: suggestedStay.name must be an exact value from each day's allowedStopNames array. Populate tripNotes.rigSuitability if trip.rig_type is provided. Populate tripNotes.seasonalNotes if travelMonth is provided. Populate tripNotes.roadConditions from roadConditionNote if provided.`,
+      },
+    ],
+  })
+
+  const raw = response.choices[0]?.message?.content?.trim() ?? ""
+  let narrative
+
+  try {
+    const cleaned = raw.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/, "")
+    narrative = JSON.parse(cleaned)
+  } catch {
+    console.warn("[narrative] Using fallback narrative due to parse error")
+    narrative = {
+      overview: `${tripData.title}: A ${tripDays}-day trip covering about ${Math.round(totalDistanceKm)} km through remote Australian routes with planned overnight anchors and fuel checks.`,
+      days: daysPayload.map((day) => ({
+        dayNumber: day.dayNumber,
+        narrative: `Day ${day.dayNumber} runs from ${day.fromLocation || "start"} toward ${day.toLocation || "the next leg"}, covering about ${Math.round(day.distanceKm || 0)} km through remote Australian terrain.`,
+        suggestedStay: day.allowedStopNames[0] ? {
+          name: day.allowedStopNames[0],
+          stopType: day.optionStops.find(s => s.location_name === day.allowedStopNames[0])?.stay_type || "campground",
+          whyStopHere: "Useful overnight break point for this leg.",
+          aaoTip: "",
+        } : null,
+        aaoTips: [],
+        gapNote: day.allowedStopNames.length === 0 ? "No overnight stop is available on this stretch. Plan this leg carefully before departure." : null,
+        fuelNote: null,
+      })),
+      tripNotes: {
+        fuelGuidance: null,
+        remoteWarnings: null,
+        roadConditions: roadConditionNote,
+        rigSuitability: tripData.rig_type ? `This route was planned for a ${tripData.rig_type}${tripData.rig_length_m ? ` (${tripData.rig_length_m}m)` : ""}. ${tripData.avoid_gravel_roads ? "Gravel roads are avoided in stop selection." : "Verify access conditions at each stop before arrival."}` : null,
+        seasonalNotes: travelMonth ? `Travelling in ${travelMonth}: check seasonal road conditions and campsite availability for this time of year.` : null,
+      },
+      generatedAt: new Date().toISOString(),
+    }
+  }
+
+  narrative.generatedAt = new Date().toISOString()
+
+  const { data: v1Itinerary } = await supabaseAdmin
+    .from("trip_itineraries")
+    .select("id")
+    .eq("trip_id", tripId)
+    .eq("source", "system")
+    .eq("status", "active")
+    .single()
+
+  if (v1Itinerary) {
+    await supabaseAdmin
+      .from("trip_itineraries")
+      .update({
+        source: "ai",
+        itinerary_json: narrative,
+        model_name: "gpt-4o-mini",
+        prompt_version: "v1",
+        trip_snapshot_json: { trip: tripData, corridor, totalDistanceKm, days: daysPayload },
+      })
+      .eq("id", v1Itinerary.id)
+
+    const dayRows = (narrative.days as Array<{ dayNumber: number; narrative: string; aaoTips: string[]; gapNote: string | null }>).map((day) => {
+      const dayData = daysPayload[day.dayNumber - 1]
+      return {
+        itinerary_id: v1Itinerary.id,
+        day_number: day.dayNumber,
+        from_location: dayData?.fromLocation ?? null,
+        to_location: dayData?.toLocation ?? null,
+        distance_km: dayData?.distanceKm ?? null,
+        drive_time_minutes: dayData?.driveTimeMinutes ?? null,
+        aao_tip: day.aaoTips?.[0] ?? null,
+        reason: day.narrative,
+        day_json: day,
+      }
+    })
+
+    await supabaseAdmin.from("itinerary_days").insert(dayRows)
+
+    console.log("[narrative] Auto-generated TrackMate Overview for trip", { tripId, version: 1 })
+  } else {
+    console.warn("[narrative] No v1 system itinerary found for trip", tripId)
+  }
+
+  const { data: tripRow } = await supabaseAdmin
+    .from("trips")
+    .select("route_data_json")
+    .eq("id", tripId)
+    .single()
+
+  const existingJson = (tripRow?.route_data_json as Record<string, unknown>) ?? {}
+  await supabaseAdmin
+    .from("trips")
+    .update({ route_data_json: { ...existingJson, narrative } })
+    .eq("id", tripId)
 }
 
 async function selectStopOption(

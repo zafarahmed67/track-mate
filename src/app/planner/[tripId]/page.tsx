@@ -2413,26 +2413,6 @@ export default function PlannerDetailPage() {
         if (savedNarrative?.days?.length) {
           setTripNarrative(savedNarrative)
         }
-        // Restore segment selections saved from previous session (§7.9)
-        if (routeJson.selectedSegmentOptionIds) {
-          setSelectedSegmentOptionIds(routeJson.selectedSegmentOptionIds as Record<number, string>)
-        }
-        if (routeJson.selectedSegmentFuelIds) {
-          setSelectedSegmentFuelIds(routeJson.selectedSegmentFuelIds as Record<number, string>)
-        }
-        // Restore computed segments + route meta so stop options are immediately available without re-fetching
-        if (routeJson.savedSegments && Array.isArray(routeJson.savedSegments) && (routeJson.savedSegments as unknown[]).length > 0) {
-          const savedMeta = (routeJson.savedRouteMeta ?? {}) as Partial<RouteMeta>
-          setRouteMeta({
-            corridor: savedMeta.corridor,
-            drivingInfo: savedMeta.drivingInfo,
-            paceConfig: savedMeta.paceConfig,
-            fuelStations: savedMeta.fuelStations,
-            planningMode: savedMeta.planningMode,
-            segments: routeJson.savedSegments as RouteSegment[],
-          })
-        }
-
         // Load itinerary versions + chat history in parallel with stops
         if (uid) {
           fetch(`/api/trips/${tripId}/itineraries?user_id=${uid}`)
@@ -2441,6 +2421,34 @@ export default function PlannerDetailPage() {
               if (d.success) {
                 setItineraryVersions(d.itineraries)
                 setItineraryVersionsLoaded(true)
+                // Check for AI narrative in itineraries
+                if (!savedNarrative?.days?.length && d.itineraries?.length) {
+                  const aiNarrative = d.itineraries.find(
+                    (i: { source: string; status: string; itinerary_json?: TripNarrative }) =>
+                      i.source === "ai" && i.status === "active" && i.itinerary_json?.days?.length
+                  )
+                  if (aiNarrative?.itinerary_json) {
+                    setTripNarrative(aiNarrative.itinerary_json)
+                  } else {
+                    // Retry after 2 seconds (narrative might still be generating)
+                    setTimeout(() => {
+                      fetch(`/api/trips/${tripId}/itineraries?user_id=${uid}`)
+                        .then((r) => r.json())
+                        .then((retryData) => {
+                          if (retryData.success && retryData.itineraries?.length) {
+                            const retryNarrative = retryData.itineraries.find(
+                              (i: { source: string; status: string; itinerary_json?: TripNarrative }) =>
+                                i.source === "ai" && i.status === "active" && i.itinerary_json?.days?.length
+                            )
+                            if (retryNarrative?.itinerary_json) {
+                              setTripNarrative(retryNarrative.itinerary_json)
+                            }
+                          }
+                        })
+                        .catch(() => {})
+                    }, 2000)
+                  }
+                }
               }
             })
             .catch(() => {})
