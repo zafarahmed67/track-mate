@@ -907,19 +907,23 @@ export async function POST(req: NextRequest) {
         return aLateral - bLateral
       })
 
-      // Take top 3 options, mark first DB stop as recommended
-      const options: RouteStopCandidate[] = sortedByLateral.slice(0, 3).map((stop, idx) => {
+      // Take top 3 options, mark first DB stop as recommended (not Google)
+      const options: RouteStopCandidate[] = sortedByLateral.slice(0, 3).map((stop) => {
         const isDbStop = stop.is_verified
         return {
           ...stop,
           source: isDbStop ? "database" as const : "google_places" as const,
-          is_recommended: idx === 0 && isDbStop ? true : false,
+          is_recommended: false, // Mark all as false first, then set correct one below
         }
       })
 
-      // If no DB stop is recommended, mark the first option as recommended
-      const hasRecommended = options.some(o => o.is_recommended)
-      if (!hasRecommended && options.length > 0) {
+      // Find first DB stop to recommend - if any DB exists in top 3, it should be recommended
+      // This ensures DB stops take priority over Google even if further from route
+      const dbStopIndex = options.findIndex(o => o.is_verified)
+      if (dbStopIndex !== -1) {
+        options[dbStopIndex].is_recommended = true
+      } else if (options.length > 0) {
+        // No DB stops: mark first option as recommended (existing behavior)
         options[0].is_recommended = true
       }
 

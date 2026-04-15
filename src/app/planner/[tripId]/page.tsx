@@ -545,6 +545,8 @@ export default function PlannerDetailPage() {
           endKm: 0,
           verifiedStops: [],
           otherStops: [],
+          options: [],
+          recommendedOption: null,
           fuelSuggestions: [],
           primaryFuelSuggestion: undefined,
           isRemote: false,
@@ -575,11 +577,25 @@ export default function PlannerDetailPage() {
 
       const fuelSuggestions = Array.from(fuelMap.values()).slice(0, 3)
 
+      const allOptions: RouteStopOption[] = []
+      group.forEach((seg) => {
+        if (seg.options) {
+          seg.options.forEach((opt) => {
+            if (!allOptions.some((a) => a.id === opt.id)) {
+              allOptions.push(opt)
+            }
+          })
+        }
+      })
+      const recommendedOption = group.find((seg) => seg.recommendedOption)?.recommendedOption ?? null
+
       return {
         startKm: first.startKm,
         endKm: last.endKm,
         verifiedStops: Array.from(verifiedStopsMap.values()),
         otherStops: Array.from(otherStopsMap.values()),
+        options: allOptions.length > 0 ? allOptions : undefined,
+        recommendedOption,
         fuelSuggestions,
         primaryFuelSuggestion: fuelSuggestions[0],
         isRemote: group.some((s) => s.isRemote),
@@ -589,7 +605,6 @@ export default function PlannerDetailPage() {
         gapFromLastFuelKm: group.find((s) => s.gapFromLastFuelKm !== undefined)?.gapFromLastFuelKm,
         gapToNextFuelKm: group.find((s) => s.gapToNextFuelKm !== undefined)?.gapToNextFuelKm,
         fuelWarning: group.find((s) => s.fuelWarning)?.fuelWarning,
-        // Carry the last segment's anchor — it is the overnight stop for this merged day
         overnightAnchorName: last.overnightAnchorName ?? null,
         overnightAnchorLat: last.overnightAnchorLat ?? null,
         overnightAnchorLng: last.overnightAnchorLng ?? null,
@@ -614,6 +629,8 @@ export default function PlannerDetailPage() {
             endKm: Math.round((routeMeta.drivingInfo?.totalDistanceKm || 0) * ((index + 1) / targetDays)),
             verifiedStops: [] as RouteStopOption[],
             otherStops: [] as RouteStopOption[],
+            options: [] as RouteStopOption[],
+            recommendedOption: null as RouteStopOption | null,
             fuelSuggestions: [] as FuelStation[],
             primaryFuelSuggestion: undefined,
             isRemote: false,
@@ -1675,23 +1692,42 @@ export default function PlannerDetailPage() {
     const origin = new google.maps.LatLng(trip.start_lat!, trip.start_lng!)
     const destination = new google.maps.LatLng(trip.destination_lat!, trip.destination_lng!)
 
-    // Compute selected stops from segments and user selections
-    const usedIds = new Set<string>()
+    // Compute selected stops from segments and user selections.
+    // Seed usedIds with excludedOptionIds so excluded stops are never used as waypoints.
+    const usedIds = new Set<string>(excludedOptionIds)
     const selectedStops: RouteStopOption[] = daySegments.map((seg, i) => {
       const allOptions = [...seg.verifiedStops, ...seg.otherStops]
-      const visible = allOptions.filter((o) => !usedIds.has(o.id))
+      // Filter out already-used AND explicitly excluded stops
+      const visible = allOptions.filter((o) => !usedIds.has(o.id) && !excludedOptionIds.has(o.id))
       const explicitId = selectedSegmentOptionIds[i]
       if (explicitId) {
         const explicit = visible.find((o) => o.id === explicitId)
         if (explicit) { usedIds.add(explicit.id); return explicit }
+      }
+      // Prefer recommendedOption from API first
+      if (seg.recommendedOption && !usedIds.has(seg.recommendedOption.id) && !excludedOptionIds.has(seg.recommendedOption.id)) {
+        usedIds.add(seg.recommendedOption.id)
+        return seg.recommendedOption
       }
       const pick = visible.find((o) => !usedIds.has(o.id)) ?? null
       if (pick) usedIds.add(pick.id)
       return pick
     }).filter((stop): stop is RouteStopOption => stop !== null)
 
+    // Google Directions API supports max 25 waypoints. For longer trips, keep
+    // only evenly-spaced stops so the route still represents the full journey.
+    const MAX_WAYPOINTS = 25
+    const cappedStops = selectedStops.length > MAX_WAYPOINTS
+      ? (() => {
+          const step = selectedStops.length / MAX_WAYPOINTS
+          return Array.from({ length: MAX_WAYPOINTS }, (_, i) =>
+            selectedStops[Math.min(Math.round(i * step), selectedStops.length - 1)]
+          )
+        })()
+      : selectedStops
+
     // Build waypoints from selected stops
-    const waypoints: google.maps.DirectionsWaypoint[] = selectedStops
+    const waypoints: google.maps.DirectionsWaypoint[] = cappedStops
       .map((stop) => ({
         location: new google.maps.LatLng(
           parseFloat(stop.latitude || "0"),
@@ -1733,7 +1769,7 @@ export default function PlannerDetailPage() {
         }
       }
     )
-  }, [trip, daySegments, selectedSegmentOptionIds])
+  }, [trip, daySegments, selectedSegmentOptionIds, excludedOptionIds])
 
   useEffect(() => {
     if (map && trip) {
@@ -1922,6 +1958,11 @@ export default function PlannerDetailPage() {
         const explicit = visible.find((o) => o.id === explicitId)
         if (explicit) { usedIds.add(explicit.id); return explicit }
       }
+      // Prefer recommendedOption from API first
+      if (seg.recommendedOption && !usedIds.has(seg.recommendedOption.id) && !excludedOptionIds.has(seg.recommendedOption.id)) {
+        usedIds.add(seg.recommendedOption.id)
+        return seg.recommendedOption
+      }
       const pick = visible.find((o) => !usedIds.has(o.id)) ?? null
       if (pick) usedIds.add(pick.id)
       return pick
@@ -1933,11 +1974,18 @@ export default function PlannerDetailPage() {
       const resolved = resolvedDaySelections[segmentIndex]
       return resolved ?? undefined
     }
+    // Fallback path (no segmentIndex): prefer recommendedOption for consistency
+    if (segment.recommendedOption && !excludedOptionIds.has(segment.recommendedOption.id)) {
+      return segment.recommendedOption
+    }
     const allOptions = filterStopsBySegmentDistance(segment, [...segment.verifiedStops, ...segment.otherStops])
     return allOptions.filter((o) => !excludedOptionIds.has(o.id))[0]
   }
 
   const getSegmentOptions = (segment: RouteSegment, maxOptions = 3) => {
+    if (segment.options && segment.options.length > 0) {
+      return segment.options.slice(0, maxOptions)
+    }
     const allOptions = [...segment.verifiedStops, ...segment.otherStops]
     return filterStopsBySegmentDistance(segment, allOptions).slice(0, maxOptions)
   }
@@ -2658,7 +2706,9 @@ export default function PlannerDetailPage() {
       .map((segment, index) => {
         // Use recommendedOption from API if available, otherwise fall back to first selected
         const seg = segment as RouteSegment | undefined
-        const recommended = seg?.recommendedOption || getSelectedOption(segment, index)
+        const recommended = seg?.recommendedOption 
+          || (index < resolvedDaySelections.length ? resolvedDaySelections[index] : null)
+          || getSelectedOption(segment, index)
         if (!recommended) return null
         const lat = parseFloat(String(recommended.latitude ?? ""))
         const lng = parseFloat(String(recommended.longitude ?? ""))
@@ -3321,9 +3371,12 @@ icon={{
                     && !displayedRouteStopIds.has(normalizedId)
                     && !displayedRouteStopNames.has(normalizedName)
                 })
+                const segmentOptionsFromApi = segment.options && segment.options.length > 0
+                  ? segment.options
+                  : alternateStops
                 const optionsToShow = expandedSegmentOptions.has(index)
-                  ? alternateStops
-                  : alternateStops.slice(0, 3)
+                  ? segmentOptionsFromApi
+                  : segmentOptionsFromApi.slice(0, 3)
                 const knownNames = new Set(
                   [
                     ...allStops.map((stop) => stop.location_name.toLowerCase()),
@@ -3507,117 +3560,197 @@ icon={{
 
                         <div className="grid gap-4 lg:grid-cols-2">
 
-                          <div className="rounded-3xl bg-muted/5 p-4">
-                            <div className="text-sm text-muted-foreground mb-2">Suggested overnight area</div>
-                            <div className="text-base font-semibold">{selectedOption?.region || region}</div>
-                            <p className="mt-2 text-sm text-muted-foreground">
-                              {selectedOption
-                                ? `Planning anchor near ${selectedOption.location_name}. Choose the exact sleep spot (campground, caravan park, hotel, or station stay) that fits your setup.`
-                                : `No confirmed overnight region yet. Add a stop option to lock this leg.`}
-                            </p>
-                            <div className="rounded-3xl bg-muted/5">
-                              <div className="text-xl text-muted-foreground mb-3 mt-8">Options</div>
-                              <div className="space-y-3">
-                                {optionsToShow.length > 0 ? (
-                                  optionsToShow.map((option) => {
-                                    const selectedId = getSelectedOption(segment, index)?.id
-                                    const isSelectedCard = option.id === selectedId
-                                    const isRecommended = option.is_recommended === true
-                                    return (
-                                      <div
-                                        key={option.id}
-                                        className={`relative overflow-hidden rounded-3xl border p-4 ${isSelectedCard ? "border-primary bg-primary/5" : "border-muted/30 bg-background"}`}
-                                      >
-                                        <div className="absolute left-4 top-4 flex h-8 w-8 items-center justify-center rounded-full bg-primary/10">
-                                          {isRecommended ? (
-                                            <Star className="h-4 w-4 text-amber-500 fill-amber-500" />
-                                          ) : (
-                                            <MapPin className="h-4 w-4 text-primary" />
-                                          )}
-                                        </div>
-                                        {isRecommended && (
-                                          <div className="absolute left-6 top-4">
-                                            <Badge className="bg-amber-500 text-white text-xs">Recommended</Badge>
-                                          </div>
-                                        )}
-                                        <div className={`ml-8 ${isRecommended ? "mt-6" : ""}`}>
-                                          <div className="flex flex-wrap items-center gap-2">
-                                            <h3 className="font-semibold text-sm">{option.location_name}</h3>
-                                            <Badge variant="outline" className="text-xs">{option.stay_type || option.route_type || "Stop"}</Badge>
-                                            {option.is_verified && <Badge variant="outline" className="text-xs">Verified</Badge>}
-                                            {option.source === "google_places" && <Badge variant="outline" className="text-xs">Google</Badge>}
-                                          </div>
-                                          <p className="mt-2 text-sm text-muted-foreground">
-                                            {isRecommended 
-                                              ? "Best match for this leg - closest to route with good facilities."
-                                              : "Alternative option for this overnight stop."}
-                                          </p>
-                                          <div className="mt-3 flex flex-wrap gap-2">
-                                            <Button variant={getSelectedOption(segment, index)?.id === option.id ? "secondary" : "outline"} size="sm" onClick={() => handleChooseSegmentOption(segment, index, option)}>
-                                              {getSelectedOption(segment, index)?.id === option.id ? "Selected" : "Choose this stop"}
-                                            </Button>
-                                            <Button
-                                              variant="ghost"
-                                              size="sm"
-                                              onClick={() => {
-                                                toggleSegmentOptions(index)
-                                                void loadNearbyPlacesForDay(index, segment)
-                                              }}
-                                            >
-                                              {expandedSegmentOptions.has(index) ? "Hide alternatives" : "View alternatives"}
-                                            </Button>
-                                          </div>
-                                        </div>
-                                      </div>
-                                    )
-                                  })
-                                ) : (
-                                  <div className="rounded-3xl border border-dashed border-muted/30 bg-muted/10 p-4 text-sm text-muted-foreground">
-                                    No alternate overnight options for this day. Try Rebuild plan to generate different suggestions.
-                                  </div>
-                                )}
-
-                                {expandedSegmentOptions.has(index) && (
-                                  <div className="pt-2">
-                                    <div className="text-sm text-muted-foreground mb-2">Nearby alternatives</div>
-                                    {loadingPlaces.has(index) ? (
-                                      <div className="rounded-2xl border border-dashed border-muted/30 bg-muted/10 p-3 text-sm text-muted-foreground">
-                                        Loading nearby alternatives...
-                                      </div>
-                                    ) : nearbyAlternatives.length > 0 ? (
-                                      <div className="space-y-2">
-                                        {nearbyAlternatives.map((place) => (
-                                          <div key={`${place.name}-${place.lat}-${place.lng}`} className="rounded-2xl border border-muted/30 bg-background p-3">
-                                            <div className="flex items-center justify-between gap-3">
-                                              <div>
-                                                <div className="font-medium text-sm">{place.name}</div>
-                                                <div className="text-xs text-muted-foreground">{place.address}</div>
-                                              </div>
-                                              <Button
-                                                size="sm"
-                                                variant="outline"
-                                                onClick={() => void handleAddPlaceToDay(index, {
-                                                  name: place.name,
-                                                  lat: place.lat,
-                                                  lng: place.lng,
-                                                  address: place.address,
-                                                  type: place.type,
-                                                })}
-                                              >
-                                                Add to route
-                                              </Button>
-                                            </div>
-                                          </div>
-                                        ))}
-                                      </div>
-                                    ) : (
-                                      <div className="rounded-2xl border border-dashed border-muted/30 bg-muted/10 p-3 text-sm text-muted-foreground">
-                                        No nearby alternatives found for this segment.
-                                      </div>
-                                    )}
-                                  </div>
+                          {/* ── Day Stop Selector ── */}
+                          <div className="rounded-3xl bg-muted/5 p-4 space-y-4">
+                            {/* Header */}
+                            <div>
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="text-sm font-semibold">Overnight stop</span>
+                                {selectedOption && (
+                                  <Badge variant="secondary" className="text-xs">
+                                    {selectedOption.region || selectedOption.state || "Selected"}
+                                  </Badge>
                                 )}
                               </div>
+                              <p className="text-xs text-muted-foreground">
+                                {selectedOption
+                                  ? `Overnighting near ${selectedOption.location_name}. Tap another card to switch.`
+                                  : "Pick an overnight stop for this leg."}
+                              </p>
+                            </div>
+
+                            {/* 3-option card grid */}
+                            {optionsToShow.length > 0 ? (
+                              <div className="grid grid-cols-1 gap-3">
+                                {optionsToShow.map((option, optIdx) => {
+                                  const isSelected = option.id === selectedOption?.id
+                                  const isRecommended = option.is_recommended === true
+                                  const lateralDisplay = typeof option.distance_to_route_km === "number"
+                                    ? option.distance_to_route_km
+                                    : null
+                                  const lateralColor = lateralDisplay === null
+                                    ? "text-muted-foreground"
+                                    : lateralDisplay <= 10
+                                      ? "text-emerald-600"
+                                      : lateralDisplay <= 20
+                                        ? "text-amber-600"
+                                        : "text-red-500"
+                                  const descriptionText = option.why_stop_here || option.aao_tip || option.why_we_d_stay_again
+                                  return (
+                                    <button
+                                      key={option.id}
+                                      type="button"
+                                      onClick={() => handleChooseSegmentOption(segment, index, option)}
+                                      className={[
+                                        "relative w-full text-left rounded-2xl border p-4 transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary",
+                                        isSelected
+                                          ? "border-primary bg-primary/5 shadow-sm"
+                                          : isRecommended
+                                            ? "border-amber-400 bg-amber-50/40 dark:bg-amber-900/10 hover:border-amber-500"
+                                            : "border-muted/40 bg-background hover:border-muted/70 hover:bg-muted/5",
+                                      ].join(" ")}
+                                    >
+                                      {/* Top row: number + name + selected tick */}
+                                      <div className="flex items-start gap-2.5">
+                                        <div className={[
+                                          "flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-bold",
+                                          isSelected
+                                            ? "bg-primary text-primary-foreground"
+                                            : isRecommended
+                                              ? "bg-amber-400 text-white"
+                                              : "bg-muted/40 text-muted-foreground",
+                                        ].join(" ")}>
+                                          {isSelected ? "✓" : optIdx + 1}
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                          <div className="flex flex-wrap items-center gap-1.5 mb-1">
+                                            {isRecommended && (
+                                              <span className="inline-flex items-center gap-1 rounded-full bg-amber-400/20 px-2 py-0.5 text-[10px] font-semibold text-amber-700 dark:text-amber-400">
+                                                <Star className="h-2.5 w-2.5 fill-amber-500 text-amber-500" />
+                                                Recommended
+                                              </span>
+                                            )}
+                                            {isSelected && !isRecommended && (
+                                              <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary">
+                                                Selected
+                                              </span>
+                                            )}
+                                          </div>
+                                          <h3 className="font-semibold text-sm leading-tight truncate">{option.location_name}</h3>
+                                        </div>
+                                      </div>
+
+                                      {/* Badges row */}
+                                      <div className="mt-2.5 flex flex-wrap gap-1.5 ml-9">
+                                        {(option.stay_type || option.route_type) && (
+                                          <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                                            {option.stay_type || option.route_type}
+                                          </Badge>
+                                        )}
+                                        {option.is_verified && (
+                                          <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-emerald-500/50 text-emerald-700 dark:text-emerald-400">
+                                            DB Verified
+                                          </Badge>
+                                        )}
+                                        {option.source === "google_places" && (
+                                          <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-blue-400/50 text-blue-600 dark:text-blue-400">
+                                            Google
+                                          </Badge>
+                                        )}
+                                        {lateralDisplay !== null && (
+                                          <span className={`text-[10px] font-medium ${lateralColor}`}>
+                                            {lateralDisplay < 1 ? "On route" : `${Math.round(lateralDisplay)} km off route`}
+                                          </span>
+                                        )}
+                                      </div>
+
+                                      {/* Amenity chips */}
+                                      {(option.water || option.pet_friendly || option.cost_band) && (
+                                        <div className="mt-2 ml-9 flex flex-wrap gap-1">
+                                          {option.water === "Yes" && (
+                                            <span className="inline-flex items-center gap-0.5 rounded-full bg-blue-100 dark:bg-blue-900/20 px-1.5 py-0.5 text-[10px] text-blue-700 dark:text-blue-400">
+                                              <Droplets className="h-2.5 w-2.5" /> Water
+                                            </span>
+                                          )}
+                                          {option.pet_friendly === "Yes" && (
+                                            <span className="inline-flex items-center rounded-full bg-green-100 dark:bg-green-900/20 px-1.5 py-0.5 text-[10px] text-green-700 dark:text-green-400">
+                                              Pets OK
+                                            </span>
+                                          )}
+                                          {option.cost_band && (
+                                            <span className="inline-flex items-center rounded-full bg-muted/40 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                                              {option.cost_band}
+                                            </span>
+                                          )}
+                                        </div>
+                                      )}
+
+                                      {/* Description / tip text */}
+                                      {descriptionText && (
+                                        <p className="mt-2 ml-9 text-xs text-muted-foreground line-clamp-2 leading-relaxed">
+                                          {descriptionText}
+                                        </p>
+                                      )}
+                                    </button>
+                                  )
+                                })}
+                              </div>
+                            ) : (
+                              <div className="rounded-2xl border border-dashed border-muted/30 bg-muted/10 p-4 text-sm text-muted-foreground">
+                                No overnight options for this day yet. Try rebuilding the plan.
+                              </div>
+                            )}
+
+                            {/* Nearby places toggle — clearly separate from the 3 API options */}
+                            <div className="pt-1">
+                              <button
+                                type="button"
+                                className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                                onClick={() => {
+                                  toggleSegmentOptions(index)
+                                  void loadNearbyPlacesForDay(index, segment)
+                                }}
+                              >
+                                <ChevronRight className={`h-3.5 w-3.5 transition-transform ${expandedSegmentOptions.has(index) ? "rotate-90" : ""}`} />
+                                {expandedSegmentOptions.has(index) ? "Hide nearby places" : "Show nearby places from Google"}
+                              </button>
+
+                              {expandedSegmentOptions.has(index) && (
+                                <div className="mt-3 space-y-2">
+                                  {loadingPlaces.has(index) ? (
+                                    <div className="rounded-xl border border-dashed border-muted/30 bg-muted/10 p-3 text-xs text-muted-foreground">
+                                      Loading nearby places…
+                                    </div>
+                                  ) : nearbyAlternatives.length > 0 ? (
+                                    nearbyAlternatives.map((place) => (
+                                      <div key={`${place.name}-${place.lat}-${place.lng}`} className="flex items-center justify-between gap-3 rounded-xl border border-muted/30 bg-background p-3">
+                                        <div className="min-w-0">
+                                          <div className="font-medium text-xs truncate">{place.name}</div>
+                                          <div className="text-[10px] text-muted-foreground truncate">{place.address}</div>
+                                        </div>
+                                        <Button
+                                          size="sm"
+                                          variant="outline"
+                                          className="shrink-0 h-7 text-xs px-2"
+                                          onClick={() => void handleAddPlaceToDay(index, {
+                                            name: place.name,
+                                            lat: place.lat,
+                                            lng: place.lng,
+                                            address: place.address,
+                                            type: place.type,
+                                          })}
+                                        >
+                                          Add
+                                        </Button>
+                                      </div>
+                                    ))
+                                  ) : (
+                                    <div className="rounded-xl border border-dashed border-muted/30 bg-muted/10 p-3 text-xs text-muted-foreground">
+                                      No nearby places found for this area.
+                                    </div>
+                                  )}
+                                </div>
+                              )}
                             </div>
                           </div>
                           <div className="rounded-3xl bg-muted/5 p-4">
