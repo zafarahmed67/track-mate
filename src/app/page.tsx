@@ -339,8 +339,7 @@ export default function LandingPage() {
               Ready to hit the road?
             </h2>
             <p className="text-lg text-muted-foreground mb-10">
-              Join Australian travellers who plan smarter with TrackMate.
-              Purchase once, plan as many trips as you need.
+              Join Australian travellers who plan smarter with TrackMate.Purchase once, plan as many trips as you need.
             </p>
             <div className="flex flex-col items-center gap-3 sm:flex-row sm:justify-center">
               {hasActiveAccess ? (
