@@ -138,6 +138,16 @@ interface RouteStopOption {
   road_suitability?: string
 }
 
+interface ActiveItineraryDayRow {
+  day_number?: number
+  day_order?: number
+  source_type?: string
+  stop_id?: string | null
+  custom_stop_id?: string | null
+  is_selected?: boolean
+  to_location?: string | null
+}
+
 interface RouteSegment {
   startKm: number
   endKm: number
@@ -348,6 +358,7 @@ export default function PlannerDetailPage() {
   const [expandedSegmentOptions, setExpandedSegmentOptions] = useState<Set<number>>(new Set())
   const [segmentRouteOrderIds, setSegmentRouteOrderIds] = useState<Record<number, string[]>>({})
   const [excludedOptionIds, setExcludedOptionIds] = useState<Set<string>>(new Set())
+  const [activeItineraryDays, setActiveItineraryDays] = useState<ActiveItineraryDayRow[]>([])
   const [avoidLongDays, setAvoidLongDays] = useState(true)
   const [preferVerifiedStops, setPreferVerifiedStops] = useState(true)
   const [includeFreeCamps, setIncludeFreeCamps] = useState(false)
@@ -906,8 +917,143 @@ export default function PlannerDetailPage() {
     tier: option.tier ?? "",
   })
 
+  const filterStopsBySegmentDistance = useCallback((segment: RouteSegment, options: RouteStopOption[]) => {
+    if (options.length === 0) return options
+
+    const optionsWithDistance = options.filter((option) =>
+      typeof option.distance_from_start_km === "number" && Number.isFinite(option.distance_from_start_km)
+    )
+
+    if (optionsWithDistance.length === 0) return options
+
+    const midpoint = (segment.startKm + segment.endKm) / 2
+    // Trust the API's stop scoping — no extra frontend padding to prevent cross-day bleeding.
+    const paddingKm = 0
+    const minKm = Math.max(0, segment.startKm - paddingKm)
+    const maxKm = segment.endKm + paddingKm
+
+    const inRange = optionsWithDistance
+      .filter((option) => {
+        const km = option.distance_from_start_km as number
+        return km >= minKm && km <= maxKm
+      })
+      .sort((a, b) => (a.distance_from_start_km as number) - (b.distance_from_start_km as number))
+
+    if (inRange.length > 0) return inRange
+
+    return [...optionsWithDistance].sort(
+      (a, b) =>
+        Math.abs((a.distance_from_start_km as number) - midpoint) -
+        Math.abs((b.distance_from_start_km as number) - midpoint)
+    )
+  }, [])
+
+  const tripStopToRouteOption = useCallback((stop: TripStop): RouteStopOption => ({
+    id: normalizeStopId(stop.stop_id || stop.id) || stop.id,
+    location_name: stop.location_name,
+    latitude: stop.latitude,
+    longitude: stop.longitude,
+    state: stop.state,
+    region: stop.region,
+    route_type: stop.route_type || stop.stop_type,
+    stay_type: stop.stay_type || stop.stop_type,
+    pet_friendly: stop.pet_friendly,
+    water: stop.water,
+    cost_band: stop.cost_band,
+    tier: stop.tier,
+    is_verified: stop.verification_status !== "custom",
+    distance_from_start_km: stop.distance_from_start_km,
+    distance_to_route_km: stop.distance_to_route_km,
+    source: stop.verification_status === "custom" ? "google_places" : "database",
+  }), [])
+
+  const getOptionIdentityKeys = useCallback((option: RouteStopOption) => {
+    const normalizedId = normalizeStopId(option.id)
+    const normalizedName = normalizeStopName(option.location_name)
+    const lat = Number(option.latitude)
+    const lng = Number(option.longitude)
+    const distance = getStopDistanceKm(option)
+
+    return [
+      normalizedId ? `id:${normalizedId}` : "",
+      normalizedName && Number.isFinite(lat) && Number.isFinite(lng)
+        ? `place:${normalizedName}|${lat.toFixed(3)}|${lng.toFixed(3)}`
+        : "",
+      normalizedName && distance !== null ? `name-km:${normalizedName}|${Math.round(distance)}` : "",
+    ].filter(Boolean)
+  }, [])
+
+  const getMergedSegmentOptions = useCallback((segment: RouteSegment, segmentIndex: number, maxOptions = 3) => {
+    const apiOptions = segment.options && segment.options.length > 0
+      ? segment.options
+      : filterStopsBySegmentDistance(segment, [...segment.verifiedStops, ...segment.otherStops])
+
+    const itineraryOptions = activeItineraryDays
+      .filter((row) => Number(row.day_number) === segmentIndex + 1)
+      .sort((a, b) => Number(a.day_order ?? 999) - Number(b.day_order ?? 999))
+      .map((row): RouteStopOption | null => {
+        const rowStopIds = [row.stop_id, row.custom_stop_id]
+          .map((id) => normalizeStopId(String(id || "")))
+          .filter(Boolean)
+        const rowName = normalizeStopName(row.to_location || "")
+
+        const matchedStop = stops.find((stop) => {
+          const stopIds = [
+            normalizeStopId(stop.id || ""),
+            normalizeStopId(stop.stop_id || ""),
+          ].filter(Boolean)
+          if (rowStopIds.length > 0 && stopIds.some((id) => rowStopIds.includes(id))) return true
+          return rowName !== "" && normalizeStopName(stop.location_name) === rowName
+        })
+
+        if (!matchedStop) return null
+        return { ...tripStopToRouteOption(matchedStop), is_recommended: Boolean(row.is_selected) }
+      })
+      .filter((option): option is RouteStopOption => Boolean(option))
+
+    const persistedOptions = stops
+      .filter((stop) => {
+        if (excludedOptionIds.has(normalizeStopId(stop.stop_id || stop.id) || stop.id)) return false
+        if (typeof stop.day_index === "number" && Number.isFinite(stop.day_index)) {
+          return Math.trunc(stop.day_index) === segmentIndex
+        }
+        const distance = Number(stop.distance_from_start_km)
+        return Number.isFinite(distance) && distance >= segment.startKm && distance <= segment.endKm
+      })
+      .map(tripStopToRouteOption)
+
+    const merged: RouteStopOption[] = []
+    const seenKeys = new Set<string>()
+
+    const addOption = (option: RouteStopOption) => {
+      if (excludedOptionIds.has(option.id)) return
+      const keys = getOptionIdentityKeys(option)
+      if (keys.length > 0 && keys.some((key) => seenKeys.has(key))) return
+      merged.push(option)
+      keys.forEach((key) => seenKeys.add(key))
+    }
+
+    itineraryOptions.forEach(addOption)
+    apiOptions.forEach(addOption)
+    persistedOptions
+      .sort((a, b) => {
+        const aDistance = getStopDistanceKm(a) ?? Number.MAX_SAFE_INTEGER
+        const bDistance = getStopDistanceKm(b) ?? Number.MAX_SAFE_INTEGER
+        return Math.abs(aDistance - segment.endKm) - Math.abs(bDistance - segment.endKm)
+      })
+      .forEach(addOption)
+
+    const recommendedIndex = merged.findIndex((option) => option.is_recommended)
+    if (recommendedIndex > 0) {
+      const [recommended] = merged.splice(recommendedIndex, 1)
+      merged.unshift(recommended)
+    }
+
+    return merged.slice(0, maxOptions)
+  }, [activeItineraryDays, excludedOptionIds, filterStopsBySegmentDistance, getOptionIdentityKeys, stops, tripStopToRouteOption])
+
   const handleAddSegmentStop = async (segment: RouteSegment, segmentIndex: number) => {
-    const selected = getSelectedOption(segment, segmentIndex) || getSegmentOptions(segment, 1)[0]
+    const selected = getSelectedOption(segment, segmentIndex) || getMergedSegmentOptions(segment, segmentIndex, 1)[0]
     if (!selected) {
       toast.error("No stop option available to add.")
       return
@@ -1235,7 +1381,13 @@ export default function PlannerDetailPage() {
         if (userId) {
           fetch(`/api/trips/${tripId}/itineraries?user_id=${userId}`)
             .then((r) => r.json())
-            .then((d) => { if (d.success) { setItineraryVersions(d.itineraries); setItineraryVersionsLoaded(true) } })
+            .then((d) => {
+              if (d.success) {
+                setItineraryVersions(d.itineraries)
+                setActiveItineraryDays(Array.isArray(d.activeDays) ? d.activeDays : [])
+                setItineraryVersionsLoaded(true)
+              }
+            })
             .catch(() => {})
         }
       } else {
@@ -1256,6 +1408,7 @@ export default function PlannerDetailPage() {
       const data = await response.json()
       if (data.success) {
         setItineraryVersions(data.itineraries)
+        setActiveItineraryDays(Array.isArray(data.activeDays) ? data.activeDays : [])
         setItineraryVersionsLoaded(true)
       }
     } catch (error) {
@@ -2030,37 +2183,6 @@ export default function PlannerDetailPage() {
     return `${prevAnchor} → ${thisAnchor}`
   }
 
-  const filterStopsBySegmentDistance = useCallback((segment: RouteSegment, options: RouteStopOption[]) => {
-    if (options.length === 0) return options
-
-    const optionsWithDistance = options.filter((option) =>
-      typeof option.distance_from_start_km === "number" && Number.isFinite(option.distance_from_start_km)
-    )
-
-    if (optionsWithDistance.length === 0) return options
-
-    const midpoint = (segment.startKm + segment.endKm) / 2
-    // Trust the API's stop scoping — no extra frontend padding to prevent cross-day bleeding.
-    const paddingKm = 0
-    const minKm = Math.max(0, segment.startKm - paddingKm)
-    const maxKm = segment.endKm + paddingKm
-
-    const inRange = optionsWithDistance
-      .filter((option) => {
-        const km = option.distance_from_start_km as number
-        return km >= minKm && km <= maxKm
-      })
-      .sort((a, b) => (a.distance_from_start_km as number) - (b.distance_from_start_km as number))
-
-    if (inRange.length > 0) return inRange
-
-    return [...optionsWithDistance].sort(
-      (a, b) =>
-        Math.abs((a.distance_from_start_km as number) - midpoint) -
-        Math.abs((b.distance_from_start_km as number) - midpoint)
-    )
-  }, [])
-
   // Pre-compute each day's selection sequentially — single source of truth for dedup
   const resolvedDaySelections = useMemo(() => {
     const usedIds = new Set<string>(excludedOptionIds)
@@ -2105,10 +2227,7 @@ export default function PlannerDetailPage() {
     }
 
     return daySegments.map((seg, i) => {
-      // Prefer segment.options[] from API (already scoped per segment, no bleed)
-      const allOptions = seg.options && seg.options.length > 0
-        ? seg.options
-        : filterStopsBySegmentDistance(seg, [...seg.verifiedStops, ...seg.otherStops])
+      const allOptions = getMergedSegmentOptions(seg, i, 12)
       const visible = allOptions.filter((o) => !excludedOptionIds.has(o.id))
       const explicitId = selectedSegmentOptionIds[i]
       if (explicitId) {
@@ -2127,7 +2246,7 @@ export default function PlannerDetailPage() {
       if (pick) markUsed(pick)
       return pick
     })
-  }, [daySegments, selectedSegmentOptionIds, excludedOptionIds, filterStopsBySegmentDistance])
+  }, [daySegments, selectedSegmentOptionIds, excludedOptionIds, getMergedSegmentOptions])
 
   const getSelectedOption = (segment: RouteSegment, segmentIndex?: number) => {
     if (segmentIndex !== undefined) {
@@ -2138,16 +2257,13 @@ export default function PlannerDetailPage() {
     if (segment.recommendedOption && !excludedOptionIds.has(segment.recommendedOption.id)) {
       return segment.recommendedOption
     }
-    const allOptions = filterStopsBySegmentDistance(segment, [...segment.verifiedStops, ...segment.otherStops])
+    const allOptions = getMergedSegmentOptions(segment, 0, 12)
     return allOptions.filter((o) => !excludedOptionIds.has(o.id))[0]
   }
 
   const getSegmentOptions = (segment: RouteSegment, maxOptions = 3) => {
-    if (segment.options && segment.options.length > 0) {
-      return segment.options.slice(0, maxOptions)
-    }
-    const allOptions = [...segment.verifiedStops, ...segment.otherStops]
-    return filterStopsBySegmentDistance(segment, allOptions).slice(0, maxOptions)
+    const segmentIndex = daySegments.findIndex((candidate) => candidate === segment)
+    return getMergedSegmentOptions(segment, Math.max(0, segmentIndex), maxOptions)
   }
 
   const averageKmPerDay = () => {
@@ -2467,6 +2583,7 @@ export default function PlannerDetailPage() {
             .then((d) => {
               if (d.success) {
                 setItineraryVersions(d.itineraries)
+                setActiveItineraryDays(Array.isArray(d.activeDays) ? d.activeDays : [])
                 setItineraryVersionsLoaded(true)
                 // Check for AI narrative in itineraries
                 if (!savedNarrative?.days?.length && d.itineraries?.length) {
@@ -2534,7 +2651,17 @@ export default function PlannerDetailPage() {
 
           if (customStopsData.success && customStopsData.stops && Array.isArray(customStopsData.stops)) {
             const customFormattedStops = customStopsData.stops.map(
-              (item: { id: string; location_name: string; latitude: string; longitude: string; address?: string; place_type?: string; day_index?: number }) => ({
+              (item: {
+                id: string
+                location_name: string
+                latitude: string
+                longitude: string
+                address?: string
+                place_type?: string
+                day_index?: number
+                distance_from_start_km?: number
+                distance_to_route_km?: number
+              }) => ({
                 id: item.id,
                 location_name: item.location_name,
                 latitude: item.latitude,
@@ -2563,6 +2690,8 @@ export default function PlannerDetailPage() {
                 cost_band: "",
                 verification_status: "custom",
                 day_index: item.day_index ?? 0,
+                distance_from_start_km: item.distance_from_start_km,
+                distance_to_route_km: item.distance_to_route_km,
                 created_at: new Date().toISOString(),
               })
             )
@@ -3649,16 +3778,14 @@ export default function PlannerDetailPage() {
 
                 const dayRouteData = unifiedDayRouteData[index]
                 const allStops = dayRouteData?.allStops ?? []
-                const dayShownStopCount = dayRouteData?.dayShownStopCount ?? 0
-                const segmentOptionsFromApi = segment.options && segment.options.length > 0
-                  ? segment.options
-                  : allStops.slice(0, 3)
                 const optionsToShow = expandedSegmentOptions.has(index)
-                  ? segmentOptionsFromApi
-                  : segmentOptionsFromApi.slice(0, 3)
+                  ? getMergedSegmentOptions(segment, index, 12)
+                  : getMergedSegmentOptions(segment, index, 3)
+                const dayShownStopCount = optionsToShow.length
                 const knownNames = new Set(
                   [
                     ...allStops.map((stop) => stop.location_name.toLowerCase()),
+                    ...optionsToShow.map((stop) => stop.location_name.toLowerCase()),
                     ...stops.map((stop) => stop.location_name.toLowerCase()),
                   ]
                 )
