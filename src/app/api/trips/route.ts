@@ -1382,6 +1382,7 @@ interface GenerateCustomStopResult {
   stopsGenerated: number
   totalFetched?: number
   afterDedup?: number
+  routeDistanceKm?: number
   error?: string
 }
 
@@ -1463,6 +1464,37 @@ function calculateDistance(
     Math.sin(dLng / 2)
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
   return R * c
+}
+
+async function getDrivingDistanceKm(
+  startLat: number,
+  startLng: number,
+  destLat: number,
+  destLng: number
+): Promise<number | null> {
+  const apiKey = process.env.NEXT_PUBLIC_GMAPS_API_KEY
+  if (!apiKey) return null
+
+  try {
+    const params = new URLSearchParams({
+      origin: `${startLat},${startLng}`,
+      destination: `${destLat},${destLng}`,
+      mode: "driving",
+      key: apiKey,
+    })
+    const response = await fetch(`https://maps.googleapis.com/maps/api/directions/json?${params.toString()}`)
+    const data = await response.json()
+    const route = data.status === "OK" && Array.isArray(data.routes) ? data.routes[0] : null
+    const distanceMeters = route?.legs?.reduce(
+      (sum: number, leg: { distance?: { value?: number } }) => sum + (leg.distance?.value ?? 0),
+      0
+    )
+
+    return distanceMeters > 0 ? distanceMeters / 1000 : null
+  } catch (error) {
+    console.warn("[queue] Failed to fetch Google driving distance:", error)
+    return null
+  }
 }
 
 function isWithinAustralia(lat: number, lng: number): boolean {
@@ -1737,12 +1769,13 @@ async function generateCustomStop(
     const safeTripDays = Math.max(1, Math.round(Number(tripDurationDays) || 1))
     if (safeTripDays <= 1) {
       console.log("[3/4] Skipping auto custom stop generation for one-day trip")
-      return {
-        success: true,
-        stopsGenerated: 0,
-        totalFetched: 0,
-        afterDedup: 0,
-      }
+    return {
+      success: true,
+      stopsGenerated: 0,
+      totalFetched: 0,
+      afterDedup: 0,
+      routeDistanceKm: calculateDistance(startLat, startLng, destLat, destLng),
+    }
     }
 
     const apiKey = process.env.NEXT_PUBLIC_GMAPS_API_KEY
@@ -1784,8 +1817,13 @@ async function generateCustomStop(
     const baseProbeCount = Math.max(safeTripDays * 2, Math.ceil(directDistanceKmForProbes / 100))
     const probeCount = directDistanceKmForProbes > env.PROBE_DISTANCE_THRESHOLD ? Math.min(50, baseProbeCount) : Math.min(30, baseProbeCount)
     const totalRouteKm = routeCumTable ? routeCumTable[routeCumTable.length - 1] : directDistanceKmForProbes
-    const probePoints = Array.from({ length: probeCount }, (_, i) => {
-      const fraction = (i + 1) / (probeCount + 1)
+    const evenlySpacedFractions = Array.from({ length: probeCount }, (_, i) => (i + 1) / (probeCount + 1))
+    const endpointFractions = [0.9, 0.95, 0.98, 1]
+    const probeFractions = Array.from(new Set([...evenlySpacedFractions, ...endpointFractions]))
+      .filter((fraction) => fraction > 0 && fraction <= 1)
+      .sort((a, b) => a - b)
+
+    const probePoints = probeFractions.map((fraction) => {
       if (routePolyline && routeCumTable) {
         return samplePolylineAtKm(fraction * totalRouteKm, routePolyline, routeCumTable)
       }
@@ -1872,7 +1910,6 @@ async function generateCustomStop(
               const key = `${name.toLowerCase().trim()}|${lat.toFixed(4)}|${lng.toFixed(4)}`
               if (!seenPlaces.has(key)) {
                 seenPlaces.add(key)
-                const distanceFromStart = calculateDistance(startLat, startLng, lat, lng)
 
                 // Reject results too far off the actual road corridor.
                 // Use polyline projection when available (accurate for coastal/curved routes).
@@ -1880,12 +1917,15 @@ async function generateCustomStop(
                 // from the Bruce Highway) while allowing normal highway-adjacent stops.
                 let lateralKm: number
                 let tRaw: number
+                let routeDistanceFromStartKm: number
                 if (routePolyline && routeCumTable) {
                   const { distanceFromStartKm: dfs, lateralKm: lkm } = projectPointOntoPolyline(lat, lng, routePolyline, routeCumTable)
                   lateralKm = lkm
+                  routeDistanceFromStartKm = dfs
                   const totalKm = routeCumTable[routeCumTable.length - 1]
                   tRaw = totalKm > 0 ? dfs / totalKm : 0
                 } else {
+                  const distanceFromStart = calculateDistance(startLat, startLng, lat, lng)
                   const avgLatRad = ((startLat + destLat) / 2) * Math.PI / 180
                   const scaleX = Math.cos(avgLatRad)
                   const vx = (destLng - startLng) * scaleX
@@ -1898,6 +1938,7 @@ async function generateCustomStop(
                   const projLat = startLat + tClamped * (destLat - startLat)
                   const projLng = startLng + tClamped * (destLng - startLng)
                   lateralKm = calculateDistance(lat, lng, projLat, projLng)
+                  routeDistanceFromStartKm = distanceFromStart
                 }
                 if (tRaw < -0.05 || tRaw > 1.05) return
                 if (lateralKm > 25) return
@@ -1908,7 +1949,7 @@ async function generateCustomStop(
                   latitude: String(lat),
                   longitude: String(lng),
                   place_type: "campground",
-                  distance_from_start_km: Math.round(distanceFromStart * 10) / 10,
+                  distance_from_start_km: Math.round(routeDistanceFromStartKm * 10) / 10,
                 })
               }
             })
@@ -1919,17 +1960,17 @@ async function generateCustomStop(
       }
     }
 
-    const directDistanceKm = directDistanceKmForProbes
+    const routeDistanceKm = totalRouteKm > 0 ? totalRouteKm : directDistanceKmForProbes
     // Use the explicit requestedCustomStops passed from trip handler, with fallback to distance-based calc
     const targetCustomStops = requestedCustomStops > 0
       ? requestedCustomStops
-      : Math.max(2, Math.min(10, Math.round(directDistanceKm / 180)))
+      : Math.max(2, Math.min(10, Math.round(routeDistanceKm / 180)))
 
     const orderedCustomCandidates = [...customStopCandidates].sort(
       (a, b) => a.distance_from_start_km - b.distance_from_start_km
     )
     // Dynamic initial spacing based on route length and target
-    const initialSpacingKm = Math.max(20, Math.ceil(directDistanceKm / (targetCustomStops + Math.ceil(targetCustomStops * 0.2))))
+    const initialSpacingKm = Math.max(20, Math.ceil(routeDistanceKm / (targetCustomStops + Math.ceil(targetCustomStops * 0.2))))
     const plannedCustomCandidates = pickSpacedStops(orderedCustomCandidates, initialSpacingKm, targetCustomStops)
 
     // If initial spacing doesn't hit quota, progressively relax constraints
@@ -1989,7 +2030,7 @@ async function generateCustomStop(
     // Each stop is assigned to the bucket its distance falls into.
     // If a day bucket ends up empty, the nearest stop from an adjacent bucket
     // is borrowed to fill it, preventing phantom empty days.
-    const totalKmForDays = directDistanceKm > 0 ? directDistanceKm : 1
+    const totalKmForDays = routeDistanceKm > 0 ? routeDistanceKm : 1
     const kmPerDay = totalKmForDays / safeTripDays
 
     // First pass: assign by km bucket
@@ -2025,6 +2066,7 @@ async function generateCustomStop(
       latitude: candidate.latitude,
       longitude: candidate.longitude,
       place_type: candidate.place_type,
+      distance_from_start_km: candidate.distance_from_start_km,
       day_index: filledBuckets[idx],
     }))
 
@@ -2109,7 +2151,9 @@ async function generateCustomStop(
       planned: uniqueCustomStops.length,
       inserted: insertedCustomStopsCount,
       targetCustomStops,
-      directDistanceKm: Math.round(directDistanceKm),
+      directDistanceKm: Math.round(directDistanceKmForProbes),
+      routeDistanceKm: Math.round(routeDistanceKm),
+      maxCandidateDistanceKm: Math.round(Math.max(0, ...customStopCandidates.map((stop) => stop.distance_from_start_km))),
     })
 
     return {
@@ -2117,6 +2161,7 @@ async function generateCustomStop(
       stopsGenerated: insertedCustomStopsCount,
       totalFetched,
       afterDedup: customStopCandidates.length,
+      routeDistanceKm,
     }
   } catch (error) {
     return {
@@ -2184,18 +2229,29 @@ async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
     Math.min(directDistanceKm * 1.45, directDistanceKm + 600)
   );
   console.log("estimatedDriveDistanceKm:", estimatedDriveDistanceKm);
+
+  const googleDriveDistanceKm = await getDrivingDistanceKm(
+    job.startLat,
+    job.startLng,
+    job.destLat,
+    job.destLng
+  )
+  const planningDistanceKm = googleDriveDistanceKm ?? estimatedDriveDistanceKm
+  console.log("planningDistanceKm:", planningDistanceKm, {
+    source: googleDriveDistanceKm ? "google_directions" : "estimated",
+  });
   
   const kmPerDay = TRAVEL_PACE_KM[job.travelPace] ?? 175
   console.log("kmPerDay based on travel pace:", kmPerDay);
 
-  const suggestedDays = Math.max(1, Math.ceil(estimatedDriveDistanceKm / kmPerDay))
+  const suggestedDays = Math.max(1, Math.ceil(planningDistanceKm / kmPerDay))
   console.log("suggestedDays based on estimated distance and pace:", suggestedDays);
 
   await supabaseAdmin
     .from("trips")
     .update({
       suggested_days: suggestedDays,
-      total_distance_km: Math.round(estimatedDriveDistanceKm),
+      total_distance_km: Math.round(planningDistanceKm),
     })
     .eq("id", job.tripId)
 
@@ -2251,8 +2307,12 @@ async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
     suggestedDays,
   })
 
-  const dayBasedStopTarget = job.tripDurationDays * 3
-  const distanceBasedStopCap = Math.max(1, Math.ceil(estimatedDriveDistanceKm / 90))
+  // Use suggestedDays (realistic based on distance+pace) rather than
+  // job.tripDurationDays (user's original request) so that a 1-day request
+  // that auto-adjusts to 3 days still generates enough Google Places stops.
+  const effectiveDaysForCustomStops = Math.max(suggestedDays, job.tripDurationDays)
+  const dayBasedStopTarget = effectiveDaysForCustomStops * 3
+  const distanceBasedStopCap = Math.max(1, Math.ceil(planningDistanceKm / 90))
   const targetTotalStops = Math.min(dayBasedStopTarget, distanceBasedStopCap)
   const customStopsNeeded = Math.max(0, targetTotalStops - generatedStopsCount)
 
@@ -2261,6 +2321,7 @@ async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
     stopsGenerated = 0,
     totalFetched = 0,
     afterDedup = 0,
+    routeDistanceKm: customRouteDistanceKm,
     error: customError,
   } = await generateCustomStop(
     job.startLat,
@@ -2268,7 +2329,7 @@ async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
     job.destLat,
     job.destLng,
     job.tripId,
-    job.tripDurationDays,
+    effectiveDaysForCustomStops,
     dbStopDistancesKm,
     customStopsNeeded
   )
@@ -2310,10 +2371,11 @@ async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
     console.log("[4/4] Days auto-adjusted", {
       original: job.tripDurationDays,
       adjustedTo: suggestedDays,
-      reason: `Requested ${job.tripDurationDays} days would require ${Math.round(estimatedDriveDistanceKm / job.tripDurationDays)} km/day. Using ${suggestedDays} days (${Math.round(estimatedDriveDistanceKm / suggestedDays)} km/day) for realistic pacing.`
+      reason: `Requested ${job.tripDurationDays} days would require ${Math.round(planningDistanceKm / job.tripDurationDays)} km/day. Using ${suggestedDays} days (${Math.round(planningDistanceKm / suggestedDays)} km/day) for realistic pacing.`
     })
   }
 
+  const organizationDistanceKm = customRouteDistanceKm ?? planningDistanceKm
   await organizeStopsByDay(
     job.tripId,
     job.startLat,
@@ -2321,7 +2383,7 @@ async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
     job.destLat,
     job.destLng,
     finalTripDays,
-    estimatedDriveDistanceKm
+    organizationDistanceKm
   )
 
   await supabaseAdmin
@@ -2356,7 +2418,7 @@ async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
         job.startLng,
         job.destLat,
         job.destLng,
-        estimatedDriveDistanceKm,
+        organizationDistanceKm,
         finalTripDays
       )
       console.log("[narrative] TrackMate Overview auto-generated successfully for trip", job.tripId)
@@ -2433,10 +2495,14 @@ async function organizeStopsByDay(
     .eq("trip_id", tripId)
     .eq("source_type", "verified")
 
-  const { data: customStops } = await supabaseAdmin
+  const { data: customStops, error: customStopsError } = await supabaseAdmin
     .from("custom_stops")
-    .select("id, name, latitude, longitude, distance_from_start_km")
+    .select("id, location_name, latitude, longitude, place_type, distance_from_start_km")
     .eq("trip_id", tripId)
+
+  if (customStopsError) {
+    console.error("[4/4] Failed to load custom stops for day organization:", customStopsError)
+  }
 
   const allStops: DayStopOption[] = []
 
@@ -2461,13 +2527,15 @@ async function organizeStopsByDay(
 
   if (customStops) {
     for (const cs of customStops) {
+      const latitude = typeof cs.latitude === "number" ? cs.latitude : Number(cs.latitude)
+      const longitude = typeof cs.longitude === "number" ? cs.longitude : Number(cs.longitude)
       allStops.push({
         id: cs.id,
         sourceType: "custom",
-        name: cs.name,
-        latitude: cs.latitude,
-        longitude: cs.longitude,
-        distanceFromStartKm: cs.distance_from_start_km ?? calculateDistance(startLat, startLng, cs.latitude, cs.longitude),
+        name: cs.location_name,
+        latitude,
+        longitude,
+        distanceFromStartKm: cs.distance_from_start_km ?? calculateDistance(startLat, startLng, latitude, longitude),
         customStopId: cs.id,
       })
     }
@@ -2477,7 +2545,8 @@ async function organizeStopsByDay(
     total: allStops.length,
     verified: allStops.filter(s => s.sourceType === "verified").length,
     custom: allStops.filter(s => s.sourceType === "custom").length,
-    sample: allStops.slice(0, 3).map(s => ({ name: s.name, dist: s.distanceFromStartKm }))
+    sample: allStops.slice(0, 3).map(s => ({ name: s.name, dist: s.distanceFromStartKm })),
+    maxDistanceKm: Math.round(Math.max(0, ...allStops.map((s) => s.distanceFromStartKm))),
   })
 
   allStops.sort((a, b) => a.distanceFromStartKm - b.distanceFromStartKm)
@@ -2523,15 +2592,21 @@ async function organizeStopsByDay(
       .sort((a, b) => Math.abs(a.distanceFromStartKm - targetKm) - Math.abs(b.distanceFromStartKm - targetKm))
       .slice(0, 3)
 
-    // If not enough options, try to get more from remaining stops
+    // If not enough options, fill from nearest forward candidates only.
+    // Pulling from the beginning of the route makes later days look empty after
+    // the planner rejects backward/non-progressing overnight choices.
     if (options.length < 3) {
-      const remaining = sortedByPriority.slice(0, 10).filter(s => !options.some(o => o.id === s.id))
+      const fallbackMinKm = Math.max(0, minKm - Math.min(25, kmPerDay * 0.1))
+      const remaining = sortedByPriority
+        .filter((s) => s.distanceFromStartKm >= fallbackMinKm)
+        .filter(s => !options.some(o => o.id === s.id))
+        .sort((a, b) => Math.abs(a.distanceFromStartKm - targetKm) - Math.abs(b.distanceFromStartKm - targetKm))
       options = [...options, ...remaining].slice(0, 3)
     }
 
     console.log("[4/4] Selected options for day", currentDay, {
       count: options.length,
-      options: options.map(o => o.name)
+      options: options.map(o => ({ name: o.name, dist: Math.round(o.distanceFromStartKm) }))
     })
 
     options.length = Math.min(options.length, 3)
@@ -2696,10 +2771,14 @@ async function generateNarrativeForNewTrip(
     .eq("trip_id", tripId)
     .eq("source_type", "verified")
 
-  const { data: customStopsData } = await supabaseAdmin
+  const { data: customStopsData, error: customStopsDataError } = await supabaseAdmin
     .from("custom_stops")
-    .select("id, name, stay_type, route_type, road_suitability, distance_from_start_km")
+    .select("id, location_name, place_type, distance_from_start_km")
     .eq("trip_id", tripId)
+
+  if (customStopsDataError) {
+    console.error("[narrative] Failed to load custom stops:", customStopsDataError)
+  }
 
   const kmPerDay = totalDistanceKm / tripDays
 
@@ -2769,13 +2848,13 @@ async function generateNarrativeForNewTrip(
         return distFromStart >= dayMinKm - kmPerDay * 0.2 && distFromStart <= dayTargetKm + kmPerDay * 0.5
       })
       .map(cs => ({
-        location_name: cs.name,
-        stay_type: cs.stay_type ?? null,
-        route_type: cs.route_type ?? null,
+        location_name: cs.location_name,
+        stay_type: cs.place_type ?? null,
+        route_type: cs.place_type ?? null,
         aao_tip: null,
         why_stop_here: null,
         why_we_d_stay_again: null,
-        road_suitability: cs.road_suitability ?? null,
+        road_suitability: null,
       })) ?? []
 
     const optionStops = [...verifiedStops, ...otherStops].map(s => ({

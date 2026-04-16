@@ -253,6 +253,24 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value))
 }
 
+function normalizeStopName(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()
+}
+
+function stopPhysicalKey(stop: RouteStopCandidate) {
+  const lat = Number(stop.latitude)
+  const lng = Number(stop.longitude)
+  const name = normalizeStopName(stop.location_name)
+  const coordKey = Number.isFinite(lat) && Number.isFinite(lng)
+    ? `${lat.toFixed(3)}:${lng.toFixed(3)}`
+    : ""
+  const distanceKey = Number.isFinite(stop.distance_from_start_km)
+    ? `km:${Math.round(stop.distance_from_start_km)}`
+    : ""
+
+  return `${name}|${coordKey}|${distanceKey}`
+}
+
 const HARD_FUEL_GAP_KM = env.HARD_FUEL_GAP_KM
 
 function getFuelSafetyConfig(northWeight: number, isRemote: boolean) {
@@ -261,6 +279,60 @@ function getFuelSafetyConfig(northWeight: number, isRemote: boolean) {
   const leadKm = clamp(45 + riskWeight * 60, 45, 120)
 
   return { fuelSafeKm, leadKm }
+}
+
+/**
+ * Merges a short first or last segment into its neighbor and re-splits at the
+ * stop nearest to the midpoint of the merged range.
+ * Only affects the first and last segments to preserve middle-route logic.
+ */
+function rebalanceShortEndSegments(
+  boundaries: Array<{ startKm: number; endKm: number }>,
+  stopDistances: number[],
+  minShortKm: number
+): Array<{ startKm: number; endKm: number }> {
+  if (boundaries.length <= 1) return boundaries
+
+  const result = [...boundaries]
+
+  // Fix short LAST segment first (before index shifts from first-segment fix)
+  const lastIdx = result.length - 1
+  const lastLen = result[lastIdx].endKm - result[lastIdx].startKm
+  if (lastLen < minShortKm && result.length >= 2) {
+    const mergedStart = result[lastIdx - 1].startKm
+    const mergedEnd   = result[lastIdx].endKm
+    const idealSplit  = mergedStart + (mergedEnd - mergedStart) / 2
+    const candidates  = stopDistances.filter(d => d > mergedStart && d < mergedEnd)
+    const bestSplit   = candidates.length > 0
+      ? candidates.reduce((best, d) =>
+          Math.abs(d - idealSplit) < Math.abs(best - idealSplit) ? d : best,
+          candidates[0])
+      : idealSplit
+    result.splice(lastIdx - 1, 2,
+      { startKm: mergedStart, endKm: Math.round(bestSplit * 10) / 10 },
+      { startKm: Math.round(bestSplit * 10) / 10, endKm: mergedEnd }
+    )
+  }
+
+  // Fix short FIRST segment
+  const firstLen = result[0].endKm - result[0].startKm
+  if (firstLen < minShortKm && result.length >= 2) {
+    const mergedStart = result[0].startKm   // always 0
+    const mergedEnd   = result[1].endKm
+    const idealSplit  = mergedStart + (mergedEnd - mergedStart) / 2
+    const candidates  = stopDistances.filter(d => d > mergedStart && d < mergedEnd)
+    const bestSplit   = candidates.length > 0
+      ? candidates.reduce((best, d) =>
+          Math.abs(d - idealSplit) < Math.abs(best - idealSplit) ? d : best,
+          candidates[0])
+      : idealSplit
+    result.splice(0, 2,
+      { startKm: mergedStart, endKm: Math.round(bestSplit * 10) / 10 },
+      { startKm: Math.round(bestSplit * 10) / 10, endKm: mergedEnd }
+    )
+  }
+
+  return result
 }
 
 function buildAdaptiveBoundaries(
@@ -326,10 +398,19 @@ function rankStops(
   return stops
     .slice()
     .sort((a, b) => {
-      const aVerifiedBonus = preferVerified && a.is_verified ? -50 : 0
-      const bVerifiedBonus = preferVerified && b.is_verified ? -50 : 0
-      const aScore = Math.abs(a.distance_from_start_km - targetKm) + (a.stay_type ? 0 : 25) + aVerifiedBonus
-      const bScore = Math.abs(b.distance_from_start_km - targetKm) + (b.stay_type ? 0 : 25) + bVerifiedBonus
+      const aDistFromTarget = Math.abs(a.distance_from_start_km - targetKm)
+      const bDistFromTarget = Math.abs(b.distance_from_start_km - targetKm)
+      // Cap the verified bonus proportionally to distance so a verified stop
+      // far from the segment endpoint cannot override a closer non-verified stop.
+      const aVerifiedBonus = preferVerified && a.is_verified ? -Math.min(50, aDistFromTarget * 0.45) : 0
+      const bVerifiedBonus = preferVerified && b.is_verified ? -Math.min(50, bDistFromTarget * 0.45) : 0
+      // Penalise stops that overshoot the segment endpoint (past targetKm).
+      // Driving further than the boundary means tomorrow's leg shrinks — a 25 km
+      // overshoot adds an extra 50 points so in-boundary stops are strongly preferred.
+      const aOvershoot = Math.max(0, a.distance_from_start_km - targetKm) * 2
+      const bOvershoot = Math.max(0, b.distance_from_start_km - targetKm) * 2
+      const aScore = aDistFromTarget + aOvershoot + (a.stay_type ? 0 : 25) + aVerifiedBonus
+      const bScore = bDistFromTarget + bOvershoot + (b.stay_type ? 0 : 25) + bVerifiedBonus
       return aScore - bScore
     })
     .slice(0, preferredCount)
@@ -610,10 +691,12 @@ export async function POST(req: NextRequest) {
     // Tracks stops that have been the primary overnight anchor — these are excluded
     // from being the anchor again on another day, but can still appear as options.
     const anchoredStopIds = new Set<string>()
+    const anchoredStopKeys = new Set<string>()
 
     // Tracks all stops already assigned to a segment's options[] — ensures stops
     // don't bleed into adjacent day segments as duplicated options.
     const assignedOptionIds = new Set<string>()
+    const assignedOptionKeys = new Set<string>()
 
     const totalDistanceKm = drivingInfo?.totalDistanceKm ?? directDistance
     const suggestedDays = Math.max(1, Math.round(totalDistanceKm / config.kmPerDay))
@@ -728,7 +811,8 @@ export async function POST(req: NextRequest) {
           })
         }
       } else {
-        // Need more days — split the longest segment.
+        // Need more days — split the longest segment at the stop nearest to the
+        // midpoint so the new boundary lands on an actual overnight location.
         while (boundaries.length < planningDays) {
           let maxIdx = 0
           let maxLen = boundaries[0].endKm - boundaries[0].startKm
@@ -737,7 +821,16 @@ export async function POST(req: NextRequest) {
             if (len > maxLen) { maxLen = len; maxIdx = i }
           }
           const { startKm, endKm } = boundaries[maxIdx]
-          const mid = Math.round(((startKm + endKm) / 2) * 10) / 10
+          const idealMid = (startKm + endKm) / 2
+          // Snap the split point to the stop nearest to the midpoint that lies
+          // strictly inside the segment (neither at the start nor at the end).
+          const innerStops = stopDistances.filter(d => d > startKm && d < endKm)
+          const snapMid = innerStops.length > 0
+            ? innerStops.reduce((best, d) =>
+                Math.abs(d - idealMid) < Math.abs(best - idealMid) ? d : best,
+                innerStops[0])
+            : idealMid
+          const mid = Math.round(snapMid * 10) / 10
           boundaries.splice(maxIdx, 1,
             { startKm, endKm: mid },
             { startKm: mid, endKm }
@@ -745,6 +838,10 @@ export async function POST(req: NextRequest) {
         }
       }
     }
+
+    // Rebalance excessively short first/last segments that survived reconciliation.
+    const minShortSegKm = minLegKm * 0.55
+    boundaries = rebalanceShortEndSegments(boundaries, stopDistances, minShortSegKm)
 
     for (let i = 0; i < boundaries.length; i++) {
       const startKm = boundaries[i].startKm
@@ -766,9 +863,17 @@ export async function POST(req: NextRequest) {
 
       // Exclude stops already anchored as primary overnight picks AND stops already
       // assigned to a previous segment's options[] to prevent cross-day bleeding.
-      const inRangeUnused = inRange.filter((s) => !anchoredStopIds.has(s.id) && !assignedOptionIds.has(s.id))
+      const isUnusedStop = (s: RouteStopCandidate) => {
+        const physicalKey = stopPhysicalKey(s)
+        return !anchoredStopIds.has(s.id) &&
+          !assignedOptionIds.has(s.id) &&
+          !anchoredStopKeys.has(physicalKey) &&
+          !assignedOptionKeys.has(physicalKey)
+      }
 
-      const expandedUnused = expandedInRange.filter((s) => !anchoredStopIds.has(s.id) && !assignedOptionIds.has(s.id))
+      const inRangeUnused = inRange.filter(isUnusedStop)
+
+      const expandedUnused = expandedInRange.filter(isUnusedStop)
       const isForwardEnough = (s: RouteStopCandidate) => s.distance_from_start_km >= (startKm - 20)
 
       const canIncludeAsOther = (s: RouteStopCandidate) => s.is_verified || includeFreeCamps !== false || s.cost_band !== "Free"
@@ -798,7 +903,11 @@ export async function POST(req: NextRequest) {
 
       const appendCandidates = (candidates: RouteStopCandidate[]) => {
         for (const candidate of candidates) {
-          if (verifiedInSegment.some((v) => v.id === candidate.id) || otherInSegment.some((o) => o.id === candidate.id)) {
+          const candidateKey = stopPhysicalKey(candidate)
+          const alreadyCandidate = [...verifiedInSegment, ...otherInSegment].some(
+            (stop) => stop.id === candidate.id || stopPhysicalKey(stop) === candidateKey
+          )
+          if (alreadyCandidate) {
             continue
           }
           if (candidate.is_verified) {
@@ -829,7 +938,7 @@ export async function POST(req: NextRequest) {
 
       if (totalCandidates() < MIN_STOPS_PER_SEGMENT) {
         const nearestGlobalUnused = rankStops(
-          scaledStopsWithDistance.filter((s) => !anchoredStopIds.has(s.id) && canIncludeAsOther(s) && isForwardEnough(s)),
+          scaledStopsWithDistance.filter((s) => isUnusedStop(s) && canIncludeAsOther(s) && isForwardEnough(s)),
           endKm,
           20,
           preferVerified
@@ -840,7 +949,7 @@ export async function POST(req: NextRequest) {
       if (totalCandidates() < MIN_STOPS_PER_SEGMENT) {
         // Prefer stops not yet used as overnight anchors to avoid day-to-day repeats
         const nearestGlobal = rankStops(
-          scaledStopsWithDistance.filter((s) => canIncludeAsOther(s) && !anchoredStopIds.has(s.id) && isForwardEnough(s)),
+          scaledStopsWithDistance.filter((s) => canIncludeAsOther(s) && isUnusedStop(s) && isForwardEnough(s)),
           endKm,
           20,
           preferVerified
@@ -855,7 +964,7 @@ export async function POST(req: NextRequest) {
           scaledStopsWithDistance.filter(
             (s) =>
               canIncludeAsOther(s) &&
-              !anchoredStopIds.has(s.id) &&
+              isUnusedStop(s) &&
               s.distance_from_start_km >= (startKm - 20) &&
               s.distance_from_start_km <= (endKm + lookaheadKm)
           ),
@@ -876,7 +985,7 @@ export async function POST(req: NextRequest) {
             scaledStopsWithDistance.filter(
               (s) =>
                 canIncludeAsOther(s) &&
-                !anchoredStopIds.has(s.id) &&
+                isUnusedStop(s) &&
                 s.distance_from_start_km >= (startKm - backtrackKm) &&
                 s.distance_from_start_km <= (endKm + Math.max(80, config.kmPerDay * 0.4))
             ),
@@ -904,24 +1013,40 @@ export async function POST(req: NextRequest) {
         otherInSegment = otherInSegment.slice(0, 8)
       }
 
-      // Add isRecommended flag to first verified stop (DB source)
-      const verifiedStopsWithFlag = verifiedInSegment.map((stop, idx) => ({
+      // Select the overnight anchor by competing ALL candidates (verified + Google
+      // Places) through the same scoring formula used in rankStops.  This allows a
+      // nearby Google Places stop to win over a verified stop that is far from the
+      // segment endpoint — "prefer verified" still applies as a bonus, but a verified
+      // stop 100+ km from the target will lose to an unverified stop 20 km away.
+      const allAnchorCandidates = [...verifiedInSegment, ...otherInSegment]
+      const anchorScore = (s: RouteStopCandidate) => {
+        const dist = Math.abs(s.distance_from_start_km - endKm)
+        const overshoot = Math.max(0, s.distance_from_start_km - endKm) * 2
+        const verifiedBonus = preferVerified && s.is_verified ? -Math.min(50, dist * 0.45) : 0
+        const stayTypePenalty = s.stay_type ? 0 : 25
+        return dist + overshoot + stayTypePenalty + verifiedBonus
+      }
+      const overnightAnchor = allAnchorCandidates.length > 0
+        ? allAnchorCandidates.reduce((best, s) => anchorScore(s) < anchorScore(best) ? s : best)
+        : null
+      if (overnightAnchor) {
+        anchoredStopIds.add(overnightAnchor.id)
+        anchoredStopKeys.add(stopPhysicalKey(overnightAnchor))
+      }
+
+      // Mark the API-selected overnight anchor as the recommendation. DB
+      // verification is still exposed separately via is_verified/source.
+      const verifiedStopsWithFlag = verifiedInSegment.map((stop) => ({
         ...stop,
-        isRecommended: idx === 0 && stop.is_verified,
+        isRecommended: stop.id === overnightAnchor?.id,
         isDbSource: stop.is_verified,
       }))
       
-      // Mark other stops as not recommended and from Google
       const otherStopsWithFlag = otherInSegment.map((stop) => ({
         ...stop,
-        isRecommended: false,
+        isRecommended: stop.id === overnightAnchor?.id,
         isDbSource: false,
       }))
-
-      const overnightAnchor = verifiedStopsWithFlag[0] || otherStopsWithFlag[0]
-      if (overnightAnchor) {
-        anchoredStopIds.add(overnightAnchor.id)
-      }
 
       const segmentDistance = Math.max(0, endKm - startKm)
       const remoteByDistance = segmentDistance > (maxLegKm + 30)
@@ -935,10 +1060,8 @@ export async function POST(req: NextRequest) {
         ? parseFloat(String(overnightAnchor.longitude))
         : null
 
-      // Build combined options array with recommended flag
-      // Priority: 3 DB stops → use 1 as recommended, ignore Google
-      // 2 DB + 1 Google → DB one marked recommended
-      // 0 DB → all 3 from Google, pick 1 as recommended
+      // Build the displayed options around the selected anchor. Route proximity
+      // still orders the cards, but the anchor must remain selectable by default.
       const allSegmentStops: RouteStopCandidate[] = [...verifiedInSegment, ...otherInSegment]
 
       // Sort by blended score: lateral distance (route proximity) + proximity to segment end.
@@ -953,23 +1076,21 @@ export async function POST(req: NextRequest) {
         return aScore - bScore
       })
 
-      // Take top 3 options, mark first DB stop as recommended (not Google)
-      const options: RouteStopCandidate[] = sortedByScore.slice(0, 3).map((stop) => {
+      const topStops = sortedByScore.slice(0, 3)
+      const optionStops = overnightAnchor && !topStops.some((stop) => stop.id === overnightAnchor.id)
+        ? [overnightAnchor, ...topStops].slice(0, 3)
+        : topStops
+
+      const options: RouteStopCandidate[] = optionStops.map((stop) => {
         const isDbStop = stop.is_verified
         return {
           ...stop,
           source: isDbStop ? "database" as const : "google_places" as const,
-          is_recommended: false, // Mark all as false first, then set correct one below
+          is_recommended: stop.id === overnightAnchor?.id,
         }
       })
 
-      // Find first DB stop to recommend - if any DB exists in top 3, it should be recommended
-      // This ensures DB stops take priority over Google even if further from route
-      const dbStopIndex = options.findIndex(o => o.is_verified)
-      if (dbStopIndex !== -1) {
-        options[dbStopIndex].is_recommended = true
-      } else if (options.length > 0) {
-        // No DB stops: mark first option as recommended (existing behavior)
+      if (!overnightAnchor && options.length > 0) {
         options[0].is_recommended = true
       }
 
@@ -979,6 +1100,7 @@ export async function POST(req: NextRequest) {
       // Register all options[] IDs so they are excluded from subsequent segment pools.
       for (const opt of options) {
         assignedOptionIds.add(opt.id)
+        assignedOptionKeys.add(stopPhysicalKey(opt))
       }
 
       segments.push({
