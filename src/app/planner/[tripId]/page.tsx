@@ -161,6 +161,12 @@ interface RouteSegment {
   overnightAnchorLng?: number | null
 }
 
+interface DaysAdjustment {
+  originalDays: number
+  adjustedToDays: number
+  reason: string
+}
+
 interface RouteMeta {
   corridor?: string
   drivingInfo?: DrivingInfo
@@ -168,6 +174,7 @@ interface RouteMeta {
   segments?: RouteSegment[]
   fuelStations?: FuelStation[]
   planningMode?: "standard" | "degraded-valid"
+  daysAdjustment?: DaysAdjustment | null
 }
 
 interface DayNarrative {
@@ -2322,6 +2329,7 @@ export default function PlannerDetailPage() {
           segments: data.segments,
           fuelStations: data.fuelStations,
           planningMode: data.planningMode,
+          daysAdjustment: data.daysAdjustment ?? null,
         })
       }
     } catch (error) {
@@ -2378,6 +2386,9 @@ export default function PlannerDetailPage() {
     }
     if (routeMeta.planningMode === "degraded-valid") {
       warnings.push("Planner is in degraded-valid mode for remote stretches. Fuel and overnight picks are still route-safe, but alternatives may be limited.")
+    }
+    if (routeMeta.daysAdjustment) {
+      warnings.push(routeMeta.daysAdjustment.reason)
     }
     setRouteWarnings(warnings)
   }, [routeMeta.corridor, routeMeta.fuelStations, routeMeta.planningMode, daySegments])
@@ -3123,6 +3134,11 @@ export default function PlannerDetailPage() {
                   <div>
                     <div className="text-xs text-muted-foreground">Suggested days</div>
                     <div className="text-lg font-bold">{routeMeta.drivingInfo ? `${computeEstimatedDays()}` : `${trip.trip_duration_days}`}</div>
+                    {routeMeta.daysAdjustment && (
+                      <div className="text-xs text-amber-600 mt-1">
+                        Adjusted from {routeMeta.daysAdjustment.originalDays} days
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>

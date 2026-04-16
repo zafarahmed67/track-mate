@@ -617,9 +617,33 @@ export async function POST(req: NextRequest) {
 
     const totalDistanceKm = drivingInfo?.totalDistanceKm ?? directDistance
     const suggestedDays = Math.max(1, Math.round(totalDistanceKm / config.kmPerDay))
-    const planningDays = requestedTripDays && requestedTripDays > 0
-      ? requestedTripDays
-      : suggestedDays
+
+    // Calculate realistic days based on distance and pace settings
+    // Use the midpoint of pace's km/day range for realistic calculation
+    const paceKmPerDay = config.kmPerDay
+    const realisticDays = Math.max(1, Math.round(totalDistanceKm / paceKmPerDay))
+
+    // Determine final days - adjust if user request would produce unrealistic daily distances
+    let finalDays = suggestedDays
+    let daysAdjusted = false
+    let originalDays: number | null = null
+
+    if (requestedTripDays && requestedTripDays > 0) {
+      // User specified days - compare against realistic
+      if (requestedTripDays < realisticDays) {
+        // User requested fewer days than realistic - adjust to realistic
+        originalDays = requestedTripDays
+        finalDays = realisticDays
+        daysAdjusted = true
+      } else {
+        // User requested more or equal to realistic - use user's request
+        finalDays = requestedTripDays
+      }
+    }
+    // If no user request, use suggested (which is based on pace)
+
+    // Use finalDays for planning
+    const planningDays = finalDays
     const northbound = destLat > startLat
     const latSpan = Math.abs(destLat - startLat)
     const remoteMultiplier = northbound && latSpan > 5 ? 0.75 : 1.0
@@ -1413,6 +1437,11 @@ export async function POST(req: NextRequest) {
       drivingInfo,
       paceConfig: config,
       planningMode: segments.some((segment) => segment.degradedMode) ? "degraded-valid" : "standard",
+      daysAdjustment: daysAdjusted && originalDays ? {
+        originalDays,
+        adjustedToDays: finalDays,
+        reason: `Requested ${originalDays} days would require ${Math.round(totalDistanceKm / originalDays)} km/day. Your pace (${travelPace}) supports ${config.minKmPerDay}-${config.maxKmPerDay} km/day. Adjusted to ${finalDays} days (${Math.round(totalDistanceKm / finalDays)} km/day).`,
+      } : null,
     })
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Unknown error"
