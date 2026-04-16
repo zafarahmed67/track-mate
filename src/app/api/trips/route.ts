@@ -2299,15 +2299,28 @@ async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
   })
 
 
-  // Cap the number of days to the minimum of user-selected and suggested days
-  const cappedTripDays = Math.min(job.tripDurationDays, suggestedDays)
+  // Use suggested days as base - if user requests fewer days than realistic,
+  // auto-adjust to suggested days to ensure drivable daily distances
+  const finalTripDays = job.tripDurationDays >= suggestedDays 
+    ? job.tripDurationDays 
+    : suggestedDays
+  
+  const daysAdjusted = job.tripDurationDays < suggestedDays
+  if (daysAdjusted) {
+    console.log("[4/4] Days auto-adjusted", {
+      original: job.tripDurationDays,
+      adjustedTo: suggestedDays,
+      reason: `Requested ${job.tripDurationDays} days would require ${Math.round(estimatedDriveDistanceKm / job.tripDurationDays)} km/day. Using ${suggestedDays} days (${Math.round(estimatedDriveDistanceKm / suggestedDays)} km/day) for realistic pacing.`
+    })
+  }
+
   await organizeStopsByDay(
     job.tripId,
     job.startLat,
     job.startLng,
     job.destLat,
     job.destLng,
-    cappedTripDays,
+    finalTripDays,
     estimatedDriveDistanceKm
   )
 
@@ -2315,7 +2328,7 @@ async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
     .from("trips")
     .update({ 
       status: "completed",
-      trip_duration_days: cappedTripDays
+      trip_duration_days: finalTripDays
     })
     .eq("id", job.tripId)
 
@@ -2344,7 +2357,7 @@ async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
         job.destLat,
         job.destLng,
         estimatedDriveDistanceKm,
-        cappedTripDays
+        finalTripDays
       )
       console.log("[narrative] TrackMate Overview auto-generated successfully for trip", job.tripId)
     } catch (narrativeError) {

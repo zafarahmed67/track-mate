@@ -632,9 +632,11 @@ export default function PlannerDetailPage() {
     })
   }
 
-  // Use the user's explicitly requested day count. Do not auto-reduce from driving
-  // pace — that caused a 14-day trip to display as 12 days, dropping the last days.
-  const targetDays = Math.max(1, Number(trip?.trip_duration_days || 1))
+  // Use adjusted days from API if available (when days were auto-adjusted for realistic pacing),
+  // otherwise fall back to user's requested days from the trip.
+  const requestedDays = Math.max(1, Number(trip?.trip_duration_days || 1))
+  const adjustedDays = routeMeta.daysAdjustment?.adjustedToDays
+  const targetDays = adjustedDays ?? requestedDays
 
   const showPlanningSkeleton =
     routeOptionsLoading &&
@@ -3030,6 +3032,17 @@ export default function PlannerDetailPage() {
 
       {!isPolling && (
     <main className="min-h-screen bg-background">
+      {routeMeta.daysAdjustment && (
+        <div className="bg-amber-50 border-b border-amber-200 px-6 py-3">
+          <div className="container mx-auto flex items-center gap-3 text-sm text-amber-800">
+            <AlertTriangle className="h-5 w-5 shrink-0 text-amber-600" />
+            <span>
+              <strong>Days adjusted:</strong> Showing {routeMeta.daysAdjustment.adjustedToDays} days instead of your requested {routeMeta.daysAdjustment.originalDays} days.
+              This ensures realistic daily distances ({Math.round((routeMeta.drivingInfo?.totalDistanceKm || 0) / routeMeta.daysAdjustment.adjustedToDays)} km/day) based on your {trip?.travel_pace || "moderate"} pace.
+            </span>
+          </div>
+        </div>
+      )}
       <div className="sticky top-0 z-50 border-b bg-background/95 backdrop-blur-xl">
         <div className="container mx-auto px-6 py-4">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
@@ -3134,11 +3147,6 @@ export default function PlannerDetailPage() {
                   <div>
                     <div className="text-xs text-muted-foreground">Suggested days</div>
                     <div className="text-lg font-bold">{routeMeta.drivingInfo ? `${computeEstimatedDays()}` : `${trip.trip_duration_days}`}</div>
-                    {routeMeta.daysAdjustment && (
-                      <div className="text-xs text-amber-600 mt-1">
-                        Adjusted from {routeMeta.daysAdjustment.originalDays} days
-                      </div>
-                    )}
                   </div>
                 </div>
               </div>
