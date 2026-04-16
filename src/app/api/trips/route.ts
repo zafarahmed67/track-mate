@@ -1767,16 +1767,6 @@ async function generateCustomStop(
 
   try {
     const safeTripDays = Math.max(1, Math.round(Number(tripDurationDays) || 1))
-    if (safeTripDays <= 1) {
-      console.log("[3/4] Skipping auto custom stop generation for one-day trip")
-    return {
-      success: true,
-      stopsGenerated: 0,
-      totalFetched: 0,
-      afterDedup: 0,
-      routeDistanceKm: calculateDistance(startLat, startLng, destLat, destLng),
-    }
-    }
 
     const apiKey = process.env.NEXT_PUBLIC_GMAPS_API_KEY
     if (!apiKey) {
@@ -2313,7 +2303,8 @@ async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
   const effectiveDaysForCustomStops = Math.max(suggestedDays, job.tripDurationDays)
   const dayBasedStopTarget = effectiveDaysForCustomStops * 3
   const distanceBasedStopCap = Math.max(1, Math.ceil(planningDistanceKm / 90))
-  const targetTotalStops = Math.min(dayBasedStopTarget, distanceBasedStopCap)
+  const minimumOvernightOptions = effectiveDaysForCustomStops <= 1 ? 3 : 1
+  const targetTotalStops = Math.max(minimumOvernightOptions, Math.min(dayBasedStopTarget, distanceBasedStopCap))
   const customStopsNeeded = Math.max(0, targetTotalStops - generatedStopsCount)
 
   const {
@@ -2367,11 +2358,18 @@ async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
     : suggestedDays
   
   const daysAdjusted = job.tripDurationDays < suggestedDays
+  const daysAdjustment = daysAdjusted
+    ? {
+        originalDays: job.tripDurationDays,
+        adjustedToDays: suggestedDays,
+        reason: `Requested ${job.tripDurationDays} days would require ${Math.round(planningDistanceKm / job.tripDurationDays)} km/day. Using ${suggestedDays} days (${Math.round(planningDistanceKm / suggestedDays)} km/day) for realistic pacing.`,
+      }
+    : null
   if (daysAdjusted) {
     console.log("[4/4] Days auto-adjusted", {
       original: job.tripDurationDays,
       adjustedTo: suggestedDays,
-      reason: `Requested ${job.tripDurationDays} days would require ${Math.round(planningDistanceKm / job.tripDurationDays)} km/day. Using ${suggestedDays} days (${Math.round(planningDistanceKm / suggestedDays)} km/day) for realistic pacing.`
+      reason: daysAdjustment?.reason,
     })
   }
 
@@ -2386,11 +2384,22 @@ async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
     organizationDistanceKm
   )
 
+  const { data: tripRouteDataRow } = await supabaseAdmin
+    .from("trips")
+    .select("route_data_json")
+    .eq("id", job.tripId)
+    .single()
+
+  const existingRouteDataJson = (tripRouteDataRow?.route_data_json as Record<string, unknown>) ?? {}
+
   await supabaseAdmin
     .from("trips")
     .update({ 
       status: "completed",
-      trip_duration_days: finalTripDays
+      trip_duration_days: finalTripDays,
+      route_data_json: daysAdjustment
+        ? { ...existingRouteDataJson, daysAdjustment }
+        : existingRouteDataJson,
     })
     .eq("id", job.tripId)
 

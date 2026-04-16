@@ -653,7 +653,23 @@ export default function PlannerDetailPage() {
   // Use adjusted days from API if available (when days were auto-adjusted for realistic pacing),
   // otherwise fall back to user's requested days from the trip.
   const requestedDays = Math.max(1, Number(trip?.trip_duration_days || 1))
-  const adjustedDays = routeMeta.daysAdjustment?.adjustedToDays
+  const persistedDaysAdjustment = useMemo(() => {
+    const routeJson = trip?.route_data_json
+    if (!routeJson || typeof routeJson !== "object") return null
+
+    const adjustment = (routeJson as { daysAdjustment?: Partial<DaysAdjustment> }).daysAdjustment
+    const originalDays = Number(adjustment?.originalDays)
+    const adjustedToDays = Number(adjustment?.adjustedToDays)
+    if (!Number.isFinite(originalDays) || !Number.isFinite(adjustedToDays)) return null
+
+    return {
+      originalDays,
+      adjustedToDays,
+      reason: adjustment?.reason || "Adjusted to a realistic number of travel days based on distance.",
+    }
+  }, [trip?.route_data_json])
+  const effectiveDaysAdjustment = routeMeta.daysAdjustment ?? persistedDaysAdjustment
+  const adjustedDays = effectiveDaysAdjustment?.adjustedToDays
   const targetDays = adjustedDays ?? requestedDays
 
   const showPlanningSkeleton =
@@ -2538,11 +2554,11 @@ export default function PlannerDetailPage() {
     if (routeMeta.planningMode === "degraded-valid") {
       warnings.push("Planner is in degraded-valid mode for remote stretches. Fuel and overnight picks are still route-safe, but alternatives may be limited.")
     }
-    if (routeMeta.daysAdjustment) {
-      warnings.push(routeMeta.daysAdjustment.reason)
+    if (effectiveDaysAdjustment) {
+      warnings.push("Adjusted to a realistic number of travel days based on distance.")
     }
     setRouteWarnings(warnings)
-  }, [routeMeta.corridor, routeMeta.fuelStations, routeMeta.planningMode, daySegments])
+  }, [routeMeta.corridor, routeMeta.fuelStations, routeMeta.planningMode, daySegments, effectiveDaysAdjustment])
 
   useEffect(() => {
     async function fetchTripData() {
@@ -3192,13 +3208,13 @@ export default function PlannerDetailPage() {
 
       {!isPolling && (
     <main className="min-h-screen bg-background">
-      {routeMeta.daysAdjustment && (
+      {effectiveDaysAdjustment && (
         <div className="bg-amber-50 border-b border-amber-200 px-6 py-3">
           <div className="container mx-auto flex items-center gap-3 text-sm text-amber-800">
             <AlertTriangle className="h-5 w-5 shrink-0 text-amber-600" />
             <span>
-              <strong>Days adjusted:</strong> Showing {routeMeta.daysAdjustment.adjustedToDays} days instead of your requested {routeMeta.daysAdjustment.originalDays} days.
-              This ensures realistic daily distances ({Math.round((routeMeta.drivingInfo?.totalDistanceKm || 0) / routeMeta.daysAdjustment.adjustedToDays)} km/day) based on your {trip?.travel_pace || "moderate"} pace.
+              <strong>Days adjusted:</strong> Adjusted to a realistic number of travel days based on distance. Showing {effectiveDaysAdjustment.adjustedToDays} days instead of your requested {effectiveDaysAdjustment.originalDays} days.
+              This ensures realistic daily distances ({Math.round((routeMeta.drivingInfo?.totalDistanceKm || 0) / effectiveDaysAdjustment.adjustedToDays)} km/day) based on your {trip?.travel_pace || "moderate"} pace.
             </span>
           </div>
         </div>
