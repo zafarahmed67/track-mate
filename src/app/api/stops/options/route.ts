@@ -38,9 +38,7 @@ interface RouteStopCandidate {
   cost_band?: string
   tier?: string
   is_verified: boolean
-  verification_status?: string
   is_alternative?: boolean
-  is_between?: boolean
   distance_from_start_km: number
   distance_from_dest_km: number
   lateral_km?: number
@@ -96,7 +94,7 @@ function calculateDistance(lat1: number, lng1: number, lat2: number, lng2: numbe
 
 async function findCorridor(lat1: number, lng1: number, lat2: number, lng2: number): Promise<string> {
   const corridorCenters = await getCorridorsFromStops()
-  
+
   const corridorNames = Object.keys(corridorCenters)
   if (corridorNames.length === 0) {
     return "Unknown"
@@ -302,13 +300,13 @@ function rebalanceShortEndSegments(
   const lastLen = result[lastIdx].endKm - result[lastIdx].startKm
   if (lastLen < minShortKm && result.length >= 2) {
     const mergedStart = result[lastIdx - 1].startKm
-    const mergedEnd   = result[lastIdx].endKm
-    const idealSplit  = mergedStart + (mergedEnd - mergedStart) / 2
-    const candidates  = stopDistances.filter(d => d > mergedStart && d < mergedEnd)
-    const bestSplit   = candidates.length > 0
+    const mergedEnd = result[lastIdx].endKm
+    const idealSplit = mergedStart + (mergedEnd - mergedStart) / 2
+    const candidates = stopDistances.filter(d => d > mergedStart && d < mergedEnd)
+    const bestSplit = candidates.length > 0
       ? candidates.reduce((best, d) =>
-          Math.abs(d - idealSplit) < Math.abs(best - idealSplit) ? d : best,
-          candidates[0])
+        Math.abs(d - idealSplit) < Math.abs(best - idealSplit) ? d : best,
+        candidates[0])
       : idealSplit
     result.splice(lastIdx - 1, 2,
       { startKm: mergedStart, endKm: Math.round(bestSplit * 10) / 10 },
@@ -320,13 +318,13 @@ function rebalanceShortEndSegments(
   const firstLen = result[0].endKm - result[0].startKm
   if (firstLen < minShortKm && result.length >= 2) {
     const mergedStart = result[0].startKm   // always 0
-    const mergedEnd   = result[1].endKm
-    const idealSplit  = mergedStart + (mergedEnd - mergedStart) / 2
-    const candidates  = stopDistances.filter(d => d > mergedStart && d < mergedEnd)
-    const bestSplit   = candidates.length > 0
+    const mergedEnd = result[1].endKm
+    const idealSplit = mergedStart + (mergedEnd - mergedStart) / 2
+    const candidates = stopDistances.filter(d => d > mergedStart && d < mergedEnd)
+    const bestSplit = candidates.length > 0
       ? candidates.reduce((best, d) =>
-          Math.abs(d - idealSplit) < Math.abs(best - idealSplit) ? d : best,
-          candidates[0])
+        Math.abs(d - idealSplit) < Math.abs(best - idealSplit) ? d : best,
+        candidates[0])
       : idealSplit
     result.splice(0, 2,
       { startKm: mergedStart, endKm: Math.round(bestSplit * 10) / 10 },
@@ -345,11 +343,6 @@ function buildAdaptiveBoundaries(
   stopDistances: number[],
   northbound: boolean
 ) {
-  // For short routes, single segment covers entire route
-  if (totalDistanceKm < env.SHORT_ROUTE_THRESHOLD_KM) {
-    return [{ startKm: 0, endKm: totalDistanceKm }]
-  }
-
   const boundaries: Array<{ startKm: number; endKm: number }> = []
   let current = 0
   let guard = 0
@@ -400,36 +393,24 @@ function rankStops(
   stops: RouteStopCandidate[],
   targetKm: number,
   preferredCount: number,
-  preferVerified?: boolean,
-  totalRouteKm?: number
+  preferVerified?: boolean
 ) {
-  const isShortRoute = totalRouteKm && totalRouteKm < env.SHORT_ROUTE_THRESHOLD_KM
-
   return stops
     .slice()
     .sort((a, b) => {
       const aDistFromTarget = Math.abs(a.distance_from_start_km - targetKm)
       const bDistFromTarget = Math.abs(b.distance_from_start_km - targetKm)
-
-      // For short routes, prioritize stops closer to destination
-      const aDist = isShortRoute && totalRouteKm
-        ? Math.abs(totalRouteKm - a.distance_from_start_km)
-        : aDistFromTarget
-      const bDist = isShortRoute && totalRouteKm
-        ? Math.abs(totalRouteKm - b.distance_from_start_km)
-        : bDistFromTarget
-
       // Cap the verified bonus proportionally to distance so a verified stop
       // far from the segment endpoint cannot override a closer non-verified stop.
-      const aVerifiedBonus = preferVerified && a.is_verified ? -Math.min(50, aDist * 0.45) : 0
-      const bVerifiedBonus = preferVerified && b.is_verified ? -Math.min(50, bDist * 0.45) : 0
+      const aVerifiedBonus = preferVerified && a.is_verified ? -Math.min(50, aDistFromTarget * 0.45) : 0
+      const bVerifiedBonus = preferVerified && b.is_verified ? -Math.min(50, bDistFromTarget * 0.45) : 0
       // Penalise stops that overshoot the segment endpoint (past targetKm).
       // Driving further than the boundary means tomorrow's leg shrinks — a 25 km
       // overshoot adds an extra 50 points so in-boundary stops are strongly preferred.
-      const aOvershoot = isShortRoute ? 0 : Math.max(0, a.distance_from_start_km - targetKm) * 2
-      const bOvershoot = isShortRoute ? 0 : Math.max(0, b.distance_from_start_km - targetKm) * 2
-      const aScore = aDist + aOvershoot + (a.stay_type ? 0 : 25) + aVerifiedBonus
-      const bScore = bDist + bOvershoot + (b.stay_type ? 0 : 25) + bVerifiedBonus
+      const aOvershoot = Math.max(0, a.distance_from_start_km - targetKm) * 2
+      const bOvershoot = Math.max(0, b.distance_from_start_km - targetKm) * 2
+      const aScore = aDistFromTarget + aOvershoot + (a.stay_type ? 0 : 25) + aVerifiedBonus
+      const bScore = bDistFromTarget + bOvershoot + (b.stay_type ? 0 : 25) + bVerifiedBonus
       return aScore - bScore
     })
     .slice(0, preferredCount)
@@ -467,29 +448,29 @@ export async function POST(req: NextRequest) {
     }
 
     const paceConfig = {
-      leisurely: { 
-        kmPerDay: (env.PACE_LEISURELY_MIN_KM_PER_DAY + env.PACE_LEISURELY_MAX_KM_PER_DAY) / 2, 
+      leisurely: {
+        kmPerDay: (env.PACE_LEISURELY_MIN_KM_PER_DAY + env.PACE_LEISURELY_MAX_KM_PER_DAY) / 2,
         minKmPerDay: env.PACE_LEISURELY_MIN_KM_PER_DAY,
         maxKmPerDay: env.PACE_LEISURELY_MAX_KM_PER_DAY,
-        hoursPerLeg: env.PACE_LEISURELY_HOURS_PER_LEG, 
-        minSpacing: env.PACE_LEISURELY_MIN_SPACING, 
-        maxSpacing: env.PACE_LEISURELY_MAX_SPACING 
+        hoursPerLeg: env.PACE_LEISURELY_HOURS_PER_LEG,
+        minSpacing: env.PACE_LEISURELY_MIN_SPACING,
+        maxSpacing: env.PACE_LEISURELY_MAX_SPACING
       },
-      moderate: { 
-        kmPerDay: (env.PACE_MODERATE_MIN_KM_PER_DAY + env.PACE_MODERATE_MAX_KM_PER_DAY) / 2, 
+      moderate: {
+        kmPerDay: (env.PACE_MODERATE_MIN_KM_PER_DAY + env.PACE_MODERATE_MAX_KM_PER_DAY) / 2,
         minKmPerDay: env.PACE_MODERATE_MIN_KM_PER_DAY,
         maxKmPerDay: env.PACE_MODERATE_MAX_KM_PER_DAY,
-        hoursPerLeg: env.PACE_MODERATE_HOURS_PER_LEG, 
-        minSpacing: env.PACE_MODERATE_MIN_SPACING, 
-        maxSpacing: env.PACE_MODERATE_MAX_SPACING 
+        hoursPerLeg: env.PACE_MODERATE_HOURS_PER_LEG,
+        minSpacing: env.PACE_MODERATE_MIN_SPACING,
+        maxSpacing: env.PACE_MODERATE_MAX_SPACING
       },
-      fast: { 
-        kmPerDay: (env.PACE_FAST_MIN_KM_PER_DAY + env.PACE_FAST_MAX_KM_PER_DAY) / 2, 
+      fast: {
+        kmPerDay: (env.PACE_FAST_MIN_KM_PER_DAY + env.PACE_FAST_MAX_KM_PER_DAY) / 2,
         minKmPerDay: env.PACE_FAST_MIN_KM_PER_DAY,
         maxKmPerDay: env.PACE_FAST_MAX_KM_PER_DAY,
-        hoursPerLeg: env.PACE_FAST_HOURS_PER_LEG, 
-        minSpacing: env.PACE_FAST_MIN_SPACING, 
-        maxSpacing: env.PACE_FAST_MAX_SPACING 
+        hoursPerLeg: env.PACE_FAST_HOURS_PER_LEG,
+        minSpacing: env.PACE_FAST_MIN_SPACING,
+        maxSpacing: env.PACE_FAST_MAX_SPACING
       },
     }
 
@@ -519,7 +500,7 @@ export async function POST(req: NextRequest) {
     let routePolyline: PolylinePoint[] | null = null
     let routeCumTable: number[] | null = null
 
-if (apiKey) {
+    if (apiKey) {
       try {
         const directionsUrl = buildDirectionsUrl({
           startLat,
@@ -623,7 +604,7 @@ if (apiKey) {
     const routeFiltered = allStops.map((stop) => {
       const lat = typeof stop.latitude === "number" ? stop.latitude : parseFloat(stop.latitude)
       const lng = typeof stop.longitude === "number" ? stop.longitude : parseFloat(stop.longitude)
-const isVerified = ["verified", "custom"].includes(stop.verification_status);
+      const isVerified = ["verified", "custom"].includes(stop.verification_status);
 
       let distanceFromStartKm: number
       let distanceFromDestKm: number
@@ -648,7 +629,7 @@ const isVerified = ["verified", "custom"].includes(stop.verification_status);
         // Verified stops get slightly more lenient thresholds than unverified
         const baseThreshold = isVerified ? env.ROUTE_MAX_KM : env.ROUTE_ACCEPTABLE_MAX_KM
         const remoteThreshold = env.ROUTE_REMOTE_MAX_KM
-        
+
         const tolerance = totalRouteKm * 0.05
         isBetween = lateralKm <= baseThreshold &&
           distanceFromStartKm >= -tolerance &&
@@ -680,7 +661,7 @@ const isVerified = ["verified", "custom"].includes(stop.verification_status);
         distanceFromStartKm = Math.round(distFromStart * 10) / 10
         distanceFromDestKm = Math.round(distFromDest * 10) / 10
         lateralKm = calculateDistance(lat, lng, projLat, projLng)
-        
+
         const baseThreshold = isVerified ? env.ROUTE_MAX_KM : env.ROUTE_ACCEPTABLE_MAX_KM
         isBetween = isBetweenEllipse && isForwardOnRoute && lateralKm <= baseThreshold
 
@@ -696,7 +677,7 @@ const isVerified = ["verified", "custom"].includes(stop.verification_status);
         is_verified: isVerified,
       }
     }).filter((stop) => stop.is_between)
-    .sort((a, b) => a.distance_from_start_km - b.distance_from_start_km)
+      .sort((a, b) => a.distance_from_start_km - b.distance_from_start_km)
 
     // Verified stops (from the stops table) always pass the corridor check — their
     // corridor field often won't match the 6 coarse auto-detected corridors (e.g.
@@ -708,6 +689,8 @@ const isVerified = ["verified", "custom"].includes(stop.verification_status);
     const stopsWithDistance = (tripPreferences
       ? applySuitabilityFilter(corridorFiltered, tripPreferences)
       : corridorFiltered) as RouteStopCandidate[]
+
+    const fuelStationMap = new Map<string, FuelStationOption>()
 
     const segments: PlannedSegment[] = []
     // Tracks stops that have been the primary overnight anchor — these are excluded
@@ -722,103 +705,6 @@ const isVerified = ["verified", "custom"].includes(stop.verification_status);
 
     const totalDistanceKm = drivingInfo?.totalDistanceKm ?? directDistance
     const suggestedDays = Math.max(1, Math.round(totalDistanceKm / config.kmPerDay))
-
-    // For short routes with few stops, search Google Places near destination
-    const placesApiKey = process.env.NEXT_PUBLIC_GMAPS_API_KEY
-    const SHORT_ROUTE_MIN_STOPS = 3
-
-    if (
-      placesApiKey &&
-      totalDistanceKm < env.SHORT_ROUTE_THRESHOLD_KM &&
-      stopsWithDistance.length < SHORT_ROUTE_MIN_STOPS
-    ) {
-      try {
-        const destSearchRadius = Math.max(15000, totalDistanceKm * 100)
-        const searchTypes = ["lodging", "campground", "park", "tourist_attraction"]
-
-        for (const searchType of searchTypes) {
-          const placesUrl = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${destLat},${destLng}&radius=${destSearchRadius}&type=${searchType}&key=${placesApiKey}`
-
-          const placesController = new AbortController()
-          const placesTimeoutId = setTimeout(() => placesController.abort(), 8000)
-
-          try {
-            const placesResponse = await fetch(placesUrl, { signal: placesController.signal })
-            clearTimeout(placesTimeoutId)
-
-            if (placesResponse.ok) {
-              const placesData = await placesResponse.json()
-
-              if (placesData.results && placesData.results.length > 0) {
-                for (const place of placesData.results.slice(0, 10)) {
-                  const placeLat = place.geometry.location.lat
-                  const placeLng = place.geometry.location.lng
-
-                  const distFromDest = calcDistance(placeLat, placeLng, destLat, destLng)
-                  if (distFromDest > 20) continue
-
-                  let distanceFromStartKm: number
-                  let lateralKm: number
-
-                  if (routePolyline && routeCumTable && routeCumTable.length > 0) {
-                    const { distanceFromStartKm: routeDistKm, lateralKm: routeLateralKm } =
-                      projectPointOntoPolyline(placeLat, placeLng, routePolyline, routeCumTable)
-                    distanceFromStartKm = routeDistKm
-                    lateralKm = routeLateralKm
-                  } else {
-                    distanceFromStartKm = calcDistance(startLat, startLng, placeLat, placeLng)
-                    lateralKm = Math.abs(distanceFromStartKm - (totalDistanceKm - distFromDest))
-                  }
-
-                  const relaxedMaxKm = env.ROUTE_ACCEPTABLE_MAX_KM * 1.5
-                  if (lateralKm > relaxedMaxKm) continue
-
-                  const existingKeys = new Set(stopsWithDistance.map(s => s.id))
-                  const placeKey = `google-${place.place_id}`
-                  if (existingKeys.has(placeKey)) continue
-
-                  const googleStop: RouteStopCandidate = {
-                    id: placeKey,
-                    location_name: place.name,
-                    latitude: placeLat,
-                    longitude: placeLng,
-                    state: "",
-                    region: "",
-                    corridor: null,
-                    route_type: searchType === "lodging" ? "Accommodation" :
-                      searchType === "campground" ? "Camping" : "Attraction",
-                    stay_type: "",
-                    pet_friendly: "",
-                    water: "",
-                    cost_band: "Unknown",
-                    tier: "",
-                    verification_status: "google_places",
-                    is_verified: false,
-                    distance_from_start_km: Math.round(distanceFromStartKm * 10) / 10,
-                    distance_from_dest_km: Math.round(distFromDest * 10) / 10,
-                    is_between: true,
-                    lateral_km: lateralKm,
-                    is_remote_area: false,
-                    source: "google_places",
-                  }
-
-                  stopsWithDistance.push(googleStop)
-                }
-              }
-            }
-          } catch (placesErr) {
-            console.warn("[stops] Google Places search failed:", placesErr)
-          }
-        }
-
-        stopsWithDistance.sort((a, b) => a.distance_from_start_km - b.distance_from_start_km)
-        console.log(`[stops] Added Google Places stops. Total: ${stopsWithDistance.length}`)
-      } catch (googleErr) {
-        console.error("[stops] Error searching Google Places:", googleErr)
-      }
-    }
-
-    const fuelStationMap = new Map<string, FuelStationOption>()
 
     // Use max km/day from pace config for realistic calculation (not midpoint)
     const paceMaxKmPerDay = config.maxKmPerDay
@@ -871,9 +757,9 @@ const isVerified = ["verified", "custom"].includes(stop.verification_status);
         : 1
       return scaleFactor !== 1
         ? stopsWithDistance.map((s) => ({
-            ...s,
-            distance_from_start_km: Math.round(s.distance_from_start_km * scaleFactor * 10) / 10,
-          }))
+          ...s,
+          distance_from_start_km: Math.round(s.distance_from_start_km * scaleFactor * 10) / 10,
+        }))
         : stopsWithDistance
     })()
 
@@ -942,8 +828,8 @@ const isVerified = ["verified", "custom"].includes(stop.verification_status);
           const innerStops = stopDistances.filter(d => d > startKm && d < endKm)
           const snapMid = innerStops.length > 0
             ? innerStops.reduce((best, d) =>
-                Math.abs(d - idealMid) < Math.abs(best - idealMid) ? d : best,
-                innerStops[0])
+              Math.abs(d - idealMid) < Math.abs(best - idealMid) ? d : best,
+              innerStops[0])
             : idealMid
           const mid = Math.round(snapMid * 10) / 10
           boundaries.splice(maxIdx, 1,
@@ -997,23 +883,19 @@ const isVerified = ["verified", "custom"].includes(stop.verification_status);
         expandedUnused.filter((s) => canIncludeAsOther(s)),
         endKm,
         14,
-        preferVerified,
-        totalDistanceKm
+        preferVerified
       )
 
       let verifiedInSegment = rankStops(
         inRangeUnused.filter((s) => s.is_verified),
         endKm,
         6,
-        preferVerified,
-        totalDistanceKm
+        preferVerified
       )
       let otherInSegment = rankStops(
         inRangeUnused.filter((s) => !s.is_verified && canIncludeAsOther(s)),
         endKm,
-        8,
-        undefined,
-        totalDistanceKm
+        8
       )
 
       let degradedMode = false
@@ -1045,8 +927,7 @@ const isVerified = ["verified", "custom"].includes(stop.verification_status);
           expandedUnused.filter((s) => s.is_verified),
           endKm,
           12,
-          preferVerified,
-          totalDistanceKm
+          preferVerified
         ).filter((s) => !verifiedInSegment.some((v) => v.id === s.id))
         verifiedInSegment = [...verifiedInSegment, ...fallbackVerified].slice(0, 6)
       }
@@ -1061,8 +942,7 @@ const isVerified = ["verified", "custom"].includes(stop.verification_status);
           scaledStopsWithDistance.filter((s) => isUnusedStop(s) && canIncludeAsOther(s) && isForwardEnough(s)),
           endKm,
           20,
-          preferVerified,
-          totalDistanceKm
+          preferVerified
         )
         appendCandidates(nearestGlobalUnused)
       }
@@ -1073,8 +953,7 @@ const isVerified = ["verified", "custom"].includes(stop.verification_status);
           scaledStopsWithDistance.filter((s) => canIncludeAsOther(s) && isUnusedStop(s) && isForwardEnough(s)),
           endKm,
           20,
-          preferVerified,
-          totalDistanceKm
+          preferVerified
         )
         appendCandidates(nearestGlobal)
       }
@@ -1092,8 +971,7 @@ const isVerified = ["verified", "custom"].includes(stop.verification_status);
           ),
           endKm + lookaheadKm * 0.5,
           3,
-          preferVerified,
-          totalDistanceKm
+          preferVerified
         )
 
         if (forwardFallback.length > 0) {
@@ -1114,8 +992,7 @@ const isVerified = ["verified", "custom"].includes(stop.verification_status);
             ),
             endKm,
             2,
-            preferVerified,
-            totalDistanceKm
+            preferVerified
           )
 
           if (nearbyFallback.length > 0) {
@@ -1165,7 +1042,7 @@ const isVerified = ["verified", "custom"].includes(stop.verification_status);
         isRecommended: stop.id === overnightAnchor?.id,
         isDbSource: stop.is_verified,
       }))
-      
+
       const otherStopsWithFlag = otherInSegment.map((stop) => ({
         ...stop,
         isRecommended: stop.id === overnightAnchor?.id,
@@ -1263,9 +1140,9 @@ const isVerified = ["verified", "custom"].includes(stop.verification_status);
         const point = routePolyline && routeCumTable
           ? samplePolylineAtKm(midKm, routePolyline, routeCumTable)
           : (() => {
-              const fraction = totalDistanceKm > 0 ? Math.min(0.98, Math.max(0.02, midKm / totalDistanceKm)) : 0.5
-              return interpolatePoint(startLat, startLng, destLat, destLng, fraction)
-            })()
+            const fraction = totalDistanceKm > 0 ? Math.min(0.98, Math.max(0.02, midKm / totalDistanceKm)) : 0.5
+            return interpolatePoint(startLat, startLng, destLat, destLng, fraction)
+          })()
         const pointKey = `${point.lat.toFixed(3)}:${point.lng.toFixed(3)}`
 
         if (seenKeys.has(pointKey)) continue
@@ -1295,10 +1172,10 @@ const isVerified = ["verified", "custom"].includes(stop.verification_status);
               const distanceFromStartKm = routePolyline && routeCumTable
                 ? projectPointOntoPolyline(stationLat, stationLng, routePolyline, routeCumTable).distanceFromStartKm
                 : projectDistanceAlongRouteKm({
-                    startLat, startLng, destLat, destLng,
-                    pointLat: stationLat, pointLng: stationLng,
-                    totalDistanceKm,
-                  })
+                  startLat, startLng, destLat, destLng,
+                  pointLat: stationLat, pointLng: stationLng,
+                  totalDistanceKm,
+                })
 
               newStations.push({
                 id: key,
@@ -1388,15 +1265,15 @@ const isVerified = ["verified", "custom"].includes(stop.verification_status);
         // check — that caused the same station to repeat across multiple days.
         const fallbackFuel = rankedFuel.length === 0
           ? allFuelStations
-              .filter((s) => {
-                // Must be within this segment (no cross-day re-use)
-                if (s.distanceFromStartKm < segment.startKm || s.distanceFromStartKm > segment.endKm + 20) return false
-                // Prefer unowned stations; owned-by-other stations only as last resort
-                const owner = stationOwner.get(s.id)
-                return owner === undefined || owner === i
-              })
-              .sort((a, b) => Math.abs(a.distanceFromStartKm - targetFuelKm) - Math.abs(b.distanceFromStartKm - targetFuelKm))
-              .slice(0, 2)
+            .filter((s) => {
+              // Must be within this segment (no cross-day re-use)
+              if (s.distanceFromStartKm < segment.startKm || s.distanceFromStartKm > segment.endKm + 20) return false
+              // Prefer unowned stations; owned-by-other stations only as last resort
+              const owner = stationOwner.get(s.id)
+              return owner === undefined || owner === i
+            })
+            .sort((a, b) => Math.abs(a.distanceFromStartKm - targetFuelKm) - Math.abs(b.distanceFromStartKm - targetFuelKm))
+            .slice(0, 2)
           : []
 
         segment.fuelSuggestions = rankedFuel.length > 0 ? rankedFuel : fallbackFuel
@@ -1415,9 +1292,9 @@ const isVerified = ["verified", "custom"].includes(stop.verification_status);
           const point = routePolyline && routeCumTable
             ? samplePolylineAtKm(midKm, routePolyline, routeCumTable)
             : (() => {
-                const fraction = totalDistanceKm > 0 ? Math.min(0.98, Math.max(0.02, midKm / totalDistanceKm)) : 0.5
-                return interpolatePoint(startLat, startLng, destLat, destLng, fraction)
-              })()
+              const fraction = totalDistanceKm > 0 ? Math.min(0.98, Math.max(0.02, midKm / totalDistanceKm)) : 0.5
+              return interpolatePoint(startLat, startLng, destLat, destLng, fraction)
+            })()
           const midpointKey = `${point.lat.toFixed(3)}:${point.lng.toFixed(3)}`
 
           if (probedMidpoints.has(midpointKey)) continue
@@ -1454,10 +1331,10 @@ const isVerified = ["verified", "custom"].includes(stop.verification_status);
                 const distanceFromStartKm = routePolyline && routeCumTable
                   ? projectPointOntoPolyline(stationLat, stationLng, routePolyline, routeCumTable).distanceFromStartKm
                   : projectDistanceAlongRouteKm({
-                      startLat, startLng, destLat, destLng,
-                      pointLat: stationLat, pointLng: stationLng,
-                      totalDistanceKm,
-                    })
+                    startLat, startLng, destLat, destLng,
+                    pointLat: stationLat, pointLng: stationLng,
+                    totalDistanceKm,
+                  })
 
                 newStations.push({
                   id: key,
@@ -1537,20 +1414,20 @@ const isVerified = ["verified", "custom"].includes(stop.verification_status);
 
           const fallbackFuel = rankedFuel.length === 0
             ? updatedFuelStations
-                .filter((s) => {
-                  if (s.distanceFromStartKm < segment.startKm || s.distanceFromStartKm > segment.endKm + 20) return false
-                  const owner = updatedOwner.get(s.id)
-                  return owner === undefined || owner === segIdx
-                })
-                .sort((a, b) => Math.abs(a.distanceFromStartKm - targetFuelKm) - Math.abs(b.distanceFromStartKm - targetFuelKm))
-                .slice(0, 2)
+              .filter((s) => {
+                if (s.distanceFromStartKm < segment.startKm || s.distanceFromStartKm > segment.endKm + 20) return false
+                const owner = updatedOwner.get(s.id)
+                return owner === undefined || owner === segIdx
+              })
+              .sort((a, b) => Math.abs(a.distanceFromStartKm - targetFuelKm) - Math.abs(b.distanceFromStartKm - targetFuelKm))
+              .slice(0, 2)
             : []
 
           segment.fuelSuggestions = rankedFuel.length > 0 ? rankedFuel : fallbackFuel
           segment.primaryFuelSuggestion = segment.fuelSuggestions[0]
           segment.fuelCritical = (segment.isRemote && segmentDistance >= fuelSafeKm * 0.6)
-              || segmentDistance >= fuelSafeKm
-              || segment.fuelSuggestions.length === 0
+            || segmentDistance >= fuelSafeKm
+            || segment.fuelSuggestions.length === 0
         }
       }
 
