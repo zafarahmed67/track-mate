@@ -66,6 +66,26 @@ export function applySuitabilityFilter<T extends FilterableStop>(
 
   const rejectionReasons: Record<string, number> = {}
 
+  console.log("[stopSuitabilityFilter] FILTER: Starting filter with:", {
+    inputStopsCount: stops.length,
+    tripPreferences: {
+      rig_type: trip.rig_type,
+      rig_length_m: trip.rig_length_m,
+      pet_friendly_required: trip.pet_friendly_required,
+      avoid_gravel_roads: trip.avoid_gravel_roads,
+      stay_preference: trip.stay_preference,
+      budget_preference: trip.budget_preference,
+      end_date: trip.end_date,
+      travelMonth,
+    },
+    sampleStops: stops.slice(0, 5).map(s => ({
+      name: s.rig_suitability ? "stop" : "unknown",
+      stay_type: s.stay_type,
+      cost_band: s.cost_band,
+      road_suitability: s.road_suitability,
+    })),
+  })
+
   const result = stops.filter((stop) => {
     // Rule 1 — Rig suitability: non-4WD rigs cannot access 4WD-only stops
     if (trip.rig_type && trip.rig_type !== "4wd-camper") {
@@ -146,20 +166,26 @@ export function applySuitabilityFilter<T extends FilterableStop>(
     return true
   })
 
-  if (Object.keys(rejectionReasons).length > 0) {
-    console.log("🔍 Suitability filter rejection reasons:", JSON.stringify(rejectionReasons))
-    console.log("🔍 Trip preferences:", JSON.stringify({
+  console.log("[stopSuitabilityFilter] FILTER: Results:", {
+    inputCount: stops.length,
+    outputCount: result.length,
+    filteredOutCount: stops.length - result.length,
+    rejectionReasons: Object.keys(rejectionReasons).length > 0 ? rejectionReasons : "none",
+    tripPreferences: {
       rig_type: trip.rig_type,
       rig_length_m: trip.rig_length_m,
       pet_friendly_required: trip.pet_friendly_required,
       avoid_gravel_roads: trip.avoid_gravel_roads,
       stay_preference: trip.stay_preference,
       budget_preference: trip.budget_preference,
-      end_date: trip.end_date,
-      trip_duration_days: trip.trip_duration_days,
       travelMonth,
-    }))
-  }
+    },
+    remainingStops: result.slice(0, 5).map(s => ({
+      stay_type: s.stay_type,
+      cost_band: s.cost_band,
+      rig_suitability: s.rig_suitability,
+    })),
+  })
 
   return result
 }

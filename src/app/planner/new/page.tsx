@@ -329,11 +329,15 @@ export default function NewPlannerPage() {
     }
 
     try {
+      console.log("[CLIENT] Creating trip with data:", JSON.stringify(tripData, null, 2))
+
       const response = await fetch("/api/trips", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(tripData),
       })
+
+      console.log("[CLIENT] Server response:", response.status, await response.clone().json())
 
       if (response.ok) {
         const data = await response.json()

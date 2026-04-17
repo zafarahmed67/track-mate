@@ -1331,6 +1331,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { decodePolyline, buildCumulativeDistanceTable, samplePolylineAtKm, projectPointOntoPolyline } from "@/lib/routePolyline"
 import { env } from "@/config/env.config"
 import OpenAI from "openai"
+import { applySuitabilityFilter, TripPreferences } from "@/lib/stopSuitabilityFilter"
 
 interface UserMetadata {
   defaults?: {
@@ -1515,10 +1516,17 @@ async function geocodeWithAustraliaBias(address: string): Promise<{ lat: number;
   const url = `${base}?address=${encodeURIComponent(address)}&components=country:AU&region=au&key=${apiKey}`
 
   try {
-    const response = await fetch(url)
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 8000)
+    const response = await fetch(url, { signal: controller.signal })
+    clearTimeout(timeoutId)
+    if (!response.ok) {
+      console.warn("[geocode] HTTP error, trying fallback")
+      return geocodeWithNominatim(address)
+    }
     const data = await response.json()
     const results = Array.isArray(data?.results) ? data.results : []
-    if (results.length === 0) return null
+    if (results.length === 0) return geocodeWithNominatim(address)
 
     const australianResult = results.find((result: { address_components?: Array<{ short_name?: string; types?: string[] }>; geometry?: { location?: { lat?: number; lng?: number } }; formatted_address?: string }) => {
       const country = extractCountryCode(result.address_components || [])
@@ -1527,12 +1535,44 @@ async function geocodeWithAustraliaBias(address: string): Promise<{ lat: number;
 
     const lat = Number(australianResult?.geometry?.location?.lat)
     const lng = Number(australianResult?.geometry?.location?.lng)
-    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return geocodeWithNominatim(address)
 
     return {
       lat,
       lng,
       formattedAddress: australianResult.formatted_address,
+    }
+  } catch (err) {
+    console.warn("[geocode] Failed, trying fallback:", err)
+    return geocodeWithNominatim(address)
+  }
+}
+
+async function geocodeWithNominatim(address: string): Promise<{ lat: number; lng: number; formattedAddress?: string } | null> {
+  const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address + ", Australia")}&limit=1`
+
+  try {
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 5000)
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: { "User-Agent": "TrackMate/1.0" },
+    })
+    clearTimeout(timeoutId)
+    if (!response.ok) return null
+
+    const data = await response.json()
+    if (!Array.isArray(data) || data.length === 0) return null
+
+    const result = data[0]
+    const lat = Number(result.lat)
+    const lng = Number(result.lon)
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null
+
+    return {
+      lat,
+      lng,
+      formattedAddress: result.display_name,
     }
   } catch {
     return null
@@ -2179,6 +2219,13 @@ interface TripGenerationJob {
   destLng: number
   tripDurationDays: number
   travelPace: TravelPace
+  stayPreference: string | null
+  budgetPreference: string | null
+  avoidGravelRoads: boolean
+  petFriendlyRequired: boolean
+  rigType: string | null
+  rigLengthM: number | null
+  endDate: string | null
 }
 
 const tripGenerationQueue: TripGenerationJob[] = []
@@ -2374,6 +2421,19 @@ async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
   }
 
   const organizationDistanceKm = customRouteDistanceKm ?? planningDistanceKm
+
+  console.log("[organizeStopsByDay] CLIENT → SERVER: Sending preferences to organizeStopsByDay:", {
+    tripId: job.tripId,
+    stayPreference: job.stayPreference,
+    budgetPreference: job.budgetPreference,
+    avoidGravelRoads: job.avoidGravelRoads,
+    petFriendlyRequired: job.petFriendlyRequired,
+    rigType: job.rigType,
+    rigLengthM: job.rigLengthM,
+    endDate: job.endDate,
+    tripDurationDays: job.tripDurationDays,
+  })
+
   await organizeStopsByDay(
     job.tripId,
     job.startLat,
@@ -2381,7 +2441,17 @@ async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
     job.destLat,
     job.destLng,
     finalTripDays,
-    organizationDistanceKm
+    organizationDistanceKm,
+    {
+      stay_preference: job.stayPreference,
+      budget_preference: job.budgetPreference,
+      avoid_gravel_roads: job.avoidGravelRoads,
+      pet_friendly_required: job.petFriendlyRequired,
+      rig_type: job.rigType,
+      rig_length_m: job.rigLengthM,
+      end_date: job.endDate,
+      trip_duration_days: job.tripDurationDays,
+    }
   )
 
   const { data: tripRouteDataRow } = await supabaseAdmin
@@ -2428,7 +2498,8 @@ async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
         job.destLat,
         job.destLng,
         organizationDistanceKm,
-        finalTripDays
+        finalTripDays,
+        job.tripDurationDays
       )
       console.log("[narrative] TrackMate Overview auto-generated successfully for trip", job.tripId)
     } catch (narrativeError) {
@@ -2489,18 +2560,30 @@ async function organizeStopsByDay(
   destLat: number,
   destLng: number,
   tripDays: number,
-  totalDistanceKm: number
+  totalDistanceKm: number,
+  preferences: {
+    stay_preference: string | null
+    budget_preference: string | null
+    avoid_gravel_roads: boolean
+    pet_friendly_required: boolean
+    rig_type: string | null
+    rig_length_m: number | null
+    end_date: string | null
+    trip_duration_days: number
+  } | null
 ): Promise<void> {
   if (!supabaseAdmin) {
     throw new Error("Database not configured")
   }
+
+  console.log("[organizeStopsByDay] SERVER: Received preferences:", JSON.stringify(preferences, null, 2))
 
   const userDays = Math.max(1, Math.round(Number(tripDays) || 1))
   const kmPerDay = totalDistanceKm / userDays
 
   const { data: verifiedStops } = await supabaseAdmin
     .from("trip_candidate_stops")
-    .select("*, stops:stops(id, location_name, latitude, longitude)")
+    .select("*, stops:stops(id, location_name, latitude, longitude, rig_suitability, road_suitability, pet_friendly, stay_type, cost_band, max_rig_length, best_season)")
     .eq("trip_id", tripId)
     .eq("source_type", "verified")
 
@@ -2516,8 +2599,71 @@ async function organizeStopsByDay(
   const allStops: DayStopOption[] = []
 
   if (verifiedStops) {
-    for (const vs of verifiedStops) {
-      const stop = vs.stops as { id: string; location_name: string; latitude: number; longitude: number } | null
+    const filterableStops = verifiedStops
+      .map((vs) => {
+        const stop = vs.stops as {
+          id: string
+          location_name: string
+          latitude: number
+          longitude: number
+          rig_suitability?: string
+          road_suitability?: string
+          pet_friendly?: string
+          stay_type?: string
+          cost_band?: string
+          max_rig_length?: string
+          best_season?: string
+        } | null
+        if (!stop) return null
+        return {
+          rig_suitability: stop.rig_suitability ?? "",
+          road_suitability: stop.road_suitability ?? "",
+          pet_friendly: stop.pet_friendly ?? "",
+          stay_type: stop.stay_type ?? "",
+          cost_band: stop.cost_band ?? "",
+          max_rig_length: stop.max_rig_length ?? "",
+          best_season: stop.best_season ?? "",
+          ...vs,
+          _stop: stop,
+        }
+      })
+      .filter((s): s is NonNullable<typeof s> => s !== null)
+
+    const tripPrefs = preferences ? {
+      rig_type: preferences.rig_type,
+      rig_length_m: preferences.rig_length_m,
+      pet_friendly_required: preferences.pet_friendly_required,
+      avoid_gravel_roads: preferences.avoid_gravel_roads,
+      stay_preference: preferences.stay_preference,
+      budget_preference: preferences.budget_preference,
+      end_date: preferences.end_date,
+      trip_duration_days: preferences.trip_duration_days,
+    } : null
+
+    const filteredStops = tripPrefs
+      ? applySuitabilityFilter(filterableStops, tripPrefs)
+      : filterableStops
+
+    console.log("[organizeStopsByDay] SERVER: Filter Results:", {
+      beforeFilter: filterableStops.length,
+      afterFilter: filteredStops.length,
+      tripPrefs: tripPrefs,
+      sampleStopsBefore: filterableStops.slice(0, 3).map(s => ({
+        name: s._stop?.location_name,
+        stay_type: s.stay_type,
+        cost_band: s.cost_band,
+        rig_suitability: s.rig_suitability,
+      })),
+      sampleStopsAfter: filteredStops.slice(0, 3).map(s => ({
+        name: s._stop?.location_name,
+        stay_type: s.stay_type,
+        cost_band: s.cost_band,
+        rig_suitability: s.rig_suitability,
+      })),
+    })
+
+    for (const vs of filteredStops) {
+      const stop = vs._stop
       if (stop) {
         const distFromStart = vs.distance_from_start_km ??
           (vs.distance_to_route_km ?? calculateDistance(startLat, startLng, stop.latitude, stop.longitude))
@@ -2571,6 +2717,8 @@ async function organizeStopsByDay(
     options: DayStopOption[]
   }> = []
 
+  const usedStopIds = new Set<string>()
+
   let currentDay = 1
   while (currentDay <= userDays) {
     const targetKm = kmPerDay * currentDay
@@ -2591,6 +2739,7 @@ async function organizeStopsByDay(
 
     const uniqueByName = new Map<string, DayStopOption>()
     for (const stop of relevantStops) {
+      if (usedStopIds.has(stop.id)) continue
       const key = stop.name.toLowerCase().trim()
       if (!uniqueByName.has(key)) {
         uniqueByName.set(key, stop)
@@ -2625,6 +2774,10 @@ async function organizeStopsByDay(
       targetKm,
       options,
     })
+
+    for (const opt of options) {
+      usedStopIds.add(opt.id)
+    }
 
     currentDay++
   }
@@ -2742,7 +2895,8 @@ async function generateNarrativeForNewTrip(
   destLat: number,
   destLng: number,
   totalDistanceKm: number,
-  tripDays: number
+  tripDays: number,
+  userRequestedDays: number
 ): Promise<void> {
   if (!supabaseAdmin) {
     throw new Error("Database not configured")
@@ -2758,6 +2912,25 @@ async function generateNarrativeForNewTrip(
 
   if (!tripData) {
     throw new Error("Trip not found")
+  }
+
+  const userStayPreference = tripData.stay_preference ?? "any"
+  const userAvoidGravelRoads = tripData.avoid_gravel_roads ?? false
+  const userPetFriendly = tripData.pet_friendly_required ?? false
+  const userBudgetPreference = tripData.budget_preference ?? "any"
+
+  const stayPreferenceMap: Record<string, string[]> = {
+    "free-camps": ["free", "campground"],
+    "caravan-parks": ["caravan_park"],
+  }
+
+  const passesStayFilter = (stayType: string | null): boolean => {
+    if (!userStayPreference || userStayPreference === "any") return true
+    if (!stayType) return false
+    const allowed = stayPreferenceMap[userStayPreference]
+    if (!allowed) return true
+    const normalized = stayType.toLowerCase().replace(" ", "_")
+    return allowed.some(a => normalized.includes(a))
   }
 
   const { data: itineraryDays } = await supabaseAdmin
@@ -2822,9 +2995,11 @@ async function generateNarrativeForNewTrip(
     gapFromLastFuelKm: number | null
     gapToNextFuelKm: number | null
     degradedMode: boolean
+    userRequestedDays: number
   }
 
   const daysPayload: DayPayload[] = []
+  let maxDayWithStops = 0
   for (let dayNum = 1; dayNum <= tripDays; dayNum++) {
     const dayItineraryRows = itineraryDays?.filter(row => row.day_number === dayNum) ?? []
 
@@ -2832,6 +3007,7 @@ async function generateNarrativeForNewTrip(
       ?.filter(cs => {
         const stop = cs.stops as { id: string; location_name: string; stay_type?: string; route_type?: string; aao_tip?: string; why_stop_here?: string; why_we_d_stay_again?: string; road_suitability?: string } | null
         if (!stop) return false
+        if (!passesStayFilter(stop.stay_type ?? null)) return false
         const distFromStart = cs.distance_from_start_km ?? 0
         const dayTargetKm = kmPerDay * dayNum
         const dayMinKm = kmPerDay * (dayNum - 1)
@@ -2851,6 +3027,7 @@ async function generateNarrativeForNewTrip(
 
     const otherStops = customStopsData
       ?.filter(cs => {
+        if (!passesStayFilter(cs.place_type ?? null)) return false
         const distFromStart = cs.distance_from_start_km ?? 0
         const dayTargetKm = kmPerDay * dayNum
         const dayMinKm = kmPerDay * (dayNum - 1)
@@ -2902,7 +3079,12 @@ async function generateNarrativeForNewTrip(
       gapFromLastFuelKm: null,
       gapToNextFuelKm: null,
       degradedMode: false,
+      userRequestedDays,
     })
+
+    if (allowedStopNames.length > 0 && maxDayWithStops === 0) {
+      maxDayWithStops = dayNum
+    }
   }
 
   let travelMonth: string | null = null
@@ -3024,7 +3206,11 @@ STRICT RULES — violation will break the app:
           aaoTip: "",
         } : null,
         aaoTips: [],
-        gapNote: day.allowedStopNames.length === 0 ? "No overnight stop is available on this stretch. Plan this leg carefully before departure." : null,
+        gapNote: day.allowedStopNames.length === 0 
+        ? day.dayNumber >= userRequestedDays 
+          ? "Continue to destination - no staged overnight stop needed." 
+          : "No overnight stop is available on this stretch. Plan this leg carefully before departure." 
+        : null,
         fuelNote: null,
       })),
       tripNotes: {
@@ -3277,22 +3463,29 @@ export async function POST(req: NextRequest) {
       status = "planned",
     } = body
 
-    let resolvedStartLat = startLat
+let resolvedStartLat = startLat
     let resolvedStartLng = startLng
     let resolvedDestLat = destLat
     let resolvedDestLng = destLng
 
-    const hasAllCoords =
-      Number.isFinite(Number(startLat)) &&
-      Number.isFinite(Number(startLng)) &&
-      Number.isFinite(Number(destLat)) &&
-      Number.isFinite(Number(destLng))
+    const startLatNum = Number(startLat)
+    const startLngNum = Number(startLng)
+    const destLatNum = Number(destLat)
+    const destLngNum = Number(destLng)
 
+    const userProvidedCoordsValid =
+      Number.isFinite(startLatNum) &&
+      Number.isFinite(startLngNum) &&
+      Number.isFinite(destLatNum) &&
+      Number.isFinite(destLngNum) &&
+      startLatNum >= -90 && startLatNum <= 90 &&
+      destLatNum >= -90 && destLatNum <= 90 &&
+      startLngNum >= -180 && startLngNum <= 180 &&
+      destLngNum >= -180 && destLngNum <= 180
 
-
-    if (hasAllCoords) {
-      const startInAu = isWithinAustralia(Number(startLat), Number(startLng))
-      const destInAu = isWithinAustralia(Number(destLat), Number(destLng))
+    if (userProvidedCoordsValid) {
+      const startInAu = isWithinAustralia(startLatNum, startLngNum)
+      const destInAu = isWithinAustralia(destLatNum, destLngNum)
 
       if (!startInAu || !destInAu) {
         const [startGeo, destGeo] = await Promise.all([
@@ -3321,6 +3514,33 @@ export async function POST(req: NextRequest) {
             { status: 400 }
           )
         }
+      }
+    } else if (!userProvidedCoordsValid) {
+      const [startGeo, destGeo] = await Promise.all([
+        geocodeWithAustraliaBias(startLocation),
+        geocodeWithAustraliaBias(destination),
+      ])
+
+      if (startGeo && destGeo) {
+        resolvedStartLat = startGeo.lat
+        resolvedStartLng = startGeo.lng
+        resolvedDestLat = destGeo.lat
+        resolvedDestLng = destGeo.lng
+
+        console.log("[0/4] 🧭 Geocoded from place names", {
+          startLocation,
+          destination,
+          startCoords: [resolvedStartLat, resolvedStartLng],
+          destCoords: [resolvedDestLat, resolvedDestLng],
+        })
+      } else {
+        return NextResponse.json(
+          {
+            success: false,
+            error: "Could not resolve locations. Please provide valid coordinates or specific Australian addresses (e.g., 'Port Augusta SA').",
+          },
+          { status: 400 }
+        )
       }
     }
 
@@ -3471,6 +3691,18 @@ export async function POST(req: NextRequest) {
 
     const safeTravelPace: TravelPace = (travelPace === "fast" || travelPace === "moderate") ? travelPace : "leisurely"
 
+    console.log("[queue] CLIENT → SERVER: Sending preferences to queue:", {
+      tripId: data.id,
+      stayPreference: stayPreference,
+      budgetPreference: budgetPreference,
+      avoidGravelRoads: avoidGravelRoads,
+      petFriendlyRequired: petFriendlyRequired,
+      rigType: rigType,
+      rigLengthM: rigLengthM,
+      endDate: endDate,
+      tripDurationDays: tripDurationDays,
+    })
+
     const queueSizeAfterEnqueue = enqueueTripGeneration({
       tripId: data.id,
       title: data.title,
@@ -3480,6 +3712,13 @@ export async function POST(req: NextRequest) {
       destLng: Number(resolvedDestLng),
       tripDurationDays: Number(tripDurationDays) || 1,
       travelPace: safeTravelPace,
+      stayPreference: stayPreference ?? null,
+      budgetPreference: budgetPreference ?? null,
+      avoidGravelRoads: avoidGravelRoads ?? false,
+      petFriendlyRequired: petFriendlyRequired ?? false,
+      rigType: rigType ?? null,
+      rigLengthM: rigLengthM ?? null,
+      endDate: endDate ?? null,
     })
 
     console.log("[queue] 📨 Trip queued for planning", {

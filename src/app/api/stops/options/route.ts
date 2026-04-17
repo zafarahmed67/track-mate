@@ -38,7 +38,9 @@ interface RouteStopCandidate {
   cost_band?: string
   tier?: string
   is_verified: boolean
+  verification_status?: string
   is_alternative?: boolean
+  is_between?: boolean
   distance_from_start_km: number
   distance_from_dest_km: number
   lateral_km?: number
@@ -343,6 +345,11 @@ function buildAdaptiveBoundaries(
   stopDistances: number[],
   northbound: boolean
 ) {
+  // For short routes, single segment covers entire route
+  if (totalDistanceKm < env.SHORT_ROUTE_THRESHOLD_KM) {
+    return [{ startKm: 0, endKm: totalDistanceKm }]
+  }
+
   const boundaries: Array<{ startKm: number; endKm: number }> = []
   let current = 0
   let guard = 0
@@ -393,24 +400,36 @@ function rankStops(
   stops: RouteStopCandidate[],
   targetKm: number,
   preferredCount: number,
-  preferVerified?: boolean
+  preferVerified?: boolean,
+  totalRouteKm?: number
 ) {
+  const isShortRoute = totalRouteKm && totalRouteKm < env.SHORT_ROUTE_THRESHOLD_KM
+
   return stops
     .slice()
     .sort((a, b) => {
       const aDistFromTarget = Math.abs(a.distance_from_start_km - targetKm)
       const bDistFromTarget = Math.abs(b.distance_from_start_km - targetKm)
+
+      // For short routes, prioritize stops closer to destination
+      const aDist = isShortRoute && totalRouteKm
+        ? Math.abs(totalRouteKm - a.distance_from_start_km)
+        : aDistFromTarget
+      const bDist = isShortRoute && totalRouteKm
+        ? Math.abs(totalRouteKm - b.distance_from_start_km)
+        : bDistFromTarget
+
       // Cap the verified bonus proportionally to distance so a verified stop
       // far from the segment endpoint cannot override a closer non-verified stop.
-      const aVerifiedBonus = preferVerified && a.is_verified ? -Math.min(50, aDistFromTarget * 0.45) : 0
-      const bVerifiedBonus = preferVerified && b.is_verified ? -Math.min(50, bDistFromTarget * 0.45) : 0
+      const aVerifiedBonus = preferVerified && a.is_verified ? -Math.min(50, aDist * 0.45) : 0
+      const bVerifiedBonus = preferVerified && b.is_verified ? -Math.min(50, bDist * 0.45) : 0
       // Penalise stops that overshoot the segment endpoint (past targetKm).
       // Driving further than the boundary means tomorrow's leg shrinks — a 25 km
       // overshoot adds an extra 50 points so in-boundary stops are strongly preferred.
-      const aOvershoot = Math.max(0, a.distance_from_start_km - targetKm) * 2
-      const bOvershoot = Math.max(0, b.distance_from_start_km - targetKm) * 2
-      const aScore = aDistFromTarget + aOvershoot + (a.stay_type ? 0 : 25) + aVerifiedBonus
-      const bScore = bDistFromTarget + bOvershoot + (b.stay_type ? 0 : 25) + bVerifiedBonus
+      const aOvershoot = isShortRoute ? 0 : Math.max(0, a.distance_from_start_km - targetKm) * 2
+      const bOvershoot = isShortRoute ? 0 : Math.max(0, b.distance_from_start_km - targetKm) * 2
+      const aScore = aDist + aOvershoot + (a.stay_type ? 0 : 25) + aVerifiedBonus
+      const bScore = bDist + bOvershoot + (b.stay_type ? 0 : 25) + bVerifiedBonus
       return aScore - bScore
     })
     .slice(0, preferredCount)
@@ -500,7 +519,7 @@ export async function POST(req: NextRequest) {
     let routePolyline: PolylinePoint[] | null = null
     let routeCumTable: number[] | null = null
 
-    if (apiKey) {
+if (apiKey) {
       try {
         const directionsUrl = buildDirectionsUrl({
           startLat,
@@ -511,24 +530,29 @@ export async function POST(req: NextRequest) {
           rigType: tripPreferences?.rig_type,
           avoidGravelRoads: tripPreferences?.avoid_gravel_roads,
         })
-        const directionsResponse = await fetch(directionsUrl)
-        const directionsData = await directionsResponse.json()
-
-        if (directionsData.status === "OK" && directionsData.routes?.length > 0) {
-          const selectedRoute = selectBestDirectionsRoute(directionsData.routes as GoogleDirectionsRoute[])
-          const route = selectedRoute?.legs?.[0]
-          if (!route) {
-            throw new Error("No route leg data returned")
-          }
-          drivingInfo = {
-            totalDistanceKm: route.distance.value / 1000,
-            totalDurationMinutes: route.duration.value / 60,
-          }
-          // Extract and decode the polyline for accurate geometric operations.
-          const encodedPolyline = selectedRoute?.overview_polyline?.points
-          if (encodedPolyline) {
-            routePolyline = decodePolyline(encodedPolyline)
-            routeCumTable = buildCumulativeDistanceTable(routePolyline)
+        const dirController = new AbortController()
+        const dirTimeoutId = setTimeout(() => dirController.abort(), 12000)
+        const directionsResponse = await fetch(directionsUrl, { signal: dirController.signal })
+        clearTimeout(dirTimeoutId)
+        if (!directionsResponse.ok) {
+          console.warn(`[directions] HTTP ${directionsResponse.status}, falling back to haversine`)
+        } else {
+          const directionsData = await directionsResponse.json()
+          if (directionsData.status === "OK" && directionsData.routes?.length > 0) {
+            const selectedRoute = selectBestDirectionsRoute(directionsData.routes as GoogleDirectionsRoute[])
+            const route = selectedRoute?.legs?.[0]
+            if (!route) {
+              throw new Error("No route leg data returned")
+            }
+            drivingInfo = {
+              totalDistanceKm: route.distance.value / 1000,
+              totalDurationMinutes: route.duration.value / 60,
+            }
+            const encodedPolyline = selectedRoute?.overview_polyline?.points
+            if (encodedPolyline) {
+              routePolyline = decodePolyline(encodedPolyline)
+              routeCumTable = buildCumulativeDistanceTable(routePolyline)
+            }
           }
         }
       } catch (err) {
@@ -599,7 +623,7 @@ export async function POST(req: NextRequest) {
     const routeFiltered = allStops.map((stop) => {
       const lat = typeof stop.latitude === "number" ? stop.latitude : parseFloat(stop.latitude)
       const lng = typeof stop.longitude === "number" ? stop.longitude : parseFloat(stop.longitude)
-      const isVerified = Boolean(stop.verification_status && stop.verification_status !== "custom")
+const isVerified = ["verified", "custom"].includes(stop.verification_status);
 
       let distanceFromStartKm: number
       let distanceFromDestKm: number
@@ -685,8 +709,6 @@ export async function POST(req: NextRequest) {
       ? applySuitabilityFilter(corridorFiltered, tripPreferences)
       : corridorFiltered) as RouteStopCandidate[]
 
-    const fuelStationMap = new Map<string, FuelStationOption>()
-
     const segments: PlannedSegment[] = []
     // Tracks stops that have been the primary overnight anchor — these are excluded
     // from being the anchor again on another day, but can still appear as options.
@@ -701,29 +723,122 @@ export async function POST(req: NextRequest) {
     const totalDistanceKm = drivingInfo?.totalDistanceKm ?? directDistance
     const suggestedDays = Math.max(1, Math.round(totalDistanceKm / config.kmPerDay))
 
-    // Calculate realistic days based on distance and pace settings
-    // Use the midpoint of pace's km/day range for realistic calculation
-    const paceKmPerDay = config.kmPerDay
-    const realisticDays = Math.max(1, Math.round(totalDistanceKm / paceKmPerDay))
+    // For short routes with few stops, search Google Places near destination
+    const placesApiKey = process.env.NEXT_PUBLIC_GMAPS_API_KEY
+    const SHORT_ROUTE_MIN_STOPS = 3
 
-    // Determine final days - adjust if user request would produce unrealistic daily distances
+    if (
+      placesApiKey &&
+      totalDistanceKm < env.SHORT_ROUTE_THRESHOLD_KM &&
+      stopsWithDistance.length < SHORT_ROUTE_MIN_STOPS
+    ) {
+      try {
+        const destSearchRadius = Math.max(15000, totalDistanceKm * 100)
+        const searchTypes = ["lodging", "campground", "park", "tourist_attraction"]
+
+        for (const searchType of searchTypes) {
+          const placesUrl = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${destLat},${destLng}&radius=${destSearchRadius}&type=${searchType}&key=${placesApiKey}`
+
+          const placesController = new AbortController()
+          const placesTimeoutId = setTimeout(() => placesController.abort(), 8000)
+
+          try {
+            const placesResponse = await fetch(placesUrl, { signal: placesController.signal })
+            clearTimeout(placesTimeoutId)
+
+            if (placesResponse.ok) {
+              const placesData = await placesResponse.json()
+
+              if (placesData.results && placesData.results.length > 0) {
+                for (const place of placesData.results.slice(0, 10)) {
+                  const placeLat = place.geometry.location.lat
+                  const placeLng = place.geometry.location.lng
+
+                  const distFromDest = calcDistance(placeLat, placeLng, destLat, destLng)
+                  if (distFromDest > 20) continue
+
+                  let distanceFromStartKm: number
+                  let lateralKm: number
+
+                  if (routePolyline && routeCumTable && routeCumTable.length > 0) {
+                    const { distanceFromStartKm: routeDistKm, lateralKm: routeLateralKm } =
+                      projectPointOntoPolyline(placeLat, placeLng, routePolyline, routeCumTable)
+                    distanceFromStartKm = routeDistKm
+                    lateralKm = routeLateralKm
+                  } else {
+                    distanceFromStartKm = calcDistance(startLat, startLng, placeLat, placeLng)
+                    lateralKm = Math.abs(distanceFromStartKm - (totalDistanceKm - distFromDest))
+                  }
+
+                  const relaxedMaxKm = env.ROUTE_ACCEPTABLE_MAX_KM * 1.5
+                  if (lateralKm > relaxedMaxKm) continue
+
+                  const existingKeys = new Set(stopsWithDistance.map(s => s.id))
+                  const placeKey = `google-${place.place_id}`
+                  if (existingKeys.has(placeKey)) continue
+
+                  const googleStop: RouteStopCandidate = {
+                    id: placeKey,
+                    location_name: place.name,
+                    latitude: placeLat,
+                    longitude: placeLng,
+                    state: "",
+                    region: "",
+                    corridor: null,
+                    route_type: searchType === "lodging" ? "Accommodation" :
+                      searchType === "campground" ? "Camping" : "Attraction",
+                    stay_type: "",
+                    pet_friendly: "",
+                    water: "",
+                    cost_band: "Unknown",
+                    tier: "",
+                    verification_status: "google_places",
+                    is_verified: false,
+                    distance_from_start_km: Math.round(distanceFromStartKm * 10) / 10,
+                    distance_from_dest_km: Math.round(distFromDest * 10) / 10,
+                    is_between: true,
+                    lateral_km: lateralKm,
+                    is_remote_area: false,
+                    source: "google_places",
+                  }
+
+                  stopsWithDistance.push(googleStop)
+                }
+              }
+            }
+          } catch (placesErr) {
+            console.warn("[stops] Google Places search failed:", placesErr)
+          }
+        }
+
+        stopsWithDistance.sort((a, b) => a.distance_from_start_km - b.distance_from_start_km)
+        console.log(`[stops] Added Google Places stops. Total: ${stopsWithDistance.length}`)
+      } catch (googleErr) {
+        console.error("[stops] Error searching Google Places:", googleErr)
+      }
+    }
+
+    const fuelStationMap = new Map<string, FuelStationOption>()
+
+    // Use max km/day from pace config for realistic calculation (not midpoint)
+    const paceMaxKmPerDay = config.maxKmPerDay
+    const minRequiredDays = Math.max(1, Math.round(totalDistanceKm / paceMaxKmPerDay))
+
+    // Determine final days - respect user choice when possible
     let finalDays = suggestedDays
     let daysAdjusted = false
     let originalDays: number | null = null
 
     if (requestedTripDays && requestedTripDays > 0) {
-      // User specified days - compare against realistic
-      if (requestedTripDays < realisticDays) {
-        // User requested fewer days than realistic - adjust to realistic
+      // Use system suggestion (if fewer) OR user's choice (if fewer than system)
+      // Never go above user's requested days
+      finalDays = Math.min(requestedTripDays, suggestedDays)
+      if (finalDays < requestedTripDays && suggestedDays > requestedTripDays) {
+        // System wanted more days but user capped it - inform UI
         originalDays = requestedTripDays
-        finalDays = realisticDays
         daysAdjusted = true
-      } else {
-        // User requested more or equal to realistic - use user's request
-        finalDays = requestedTripDays
       }
     }
-    // If no user request, use suggested (which is based on pace)
 
     // Use finalDays for planning
     const planningDays = finalDays
@@ -882,19 +997,23 @@ export async function POST(req: NextRequest) {
         expandedUnused.filter((s) => canIncludeAsOther(s)),
         endKm,
         14,
-        preferVerified
+        preferVerified,
+        totalDistanceKm
       )
 
       let verifiedInSegment = rankStops(
         inRangeUnused.filter((s) => s.is_verified),
         endKm,
         6,
-        preferVerified
+        preferVerified,
+        totalDistanceKm
       )
       let otherInSegment = rankStops(
         inRangeUnused.filter((s) => !s.is_verified && canIncludeAsOther(s)),
         endKm,
-        8
+        8,
+        undefined,
+        totalDistanceKm
       )
 
       let degradedMode = false
@@ -926,7 +1045,8 @@ export async function POST(req: NextRequest) {
           expandedUnused.filter((s) => s.is_verified),
           endKm,
           12,
-          preferVerified
+          preferVerified,
+          totalDistanceKm
         ).filter((s) => !verifiedInSegment.some((v) => v.id === s.id))
         verifiedInSegment = [...verifiedInSegment, ...fallbackVerified].slice(0, 6)
       }
@@ -941,7 +1061,8 @@ export async function POST(req: NextRequest) {
           scaledStopsWithDistance.filter((s) => isUnusedStop(s) && canIncludeAsOther(s) && isForwardEnough(s)),
           endKm,
           20,
-          preferVerified
+          preferVerified,
+          totalDistanceKm
         )
         appendCandidates(nearestGlobalUnused)
       }
@@ -952,7 +1073,8 @@ export async function POST(req: NextRequest) {
           scaledStopsWithDistance.filter((s) => canIncludeAsOther(s) && isUnusedStop(s) && isForwardEnough(s)),
           endKm,
           20,
-          preferVerified
+          preferVerified,
+          totalDistanceKm
         )
         appendCandidates(nearestGlobal)
       }
@@ -970,7 +1092,8 @@ export async function POST(req: NextRequest) {
           ),
           endKm + lookaheadKm * 0.5,
           3,
-          preferVerified
+          preferVerified,
+          totalDistanceKm
         )
 
         if (forwardFallback.length > 0) {
@@ -991,7 +1114,8 @@ export async function POST(req: NextRequest) {
             ),
             endKm,
             2,
-            preferVerified
+            preferVerified,
+            totalDistanceKm
           )
 
           if (nearbyFallback.length > 0) {
@@ -1304,7 +1428,14 @@ export async function POST(req: NextRequest) {
         const fuelFetchPromises = uniqueProbePoints.map(async ({ lat, lng }) => {
           try {
             const fuelUrl = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=${env.FUEL_STATION_SEARCH_RADIUS}&type=gas_station&key=${apiKey}`
-            const fuelResponse = await fetch(fuelUrl)
+            const fuelController = new AbortController()
+            const timeoutId = setTimeout(() => fuelController.abort(), 8000)
+            const fuelResponse = await fetch(fuelUrl, { signal: fuelController.signal })
+            clearTimeout(timeoutId)
+            if (!fuelResponse.ok) {
+              console.warn(`[fuel] HTTP error ${fuelResponse.status} for probe ${lat},${lng}`)
+              return []
+            }
             const fuelData = await fuelResponse.json()
 
             const newStations: FuelStationOption[] = []
@@ -1562,7 +1693,7 @@ export async function POST(req: NextRequest) {
       daysAdjustment: daysAdjusted && originalDays ? {
         originalDays,
         adjustedToDays: finalDays,
-        reason: `Requested ${originalDays} days would require ${Math.round(totalDistanceKm / originalDays)} km/day. Your pace (${travelPace}) supports ${config.minKmPerDay}-${config.maxKmPerDay} km/day. Adjusted to ${finalDays} days (${Math.round(totalDistanceKm / finalDays)} km/day).`,
+        reason: `Suggested ${suggestedDays} days but capped at your requested ${originalDays} days.`,
       } : null,
     })
   } catch (error: unknown) {
