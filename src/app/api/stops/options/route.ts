@@ -402,8 +402,8 @@ function rankStops(
       const bDistFromTarget = Math.abs(b.distance_from_start_km - targetKm)
       // Cap the verified bonus proportionally to distance so a verified stop
       // far from the segment endpoint cannot override a closer non-verified stop.
-      const aVerifiedBonus = preferVerified && a.is_verified ? -Math.min(50, aDistFromTarget * 0.45) : 0
-      const bVerifiedBonus = preferVerified && b.is_verified ? -Math.min(50, bDistFromTarget * 0.45) : 0
+const aVerifiedBonus = a.is_verified ? -Math.min(80, aDistFromTarget * 0.6) : 0
+        const bVerifiedBonus = b.is_verified ? -Math.min(80, bDistFromTarget * 0.6) : 0
       // Penalise stops that overshoot the segment endpoint (past targetKm).
       // Driving further than the boundary means tomorrow's leg shrinks — a 25 km
       // overshoot adds an extra 50 points so in-boundary stops are strongly preferred.
@@ -1023,7 +1023,7 @@ export async function POST(req: NextRequest) {
       const anchorScore = (s: RouteStopCandidate) => {
         const dist = Math.abs(s.distance_from_start_km - endKm)
         const overshoot = Math.max(0, s.distance_from_start_km - endKm) * 2
-        const verifiedBonus = preferVerified && s.is_verified ? -Math.min(50, dist * 0.45) : 0
+        const verifiedBonus = s.is_verified ? -Math.min(80, dist * 0.6) : 0
         const stayTypePenalty = s.stay_type ? 0 : 25
         return dist + overshoot + stayTypePenalty + verifiedBonus
       }

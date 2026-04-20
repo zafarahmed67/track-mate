@@ -3005,7 +3005,26 @@ async function generateNarrativeForNewTrip(
 
   const daysPayload: DayPayload[] = []
   let maxDayWithStops = 0
-  for (let dayNum = 1; dayNum <= tripDays; dayNum++) {
+  // Use the number of days that actually have stops, capped at requested days
+  const actualDaysWithStops = Math.min(
+    (() => {
+      let count = 0
+      for (let dayNum = 1; dayNum <= tripDays; dayNum++) {
+        const dayTargetKm = kmPerDay * dayNum
+        const dayMinKm = kmPerDay * (dayNum - 1)
+        const hasStops = [...(candidateStops ?? []), ...(customStopsData ?? [])].some(cs => {
+          const dist = cs.distance_from_start_km ?? 0
+          return dist >= dayMinKm - kmPerDay * 0.2 && dist <= dayTargetKm + kmPerDay * 0.5
+        })
+        if (hasStops) count = dayNum
+      }
+      return count
+    })(),
+    tripDays
+  )
+  const daysToGenerate = Math.max(1, actualDaysWithStops)
+  
+  for (let dayNum = 1; dayNum <= daysToGenerate; dayNum++) {
 
     const verifiedStops = candidateStops
       ?.filter(cs => {
