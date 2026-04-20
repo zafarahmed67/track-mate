@@ -1077,17 +1077,24 @@ export async function POST(req: NextRequest) {
       // still orders the cards, but the anchor must remain selectable by default.
       const allSegmentStops: RouteStopCandidate[] = [...verifiedInSegment, ...otherInSegment].filter(s => !isFuelStop(s))
 
-      // Sort by blended score: lateral distance (route proximity) + proximity to segment end.
-      // Coefficient 0.1 means a stop 100 km earlier needs to be 10 km closer to the route to win.
-      // This keeps stops on/near the route while nudging recommendations toward the day's endpoint
-      // for more even daily distances.
-      const sortedByScore = [...allSegmentStops].sort((a, b) => {
-        const aLateral = a.lateral_km ?? 0
-        const bLateral = b.lateral_km ?? 0
-        const aScore = aLateral + Math.abs(a.distance_from_start_km - endKm) * 0.1
-        const bScore = bLateral + Math.abs(b.distance_from_start_km - endKm) * 0.1
+      const scoreByEnd = (a: RouteStopCandidate, b: RouteStopCandidate) => {
+        const aScore = (a.lateral_km ?? 0) + Math.abs(a.distance_from_start_km - endKm) * 0.1
+        const bScore = (b.lateral_km ?? 0) + Math.abs(b.distance_from_start_km - endKm) * 0.1
         return aScore - bScore
-      })
+      }
+
+      // For the last segment (including single-day trips), restrict the display pool to
+      // stops in the final 60% of the segment so options are near the destination, not the source.
+      // Fall back to the full pool only if there aren't enough near-destination candidates.
+      let candidatePool = allSegmentStops
+      if (i === boundaries.length - 1) {
+        const segLen = endKm - startKm
+        const nearDestWindow = endKm - segLen * 0.6
+        const nearDest = allSegmentStops.filter(s => s.distance_from_start_km >= nearDestWindow)
+        if (nearDest.length >= 2) candidatePool = nearDest
+      }
+
+      const sortedByScore = [...candidatePool].sort(scoreByEnd)
 
       const topStops = sortedByScore.slice(0, 3)
       const optionStops = overnightAnchor && !topStops.some((stop) => stop.id === overnightAnchor.id)

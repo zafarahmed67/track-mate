@@ -242,7 +242,11 @@ function SortableRouteStopItem({
       <div className="flex-1 rounded-2xl bg-background p-3 border border-muted/30">
         <div className="flex items-center gap-2">
           <span className="font-medium text-sm">{stop.location_name}</span>
-          {stop.is_verified && <Badge variant="outline" className="text-xs">Verified</Badge>}
+          {stop.is_verified ? (
+            <Badge variant="outline" className="text-xs border-emerald-500/50 text-emerald-700 dark:text-emerald-400">Verified</Badge>
+          ) : (
+            <Badge variant="outline" className="text-xs border-yellow-500/50 text-yellow-700 dark:text-yellow-400">Unverified</Badge>
+          )}
         </div>
         <div className="text-xs text-muted-foreground mt-1">
           {stop.stay_type || stop.route_type || "Stop"} • {stop.distance_from_start_km ? `${Math.round(stop.distance_from_start_km)} km from start` : ""}
@@ -279,9 +283,9 @@ function StaticRouteStopItem({
         <div className="flex items-center gap-2">
           <span className="font-medium text-sm">{stop.location_name}</span>
           {stop.is_verified ? (
-            <Badge variant="outline" className="text-xs">Verified</Badge>
+            <Badge variant="outline" className="text-xs border-emerald-500/50 text-emerald-700 dark:text-emerald-400">Verified</Badge>
           ) : (
-            <Badge variant="outline" className="text-xs">Fixed</Badge>
+            <Badge variant="outline" className="text-xs border-yellow-500/50 text-yellow-700 dark:text-yellow-400">Unverified</Badge>
           )}
         </div>
         <div className="text-xs text-muted-foreground mt-1">
@@ -1148,7 +1152,7 @@ export default function PlannerDetailPage() {
   const handleChooseSegmentOption = async (segment: RouteSegment, segmentIndex: number, option: RouteStopOption) => {
     const currentSelected = getSelectedOption(segment, segmentIndex)
     if (currentSelected && currentSelected.id !== option.id && stops.some((stop) => stop.id === currentSelected.id)) {
-      await handleRemoveStopFromOptions(currentSelected.id)
+      await handleRemoveStopFromOptions(currentSelected.id, { skipReload: true })
     }
 
     setSelectedSegmentOptionIds((prev) => ({
@@ -1164,16 +1168,9 @@ export default function PlannerDetailPage() {
     })
 
     await handleAddStopFromOptions(normalizeRouteOption(option))
-    await loadRouteOptions()
-    
-    // Recalculate route to include selected stops as waypoints
-    if (map) {
-      calculateRoute(map)
-    }
-    
+
     toast.success(`${option.location_name} selected for this stop.`)
-    
-    // Recalculate route with waypoints through selected stops
+
     if (map) {
       await calculateRouteWithWaypoints(map)
     }
@@ -1769,7 +1766,7 @@ export default function PlannerDetailPage() {
     }
   }
 
-  const handleRemoveStopFromOptions = async (stopId: string) => {
+  const handleRemoveStopFromOptions = async (stopId: string, { skipReload = false }: { skipReload?: boolean } = {}) => {
     try {
       const normalizedStopId = normalizeStopId(stopId)
       const stopToRemove = stops.find((s) => normalizeStopId(s.id) === normalizedStopId)
@@ -1799,14 +1796,13 @@ export default function PlannerDetailPage() {
         const newStops = stops.filter((s) => normalizeStopId(s.id) !== normalizedStopId)
         setStops(newStops)
         setFilteredStops(newStops)
-        await loadRouteOptions()
-        
-        // Recalculate route after removing stop
-        if (map) {
-          calculateRoute(map)
+        if (!skipReload) {
+          await loadRouteOptions()
+          if (map) {
+            calculateRoute(map)
+          }
+          toast.success("Stop removed from trip")
         }
-        
-        toast.success("Stop removed from trip")
       } else {
         toast.error(result.error || "Failed to remove stop")
       }
@@ -4024,14 +4020,13 @@ export default function PlannerDetailPage() {
                                             {option.stay_type || option.route_type}
                                           </Badge>
                                         )}
-                                        {option.is_verified && (
+                                        {option.is_verified ? (
                                           <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-emerald-500/50 text-emerald-700 dark:text-emerald-400">
-                                            DB Verified
+                                            Verified
                                           </Badge>
-                                        )}
-                                        {option.source === "google_places" && (
-                                          <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-blue-400/50 text-blue-600 dark:text-blue-400">
-                                            Google
+                                        ) : (
+                                          <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-yellow-500/50 text-yellow-700 dark:text-yellow-400">
+                                            Unverified
                                           </Badge>
                                         )}
                                         {lateralDisplay !== null && (
