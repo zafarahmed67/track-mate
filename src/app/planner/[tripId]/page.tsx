@@ -1016,9 +1016,16 @@ export default function PlannerDetailPage() {
   }, [])
 
   const getMergedSegmentOptions = useCallback((segment: RouteSegment, segmentIndex: number, maxOptions = 3) => {
-    const apiOptions = segment.options && segment.options.length > 0
+    const isFuelStopOption = (o: RouteStopOption) => {
+      const rt = (o.route_type ?? "").toLowerCase()
+      const st = (o.stay_type ?? "").toLowerCase()
+      return rt === "fuel" || rt === "gas_station" || st === "fuel" || st === "gas_station"
+    }
+
+    const apiOptions = (segment.options && segment.options.length > 0
       ? segment.options
       : filterStopsBySegmentDistance(segment, [...segment.verifiedStops, ...segment.otherStops])
+    ).filter((o) => !isFuelStopOption(o))
 
     const itineraryOptions = activeItineraryDays
       .filter((row) => Number(row.day_number) === segmentIndex + 1)
@@ -1043,14 +1050,20 @@ export default function PlannerDetailPage() {
       })
       .filter((option): option is RouteStopOption => Boolean(option))
 
+    const isLastSegment = segmentIndex === daySegments.length - 1
     const persistedOptions = stops
       .filter((stop) => {
         if (excludedOptionIds.has(normalizeStopId(stop.stop_id || stop.id) || stop.id)) return false
+        const rt = (stop.route_type ?? "").toLowerCase()
+        const st = (stop.stay_type ?? stop.stop_type ?? "").toLowerCase()
+        if (rt === "fuel" || rt === "gas_station" || st === "fuel" || st === "gas_station") return false
         if (typeof stop.day_index === "number" && Number.isFinite(stop.day_index)) {
           return Math.trunc(stop.day_index) === segmentIndex
         }
         const distance = Number(stop.distance_from_start_km)
-        return Number.isFinite(distance) && distance >= segment.startKm && distance <= segment.endKm
+        return Number.isFinite(distance) &&
+          distance >= segment.startKm &&
+          (isLastSegment ? distance <= segment.endKm : distance < segment.endKm)
       })
       .map(tripStopToRouteOption)
 
@@ -1113,8 +1126,15 @@ export default function PlannerDetailPage() {
       merged.unshift(recommended)
     }
 
-    return merged.slice(0, maxOptions)
-  }, [activeItineraryDays, excludedOptionIds, filterStopsBySegmentDistance, getOptionIdentityKeys, stops, tripStopToRouteOption])
+    // Remove stops that are behind the segment start (prevents 0 km entries caused by
+    // backwards or misattributed stops appearing in the wrong day's options).
+    const forward = merged.filter((opt) => {
+      const km = getStopDistanceKm(opt)
+      return km === null || km >= segment.startKm - 5
+    })
+
+    return forward.slice(0, maxOptions)
+  }, [activeItineraryDays, daySegments.length, excludedOptionIds, filterStopsBySegmentDistance, getOptionIdentityKeys, stops, tripStopToRouteOption])
 
   const handleAddSegmentStop = async (segment: RouteSegment, segmentIndex: number) => {
     const selected = getSelectedOption(segment, segmentIndex) || getMergedSegmentOptions(segment, segmentIndex, 1)[0]

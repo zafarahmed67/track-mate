@@ -402,8 +402,8 @@ function rankStops(
       const bDistFromTarget = Math.abs(b.distance_from_start_km - targetKm)
       // Cap the verified bonus proportionally to distance so a verified stop
       // far from the segment endpoint cannot override a closer non-verified stop.
-const aVerifiedBonus = a.is_verified ? -Math.min(80, aDistFromTarget * 0.6) : 0
-        const bVerifiedBonus = b.is_verified ? -Math.min(80, bDistFromTarget * 0.6) : 0
+const aVerifiedBonus = a.is_verified ? -Math.min(120, aDistFromTarget * 0.8) : 0
+        const bVerifiedBonus = b.is_verified ? -Math.min(120, bDistFromTarget * 0.8) : 0
       // Penalise stops that overshoot the segment endpoint (past targetKm).
       // Driving further than the boundary means tomorrow's leg shrinks — a 25 km
       // overshoot adds an extra 50 points so in-boundary stops are strongly preferred.
@@ -929,7 +929,7 @@ export async function POST(req: NextRequest) {
 
       if (verifiedInSegment.length < 1) {
         const fallbackVerified = rankStops(
-          expandedUnused.filter((s) => s.is_verified),
+          expandedUnused.filter((s) => s.is_verified && !isFuelStop(s)),
           endKm,
           12,
           preferVerified
@@ -971,6 +971,7 @@ export async function POST(req: NextRequest) {
             (s) =>
               canIncludeAsOther(s) &&
               isUnusedStop(s) &&
+              !isFuelStop(s) &&
               s.distance_from_start_km >= (startKm - 20) &&
               s.distance_from_start_km <= (endKm + lookaheadKm)
           ),
@@ -992,6 +993,7 @@ export async function POST(req: NextRequest) {
               (s) =>
                 canIncludeAsOther(s) &&
                 isUnusedStop(s) &&
+                !isFuelStop(s) &&
                 s.distance_from_start_km >= (startKm - backtrackKm) &&
                 s.distance_from_start_km <= (endKm + Math.max(80, config.kmPerDay * 0.4))
             ),
@@ -1033,7 +1035,7 @@ export async function POST(req: NextRequest) {
       const anchorScore = (s: RouteStopCandidate) => {
         const dist = Math.abs(s.distance_from_start_km - endKm)
         const overshoot = Math.max(0, s.distance_from_start_km - endKm) * 2
-        const verifiedBonus = s.is_verified ? -Math.min(80, dist * 0.6) : 0
+        const verifiedBonus = s.is_verified ? -Math.min(120, dist * 0.8) : 0
         const stayTypePenalty = s.stay_type ? 0 : 25
         return dist + overshoot + stayTypePenalty + verifiedBonus
       }
@@ -1107,6 +1109,34 @@ export async function POST(req: NextRequest) {
 
       // Recommended option is the one with is_recommended = true
       const recommendedOption = options.find(o => o.is_recommended) || null
+
+      // For the last segment, ensure at least 2 overnight options are shown near the destination.
+      if (i === boundaries.length - 1 && options.length < 2) {
+        const optionKeys = new Set(options.map((o) => stopPhysicalKey(o)))
+        const destExtras = rankStops(
+          scaledStopsWithDistance.filter(
+            (s) =>
+              !isFuelStop(s) &&
+              s.distance_from_start_km >= endKm - config.kmPerDay * 0.5 &&
+              !optionKeys.has(stopPhysicalKey(s))
+          ),
+          endKm,
+          6,
+          preferVerified
+        )
+        for (const extra of destExtras) {
+          if (options.length >= 3) break
+          const key = stopPhysicalKey(extra)
+          if (!optionKeys.has(key)) {
+            options.push({
+              ...extra,
+              source: extra.is_verified ? "database" as const : "google_places" as const,
+              is_recommended: false,
+            })
+            optionKeys.add(key)
+          }
+        }
+      }
 
       // Register all options[] IDs so they are excluded from subsequent segment pools.
       for (const opt of options) {
