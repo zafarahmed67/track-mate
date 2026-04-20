@@ -1097,6 +1097,16 @@ export default function PlannerDetailPage() {
       }
     }
 
+    // Enforce DB stops take priority — only one recommended per day
+    const hasDbRecommended = merged.some((opt) => opt.is_verified && opt.is_recommended)
+    if (hasDbRecommended) {
+      for (const option of merged) {
+        if (!option.is_verified) {
+          option.is_recommended = false
+        }
+      }
+    }
+
     const recommendedIndex = merged.findIndex((option) => option.is_recommended)
     if (recommendedIndex > 0) {
       const [recommended] = merged.splice(recommendedIndex, 1)

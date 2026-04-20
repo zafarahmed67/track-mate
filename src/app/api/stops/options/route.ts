@@ -886,14 +886,19 @@ export async function POST(req: NextRequest) {
         preferVerified
       )
 
+      const isFuelStop = (s: RouteStopCandidate) => {
+        const routeType = s.route_type?.toLowerCase() || ""
+        const stayType = s.stay_type?.toLowerCase() || ""
+        return routeType === "fuel" || routeType === "gas_station" || stayType === "fuel" || stayType === "gas_station"
+      }
       let verifiedInSegment = rankStops(
-        inRangeUnused.filter((s) => s.is_verified),
+        inRangeUnused.filter((s) => s.is_verified && !isFuelStop(s)),
         endKm,
         6,
         preferVerified
       )
       let otherInSegment = rankStops(
-        inRangeUnused.filter((s) => !s.is_verified && canIncludeAsOther(s)),
+        inRangeUnused.filter((s) => !s.is_verified && canIncludeAsOther(s) && !isFuelStop(s)),
         endKm,
         8
       )
@@ -1019,7 +1024,12 @@ export async function POST(req: NextRequest) {
       // nearby Google Places stop to win over a verified stop that is far from the
       // segment endpoint — "prefer verified" still applies as a bonus, but a verified
       // stop 100+ km from the target will lose to an unverified stop 20 km away.
-      const allAnchorCandidates = [...verifiedInSegment, ...otherInSegment]
+      const isGasStation = (s: RouteStopCandidate) => {
+        const routeType = s.route_type?.toLowerCase() || ""
+        const stayType = s.stay_type?.toLowerCase() || ""
+        return routeType === "fuel" || routeType === "gas_station" || stayType === "fuel" || stayType === "gas_station"
+      }
+      const allAnchorCandidates = [...verifiedInSegment, ...otherInSegment].filter(s => !isGasStation(s))
       const anchorScore = (s: RouteStopCandidate) => {
         const dist = Math.abs(s.distance_from_start_km - endKm)
         const overshoot = Math.max(0, s.distance_from_start_km - endKm) * 2
@@ -1063,7 +1073,7 @@ export async function POST(req: NextRequest) {
 
       // Build the displayed options around the selected anchor. Route proximity
       // still orders the cards, but the anchor must remain selectable by default.
-      const allSegmentStops: RouteStopCandidate[] = [...verifiedInSegment, ...otherInSegment]
+      const allSegmentStops: RouteStopCandidate[] = [...verifiedInSegment, ...otherInSegment].filter(s => !isFuelStop(s))
 
       // Sort by blended score: lateral distance (route proximity) + proximity to segment end.
       // Coefficient 0.1 means a stop 100 km earlier needs to be 10 km closer to the route to win.
@@ -1091,7 +1101,7 @@ export async function POST(req: NextRequest) {
         }
       })
 
-      if (!overnightAnchor && options.length > 0) {
+      if (!overnightAnchor && options.length > 0 && !isFuelStop(options[0])) {
         options[0].is_recommended = true
       }
 
