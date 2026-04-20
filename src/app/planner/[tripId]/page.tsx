@@ -4346,7 +4346,17 @@ export default function PlannerDetailPage() {
                     </div>
 
                     {/* Day-by-day */}
-                    {tripNarrative.days && tripNarrative.days.length > 0 && tripNarrative.days.map((day) => (
+                    {tripNarrative.days && tripNarrative.days.length > 0 && tripNarrative.days.slice(0, effectiveDayCount).map((day, idx) => {
+                      const seg = daySegments[idx]
+                      const allOpts = seg?.options && seg.options.length > 0
+                        ? seg.options
+                        : [...(seg?.verifiedStops ?? []), ...(seg?.otherStops ?? [])]
+                      const explicitId = selectedSegmentOptionIds[idx]
+                      const overnightStop = (explicitId ? allOpts.find((o) => o.id === explicitId) : undefined)
+                        ?? seg?.recommendedOption
+                        ?? allOpts[0]
+                        ?? null
+                      return (
                       <div key={day.dayNumber} className="rounded-2xl bg-muted/5 border border-muted/20 p-4 space-y-3">
                         <div className="flex items-center gap-2">
                           <div className="flex h-6 w-6 items-center justify-center rounded-full bg-primary text-xs font-bold text-primary-foreground">
@@ -4357,22 +4367,22 @@ export default function PlannerDetailPage() {
 
                         <p className="text-sm text-muted-foreground">{day.narrative}</p>
 
-                        {/* Suggested stay — structured fields */}
-                        {day.suggestedStay ? (
+                        {/* Overnight stop — driven by actual planner selection */}
+                        {overnightStop ? (
                           <div className="rounded-xl bg-background border border-muted/30 p-3 space-y-1">
                             <div className="flex items-center justify-between gap-2">
-                              <span className="text-sm font-medium">{day.suggestedStay.name}</span>
-                              {day.suggestedStay.stopType && (
+                              <span className="text-sm font-medium">{overnightStop.location_name}</span>
+                              {(overnightStop.stay_type ?? overnightStop.route_type) && (
                                 <span className="text-xs text-muted-foreground bg-muted/30 px-2 py-0.5 rounded-full capitalize">
-                                  {day.suggestedStay.stopType}
+                                  {overnightStop.stay_type ?? overnightStop.route_type}
                                 </span>
                               )}
                             </div>
-                            {day.suggestedStay.whyStopHere && (
-                              <p className="text-xs text-muted-foreground">{day.suggestedStay.whyStopHere}</p>
+                            {overnightStop.why_stop_here && (
+                              <p className="text-xs text-muted-foreground">{overnightStop.why_stop_here}</p>
                             )}
-                            {day.suggestedStay.aaoTip && (
-                              <p className="text-xs text-primary/80 italic">&quot;{day.suggestedStay.aaoTip}&quot;</p>
+                            {overnightStop.aao_tip && (
+                              <p className="text-xs text-primary/80 italic">&quot;{overnightStop.aao_tip}&quot;</p>
                             )}
                           </div>
                         ) : (
@@ -4403,7 +4413,8 @@ export default function PlannerDetailPage() {
                           </div>
                         )}
                       </div>
-                    ))}
+                      )
+                    })}
 
                     {/* Trip notes */}
                     {tripNarrative.tripNotes && (tripNarrative.tripNotes.fuelGuidance || tripNarrative.tripNotes.remoteWarnings || tripNarrative.tripNotes.roadConditions) && (
