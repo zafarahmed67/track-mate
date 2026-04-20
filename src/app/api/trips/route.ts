@@ -1728,6 +1728,8 @@ async function generateStop(
 
     console.log("[2/3] Fetched stops", { total: allStops.length });
 
+    console.log("Sample stop", allStops[0]);
+
     // ============================================================
     // 🧩 ENRICH ONLY (NO FILTER, NO LIMIT)
     // ============================================================
@@ -1763,6 +1765,7 @@ async function generateStop(
       };
     });
 
+    console.log("enriched sample stop", enrichedStops[0]);
 
     console.log("[3/3] Returning enriched stops", {
       total: enrichedStops.length,
@@ -2977,6 +2980,7 @@ async function generateNarrativeForNewTrip(
       aao_tip: string | null
       why_stop_here: string | null
       why_we_d_stay_again: string | null
+      distance_from_start_km: number
     }>
     optionStops: Array<{
       location_name: string
@@ -2986,6 +2990,7 @@ async function generateNarrativeForNewTrip(
       why_stop_here: string | null
       why_we_d_stay_again: string | null
       is_verified: boolean
+      distance_from_start_km: number
     }>
     allowedStopNames: string[]
     fuelCritical: boolean
@@ -3001,7 +3006,6 @@ async function generateNarrativeForNewTrip(
   const daysPayload: DayPayload[] = []
   let maxDayWithStops = 0
   for (let dayNum = 1; dayNum <= tripDays; dayNum++) {
-    const dayItineraryRows = itineraryDays?.filter(row => row.day_number === dayNum) ?? []
 
     const verifiedStops = candidateStops
       ?.filter(cs => {
@@ -3022,6 +3026,7 @@ async function generateNarrativeForNewTrip(
           aao_tip: stop.aao_tip ?? null,
           why_stop_here: stop.why_stop_here ?? null,
           why_we_d_stay_again: stop.why_we_d_stay_again ?? null,
+          distance_from_start_km: cs.distance_from_start_km ?? 0,
         }
       }) ?? []
 
@@ -3041,6 +3046,7 @@ async function generateNarrativeForNewTrip(
         why_stop_here: null,
         why_we_d_stay_again: null,
         road_suitability: null,
+        distance_from_start_km: cs.distance_from_start_km ?? 0,
       })) ?? []
 
     const optionStops = [...verifiedStops, ...otherStops].map(s => ({
@@ -3051,17 +3057,30 @@ async function generateNarrativeForNewTrip(
       why_stop_here: s.why_stop_here ?? null,
       why_we_d_stay_again: s.why_we_d_stay_again ?? null,
       is_verified: verifiedStops.some(vs => vs.location_name === s.location_name),
+      distance_from_start_km: (s as { distance_from_start_km?: number }).distance_from_start_km ?? 0,
     }))
 
-    const allowedStopNames = Array.from(new Set(optionStops.map(s => s.location_name).filter(Boolean)))
+    // Sort optionStops by distance to target km (same logic as organizeStopsByDay)
+    // This ensures we pick the stop closest to the day's target distance
+    const dayTargetKm = kmPerDay * dayNum
+    const sortedOptions = [...optionStops].sort((a, b) => {
+      const distA = Math.abs((a.distance_from_start_km ?? 0) - dayTargetKm)
+      const distB = Math.abs((b.distance_from_start_km ?? 0) - dayTargetKm)
+      return distA - distB
+    })
+    const recommendedStop = sortedOptions[0]?.location_name ?? null
+    const allowedStopNames = recommendedStop
+      ? [recommendedStop]
+      : Array.from(new Set(optionStops.map(s => s.location_name).filter(Boolean)))
 
+    // Use previous day's destination for fromLocation (chain the days)
     const fromLocation = dayNum === 1
       ? tripData.start_location_text
-      : dayItineraryRows[0]?.to_location ?? null
+      : daysPayload[dayNum - 2]?.toLocation ?? tripData.start_location_text
 
     const toLocation = dayNum === tripDays
       ? tripData.destination_text
-      : dayItineraryRows[0]?.to_location ?? null
+      : recommendedStop
 
     daysPayload.push({
       dayNumber: dayNum,
@@ -3151,6 +3170,9 @@ STRICT RULES — violation will break the app:
 5. OUTPUT: respond with ONLY the raw JSON object. No markdown fences, no explanation, no trailing text.
 6. RIG: if trip.rig_type is provided, note any clearance or length limitations relevant to this route. If avoid_gravel_roads is true, confirm the planned route avoids unsealed roads.
 7. SEASONAL: if travelMonth is provided, add a brief note about seasonal conditions for that month on this corridor (e.g. wet season flooding risk, winter cold, summer heat).`
+
+console.log("daysPayload:", JSON.stringify(daysPayload, null, 2));
+console.log("tripData:", JSON.stringify(tripData, null, 2));
 
   const response = await openai.chat.completions.create({
     model: "gpt-4o-mini",
@@ -3246,7 +3268,7 @@ STRICT RULES — violation will break the app:
       })
       .eq("id", v1Itinerary.id)
 
-    const dayRows = (narrative.days as Array<{ dayNumber: number; narrative: string; aaoTips: string[]; gapNote: string | null }>).map((day) => {
+    const dayRows = (narrative.days as Array<{ dayNumber: number; narrative: string; aaoTips: string[]; gapNote: string | null; suggestedStay?: { name: string } | null }>).map((day, index) => {
       const dayData = daysPayload[day.dayNumber - 1]
       return {
         itinerary_id: v1Itinerary.id,
@@ -3258,6 +3280,7 @@ STRICT RULES — violation will break the app:
         aao_tip: day.aaoTips?.[0] ?? null,
         reason: day.narrative,
         day_json: day,
+        is_selected: day.suggestedStay?.name != null, // Mark as selected if there's a suggested stay
       }
     })
 

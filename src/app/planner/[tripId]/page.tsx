@@ -711,6 +711,22 @@ export default function PlannerDetailPage() {
     [allDaySegments, effectiveDayCount]
   )
 
+  // Auto-select the first recommended option for each day if nothing is selected yet
+  useEffect(() => {
+    if (daySegments.length === 0) return
+    const newSelections: Record<number, string> = {}
+    daySegments.forEach((segment, index) => {
+      if (selectedSegmentOptionIds[index]) return // Already selected, skip
+      const firstOption = segment.recommendedOption ?? segment.options?.[0] ?? segment.verifiedStops?.[0] ?? segment.otherStops?.[0]
+      if (firstOption?.id) {
+        newSelections[index] = firstOption.id
+      }
+    })
+    if (Object.keys(newSelections).length > 0) {
+      setSelectedSegmentOptionIds((prev) => ({ ...prev, ...newSelections }))
+    }
+  }, [daySegments, selectedSegmentOptionIds])
+
   const totalRouteDistanceKm = routeMeta.drivingInfo?.totalDistanceKm || 0
 
   const loadNearbyPlacesForDay = async (dayIndex: number, segment?: RouteSegment) => {
@@ -1038,6 +1054,17 @@ export default function PlannerDetailPage() {
       })
       .map(tripStopToRouteOption)
 
+    // Build a lookup of which stop ids/names the API already flagged as recommended,
+    // so we can restore the flag after deduplication (itineraryOptions strips it).
+    const apiRecommendedIds = new Set<string>()
+    const apiRecommendedNames = new Set<string>()
+    for (const opt of apiOptions) {
+      if ((opt as { is_recommended?: boolean }).is_recommended) {
+        if (opt.id) apiRecommendedIds.add(opt.id)
+        if (opt.location_name) apiRecommendedNames.add(normalizeStopName(opt.location_name))
+      }
+    }
+
     const merged: RouteStopOption[] = []
     const seenKeys = new Set<string>()
 
@@ -1058,6 +1085,17 @@ export default function PlannerDetailPage() {
         return Math.abs(aDistance - segment.endKm) - Math.abs(bDistance - segment.endKm)
       })
       .forEach(addOption)
+
+    // Restore is_recommended from the API response — itineraryOptions can add a stop before
+    // the apiOptions version (which carries is_recommended), causing the flag to be lost.
+    for (const option of merged) {
+      if (!option.is_recommended && (
+        apiRecommendedIds.has(option.id) ||
+        apiRecommendedNames.has(normalizeStopName(option.location_name))
+      )) {
+        option.is_recommended = true
+      }
+    }
 
     const recommendedIndex = merged.findIndex((option) => option.is_recommended)
     if (recommendedIndex > 0) {
@@ -1308,7 +1346,12 @@ export default function PlannerDetailPage() {
           is_verified: Boolean(s.is_verified),
         }))
 
-        const allowedStopNames = Array.from(new Set(optionStops.map((s) => s.location_name).filter(Boolean)))
+        // Lock allowedStopNames to the user's actual selection so the AI's suggestedStay
+        // matches the day card. Fall back to all options only when no stop is selected.
+        const selectedStopName = getSelectedOption(segment, index)?.location_name ?? null
+        const allowedStopNames = selectedStopName
+          ? [selectedStopName]
+          : Array.from(new Set(optionStops.map((s) => s.location_name).filter(Boolean)))
 
         // fromLocation: trip start for day 1, previous day's committed overnight for all others
         const fromLocation = index === 0

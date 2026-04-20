@@ -295,6 +295,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
           narrative: string
           aaoTips: string[]
           gapNote: string | null
+          suggestedStay?: { name: string } | null
         }>).map((day) => {
           const dayData = days[day.dayNumber - 1] as {
             distanceKm?: number
@@ -312,6 +313,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
             aao_tip: day.aaoTips?.[0] ?? null,
             reason: day.narrative,
             day_json: day,
+            is_selected: day.suggestedStay?.name != null,
           }
         })
 
