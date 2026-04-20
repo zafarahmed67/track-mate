@@ -889,7 +889,13 @@ export async function POST(req: NextRequest) {
       const isFuelStop = (s: RouteStopCandidate) => {
         const routeType = s.route_type?.toLowerCase() || ""
         const stayType = s.stay_type?.toLowerCase() || ""
-        return routeType === "fuel" || routeType === "gas_station" || stayType === "fuel" || stayType === "gas_station"
+        const name = s.location_name?.toLowerCase() || ""
+        if (routeType === "fuel" || routeType === "gas_station" || routeType === "service_station" || routeType === "truckstop") return true
+        if (stayType === "fuel" || stayType === "gas_station" || stayType === "service_station" || stayType === "truckstop") return true
+        // Name-based detection for fuel stops whose type fields are not set correctly
+        if (/\b(bp|shell|caltex|ampol|united|puma|mobil|liberty|metro|esso)\b/.test(name)) return true
+        if (/\b(truck\s*stop|truckstop|service\s*station|servo|petrol|fuel\s*stop|roadhouse)\b/.test(name)) return true
+        return false
       }
       let verifiedInSegment = rankStops(
         inRangeUnused.filter((s) => s.is_verified && !isFuelStop(s)),
@@ -1026,11 +1032,7 @@ export async function POST(req: NextRequest) {
       // nearby Google Places stop to win over a verified stop that is far from the
       // segment endpoint — "prefer verified" still applies as a bonus, but a verified
       // stop 100+ km from the target will lose to an unverified stop 20 km away.
-      const isGasStation = (s: RouteStopCandidate) => {
-        const routeType = s.route_type?.toLowerCase() || ""
-        const stayType = s.stay_type?.toLowerCase() || ""
-        return routeType === "fuel" || routeType === "gas_station" || stayType === "fuel" || stayType === "gas_station"
-      }
+      const isGasStation = isFuelStop
       const allAnchorCandidates = [...verifiedInSegment, ...otherInSegment].filter(s => !isGasStation(s))
       const anchorScore = (s: RouteStopCandidate) => {
         const dist = Math.abs(s.distance_from_start_km - endKm)
@@ -1085,13 +1087,28 @@ export async function POST(req: NextRequest) {
 
       // For the last segment (including single-day trips), restrict the display pool to
       // stops in the final 60% of the segment so options are near the destination, not the source.
-      // Fall back to the full pool only if there aren't enough near-destination candidates.
+      // If not enough candidates in that window, widen search from scaledStopsWithDistance
+      // (never fall back to near-source stops).
       let candidatePool = allSegmentStops
       if (i === boundaries.length - 1) {
         const segLen = endKm - startKm
         const nearDestWindow = endKm - segLen * 0.6
         const nearDest = allSegmentStops.filter(s => s.distance_from_start_km >= nearDestWindow)
-        if (nearDest.length >= 2) candidatePool = nearDest
+        if (nearDest.length >= 2) {
+          candidatePool = nearDest
+        } else {
+          // Widen to global stops near destination, still excluding near-source and fuel stops
+          const globalNearDest = rankStops(
+            scaledStopsWithDistance.filter(s =>
+              !isFuelStop(s) &&
+              s.distance_from_start_km >= nearDestWindow
+            ),
+            endKm,
+            6,
+            preferVerified
+          )
+          candidatePool = globalNearDest.length >= 1 ? globalNearDest : nearDest.length > 0 ? nearDest : allSegmentStops
+        }
       }
 
       const sortedByScore = [...candidatePool].sort(scoreByEnd)

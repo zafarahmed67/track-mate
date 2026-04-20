@@ -1023,7 +1023,12 @@ export default function PlannerDetailPage() {
     const isFuelStopOption = (o: RouteStopOption) => {
       const rt = (o.route_type ?? "").toLowerCase()
       const st = (o.stay_type ?? "").toLowerCase()
-      return rt === "fuel" || rt === "gas_station" || st === "fuel" || st === "gas_station"
+      const nm = (o.location_name ?? "").toLowerCase()
+      if (rt === "fuel" || rt === "gas_station" || rt === "service_station" || rt === "truckstop") return true
+      if (st === "fuel" || st === "gas_station" || st === "service_station" || st === "truckstop") return true
+      if (/\b(bp|shell|caltex|ampol|united|puma|mobil|liberty|metro|esso)\b/.test(nm)) return true
+      if (/\b(truck\s*stop|truckstop|service\s*station|servo|petrol|fuel\s*stop|roadhouse)\b/.test(nm)) return true
+      return false
     }
 
     const apiOptions = (segment.options && segment.options.length > 0

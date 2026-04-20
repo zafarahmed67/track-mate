@@ -472,7 +472,7 @@
 //     // Fuel/service stations are excluded by name even when returned under campground searches
 //     // (e.g. "BP Bamaga Roadhouse", "Injinoo Fuel Station", "Seisia Service Station").
 //     // Roadhouse is NOT excluded — outback roadhouses often have genuine camping.
-//     const OVERNIGHT_EXCLUDE = /hotel|motel|hostel|backpacker|resort|inn\b|b&b|bed and breakfast|airbnb|toilet|toilets|amenities|amenity block|public toilet|car park|parking area|day use area|service station|fuel station|petrol station|\bservo\b|\bgas station\b/i
+//     const OVERNIGHT_EXCLUDE = /hotel|motel|hostel|backpacker|resort|inn\b|b&b|bed and breakfast|airbnb|toilet|toilets|amenities|amenity block|public toilet|car park|parking area|day use area|service station|fuel station|petrol station|\bservo\b|\bgas station\b|truck\s*stop|truckstop|\b(bp|shell|caltex|ampol|united|puma|mobil|liberty|metro|esso)\b/i
 
 //     // 30 km radius keeps probes on the highway corridor. Polyline-based probe points
 //     // are already on the road, so a tight radius is sufficient and avoids pulling in
@@ -1870,7 +1870,7 @@ async function generateCustomStop(
     // Fuel/service stations are excluded by name even when returned under campground searches
     // (e.g. "BP Bamaga Roadhouse", "Injinoo Fuel Station", "Seisia Service Station").
     // Roadhouse is NOT excluded — outback roadhouses often have genuine camping.
-    const OVERNIGHT_EXCLUDE = /hotel|motel|hostel|backpacker|resort|inn\b|b&b|bed and breakfast|airbnb|toilet|toilets|amenities|amenity block|public toilet|car park|parking area|day use area|service station|fuel station|petrol station|\bservo\b|\bgas station\b/i
+    const OVERNIGHT_EXCLUDE = /hotel|motel|hostel|backpacker|resort|inn\b|b&b|bed and breakfast|airbnb|toilet|toilets|amenities|amenity block|public toilet|car park|parking area|day use area|service station|fuel station|petrol station|\bservo\b|\bgas station\b|truck\s*stop|truckstop|\b(bp|shell|caltex|ampol|united|puma|mobil|liberty|metro|esso)\b/i
 
     // 30 km radius keeps probes on the highway corridor. Polyline-based probe points
     // are already on the road, so a tight radius is sufficient and avoids pulling in
@@ -1893,7 +1893,6 @@ async function generateCustomStop(
       { type: "campground", keyword: "roadhouse", radius: searchRadius },
       { type: "campground", keyword: "station stay", radius: searchRadius },
       { type: "campground", keyword: "national park", radius: searchRadius },
-      { type: "gas_station", keyword: "truck stop", radius: searchRadius },
     ]
 
     if (directDistanceKmForProbes > 300) {
