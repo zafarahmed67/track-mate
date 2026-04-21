@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "src/app/api/trips/route.ts": {
+      "maxDuration": 300
+    }
+  }
+}
