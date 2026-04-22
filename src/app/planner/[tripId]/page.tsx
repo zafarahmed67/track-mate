@@ -1403,6 +1403,7 @@ export default function PlannerDetailPage() {
               name: string
               latitude?: number
               longitude?: number
+              distance_from_start_km?: number
               dayOrder?: number
               isSelected?: boolean
               sourceType?: string
@@ -1443,6 +1444,7 @@ export default function PlannerDetailPage() {
               name: string
               latitude?: number
               longitude?: number
+              distance_from_start_km?: number
               dayOrder?: number
               isSelected?: boolean
               sourceType?: string
@@ -1457,6 +1459,7 @@ export default function PlannerDetailPage() {
                     location_name: stop.name,
                     latitude: stop.latitude !== undefined ? String(stop.latitude) : undefined,
                     longitude: stop.longitude !== undefined ? String(stop.longitude) : undefined,
+                    distance_from_start_km: stop.distance_from_start_km,
                     day_index: dayNum - 1,
                     verification_status: stop.sourceType || "custom",
                     is_selected: stop.isSelected ?? false,

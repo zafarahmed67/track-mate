@@ -9,6 +9,7 @@ interface GenerateCustomStopResult {
   totalFetched?: number
   afterDedup?: number
   routeDistanceKm?: number
+  encodedPolyline?: string
   error?: string
 }
 
@@ -87,10 +88,13 @@ export async function generateCustomStop(
     }
 
     const directDistanceKmForProbes = calculateDistance(startLat, startLng, destLat, destLng)
+    const isRemoteRoute = directDistanceKmForProbes > 500 && destLat > startLat
+    const MAX_LATERAL_KM = isRemoteRoute ? 50 : 30
 
     // Fetch the actual road polyline so probe points land on the highway, not in the ocean.
     let routePolyline: Array<{ lat: number; lng: number }> | null = null
     let routeCumTable: number[] | null = null
+    let encodedPolyline: string | undefined
     try {
       const dirParams = new URLSearchParams({
         origin: `${startLat},${startLng}`,
@@ -103,6 +107,7 @@ export async function generateCustomStop(
       if (dirData.status === "OK" && dirData.routes?.length) {
         const encoded = dirData.routes[0]?.overview_polyline?.points
         if (encoded) {
+          encodedPolyline = encoded
           routePolyline = decodePolyline(encoded)
           routeCumTable = buildCumulativeDistanceTable(routePolyline)
         }
@@ -240,7 +245,7 @@ export async function generateCustomStop(
                   routeDistanceFromStartKm = distanceFromStart
                 }
                 if (tRaw < -0.05 || tRaw > 1.05) return
-                if (lateralKm > 25) return
+                if (lateralKm > MAX_LATERAL_KM) return
 
                 customStopCandidates.push({
                   trip_id: tripId,
@@ -436,6 +441,7 @@ export async function generateCustomStop(
       totalFetched,
       afterDedup: customStopCandidates.length,
       routeDistanceKm,
+      encodedPolyline,
     }
   } catch (error) {
     return {

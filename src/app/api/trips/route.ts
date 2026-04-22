@@ -262,7 +262,7 @@ async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
   const kmPerDay = TRAVEL_PACE_KM[tripTravelPace] ?? 175
   console.log("kmPerDay based on travel pace:", kmPerDay);
 
-  const suggestedDays = Math.max(1, Math.ceil(estimatedDriveDistanceKm / kmPerDay))
+  const suggestedDays = Math.max(1, Math.round(estimatedDriveDistanceKm / kmPerDay))
   console.log("suggestedDays based on estimated distance and pace:", suggestedDays);
 
   await supabaseAdmin
@@ -313,6 +313,7 @@ async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
     success: customSuccess,
     stopsGenerated = 0,
     routeDistanceKm: customRouteDistanceKm,
+    encodedPolyline,
     error: customError,
   } = await generateCustomStop(
     job.startLat,
@@ -334,63 +335,33 @@ async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
   console.log("stopsGenerated:", stopsGenerated);
   console.log("generatedStopsCount:", generatedStopsCount);
 
-  const uniqueStopsCount = generatedStopsCount + customStopsCount
-  const maxDaysFromStops = uniqueStopsCount > 0 ? Math.ceil(uniqueStopsCount / 3) : 0
-  console.log("uniqueStopsCount:", uniqueStopsCount, "maxDaysFromStops:", maxDaysFromStops);
-
   console.log("[4/4] Organizing stops by day...", {
     suggestedDays,
     userDays: job.tripDurationDays,
     verifiedStops: generatedStopsCount,
     customStops: stopsGenerated,
-    uniqueStops: uniqueStopsCount,
-    maxDaysFromStops,
   })
 
-  // Use suggested days as base - if user requests fewer days than realistic,
-  // auto-adjust to suggested days to ensure drivable daily distances
-  let finalTripDays = job.tripDurationDays >= suggestedDays
-    ? job.tripDurationDays
-    : suggestedDays
-
-  // Also adjust based on available stops (stop-based limit)
-  // If stops suggest fewer days than finalTripDays, reduce
-  if (maxDaysFromStops > 0 && maxDaysFromStops < finalTripDays) {
-    finalTripDays = maxDaysFromStops
-  }
-  // Always have at least 1 day
-  finalTripDays = Math.max(1, finalTripDays)
+  // Days are always derived from pace + distance. The user's requested days are
+  // advisory only — if they ask for more or fewer days than pace allows, we snap
+  // to the pace-based value so driving distances per day stay realistic.
+  const finalTripDays = Math.max(1, suggestedDays)
   console.log("finalTripDays:", finalTripDays);
 
-  const daysAdjusted = job.tripDurationDays < suggestedDays || (maxDaysFromStops > 0 && maxDaysFromStops < job.tripDurationDays)
+  const daysAdjusted = job.tripDurationDays !== finalTripDays
   console.log("daysAdjusted:", daysAdjusted);
 
   let daysAdjustment: { originalDays: number; adjustedToDays: number; reason: string } | null = null
 
   if (daysAdjusted) {
-    const reasons: string[] = []
-
-    if (job.tripDurationDays < suggestedDays) {
-      reasons.push(`Requested ${job.tripDurationDays} days would require ${Math.round(estimatedDriveDistanceKm / job.tripDurationDays)} km/day. Using ${suggestedDays} days (${Math.round(estimatedDriveDistanceKm / suggestedDays)} km/day) for realistic pacing.`)
-    }
-
-    if (maxDaysFromStops > 0 && maxDaysFromStops < job.tripDurationDays) {
-      reasons.push(`${uniqueStopsCount} unique stops available. Using ${maxDaysFromStops} day(s) provides ~${Math.ceil(uniqueStopsCount / maxDaysFromStops)} stops/day.`)
-    }
-
+    const requestedKmPerDay = Math.round(estimatedDriveDistanceKm / job.tripDurationDays)
+    const adjustedKmPerDay = Math.round(estimatedDriveDistanceKm / finalTripDays)
     daysAdjustment = {
       originalDays: job.tripDurationDays,
       adjustedToDays: finalTripDays,
-      reason: reasons.join(" "),
+      reason: `Requested ${job.tripDurationDays} days (${requestedKmPerDay} km/day) adjusted to ${finalTripDays} days (${adjustedKmPerDay} km/day) to match ${tripTravelPace} pace.`,
     }
-  }
-  console.log("daysAdjustment:", daysAdjustment);
-  if (daysAdjusted) {
-    console.log("[4/4] Days auto-adjusted", {
-      original: job.tripDurationDays,
-      adjustedTo: suggestedDays,
-      reason: daysAdjustment?.reason,
-    })
+    console.log("[4/4] Days auto-adjusted", daysAdjustment)
   }
 
   const organizationDistanceKm = customRouteDistanceKm ?? estimatedDriveDistanceKm
@@ -424,7 +395,9 @@ async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
       rig_length_m: job.rigLengthM,
       end_date: job.endDate,
       trip_duration_days: job.tripDurationDays,
-    }
+    },
+    encodedPolyline,
+    process.env.NEXT_PUBLIC_GMAPS_API_KEY,
   )
 
   // Generate and save narrative into the v1 itinerary record created above

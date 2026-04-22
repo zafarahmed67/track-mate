@@ -60,7 +60,8 @@ export async function generateDBStop(
         const isNorthbound = destLat > startLat; // Heading north if destination latitude > start latitude
         const isRemote = isLongTrip && isNorthbound;
 
-        // Define route distance thresholds based on whether it's a remote trip or not
+        // Max lateral (perpendicular) distance from the route a verified stop may be.
+        // Remote/northbound long trips allow wider corridors (sparse stop density).
         const MAX_LATERAL_KM_VERIFIED = isRemote ? 50 : 30;
 
         // ============================================================
@@ -84,10 +85,31 @@ export async function generateDBStop(
             return { success: false, stops: [], error: `Database error: ${error.message}` };
         }
 
-        // Step 6: Apply further filtering based on route tolerance and thresholds
+        // Step 6: Filter by lateral (perpendicular) distance from the route line,
+        // not distance from the start point. Uses equirectangular projection onto
+        // the start→destination straight line as a fast approximation.
+        const avgLatRad = ((startLat + destLat) / 2) * Math.PI / 180
+        const scaleX = Math.cos(avgLatRad)
+        const vx = (destLng - startLng) * scaleX
+        const vy = destLat - startLat
+        const vLenSq = vx * vx + vy * vy
+
         const filteredStops = data.filter(stop => {
-            const stopDistance = calculateDistance(startLat, startLng, stop.lat, stop.lng);
-            return stopDistance <= MAX_LATERAL_KM_VERIFIED; // Keep only valid stops within the distance threshold
+            const lat = stop.latitude ?? stop.lat
+            const lng = stop.longitude ?? stop.lng
+            if (!lat || !lng) return false
+
+            // Project stop onto the start→dest line, clamp to segment.
+            const wx = (lng - startLng) * scaleX
+            const wy = lat - startLat
+            const tRaw = vLenSq > 1e-12 ? (wx * vx + wy * vy) / vLenSq : 0
+            if (tRaw < -0.05 || tRaw > 1.05) return false // behind start or past dest
+
+            const tClamped = Math.max(0, Math.min(1, tRaw))
+            const projLat = startLat + tClamped * (destLat - startLat)
+            const projLng = startLng + tClamped * (destLng - startLng)
+            const lateralKm = calculateDistance(lat, lng, projLat, projLng)
+            return lateralKm <= MAX_LATERAL_KM_VERIFIED
         });
 
         // Step 7: Return the result with stops
