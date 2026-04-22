@@ -40,9 +40,23 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
       )
     }
 
+    const { data: stopsData, error: stopsError } = await supabaseAdmin
+      .from("trip_itineraries")
+      .select("*")
+      .eq("trip_id", tripId);
+
+    if (stopsError) {
+      console.error("Stop error:", stopsError)
+      return NextResponse.json(
+        { success: false, error: stopsError.message },
+        { status: 500 }
+      )
+    }
+
     return NextResponse.json({
       success: true,
       trip: data,
+      stops: stopsData,
     })
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Unknown error"

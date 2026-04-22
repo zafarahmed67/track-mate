@@ -35,8 +35,6 @@ import {
   RouteMeta,
   TripNarrative
 } from '@/types/trip'
-import { Stop } from "@/lib/types"
-import { fetchTrip } from "./_helper/fetchTrip"
 
 export default function PlannerDetailPage() {
   const params = useParams()
@@ -52,7 +50,6 @@ export default function PlannerDetailPage() {
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null)
   const [trip, setTrip] = useState<TripData | null>(null)
   const [stops, setStops] = useState<TripStop[]>([])
-  const [filteredStops, setFilteredStops] = useState<TripStop[]>([])
   const [selectedStops, setSelectedStops] = useState<string[]>([])
   const [directions, setDirections] = useState<google.maps.DirectionsResult | null>(null)
   const [fuelStations, setFuelStations] = useState<Array<{
@@ -70,7 +67,7 @@ export default function PlannerDetailPage() {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [selectedStopForDelete, setSelectedStopForDelete] = useState<{ id: string; name: string } | null>(null)
   const [routeMeta, setRouteMeta] = useState<Partial<RouteMeta>>({})
-  
+
   const [routeWarnings, setRouteWarnings] = useState<string[]>([])
   const [activeSegmentIndex, setActiveSegmentIndex] = useState<number | null>(null)
   const [expandedSegments, setExpandedSegments] = useState<Set<number>>(new Set())
@@ -94,8 +91,6 @@ export default function PlannerDetailPage() {
   const [hoveredPin, setHoveredPin] = useState<{ lat: number; lng: number; label: string; distanceFromRoute?: number; sourceType?: "verified" | "custom" } | null>(null)
   const [focusedFuelStation, setFocusedFuelStation] = useState<{ lat: number; lng: number; name: string } | null>(null)
   const [hiddenCustomStopsByDay, setHiddenCustomStopsByDay] = useState<Record<number, string[]>>({})
-  const [itineraryVersions, setItineraryVersions] = useState<Array<{ id: string; version: number; status: string; model_name: string | null; created_at: string }>>([])
-  const [restoringVersion, setRestoringVersion] = useState<string | null>(null);
 
   const normalizeStopId = (id: string | null | undefined): string => (id || "").replace(/^custom-/, "")
   const normalizeStopName = (name: string | null | undefined): string =>
@@ -277,25 +272,25 @@ export default function PlannerDetailPage() {
   const allDaySegments = useMemo(
     () => {
       return Array.from({ length: targetDays }, (_, index) => ({
-          startKm: Math.round(totalTripDistanceKm * (index / targetDays)),
-          endKm: Math.round(totalTripDistanceKm * ((index + 1) / targetDays)),
-          verifiedStops: [] as RouteStopOption[],
-          otherStops: [] as RouteStopOption[],
-          options: [] as RouteStopOption[],
-          recommendedOption: null as RouteStopOption | null,
-          fuelSuggestions: [] as FuelStation[],
-          primaryFuelSuggestion: undefined,
-          isRemote: false,
-          fuelCritical: false,
-          degradedMode: false,
-          fuelDistanceIntoLegKm: undefined,
-          gapFromLastFuelKm: undefined,
-          gapToNextFuelKm: undefined,
-          fuelWarning: undefined,
-          overnightAnchorName: null as string | null,
-          overnightAnchorLat: null as number | null,
-          overnightAnchorLng: null as number | null,
-        }))
+        startKm: Math.round(totalTripDistanceKm * (index / targetDays)),
+        endKm: Math.round(totalTripDistanceKm * ((index + 1) / targetDays)),
+        verifiedStops: [] as RouteStopOption[],
+        otherStops: [] as RouteStopOption[],
+        options: [] as RouteStopOption[],
+        recommendedOption: null as RouteStopOption | null,
+        fuelSuggestions: [] as FuelStation[],
+        primaryFuelSuggestion: undefined,
+        isRemote: false,
+        fuelCritical: false,
+        degradedMode: false,
+        fuelDistanceIntoLegKm: undefined,
+        gapFromLastFuelKm: undefined,
+        gapToNextFuelKm: undefined,
+        fuelWarning: undefined,
+        overnightAnchorName: null as string | null,
+        overnightAnchorLat: null as number | null,
+        overnightAnchorLng: null as number | null,
+      }))
     },
     [totalTripDistanceKm, targetDays]
   )
@@ -375,7 +370,6 @@ export default function PlannerDetailPage() {
 
       const newStops = stops.filter((s) => s.id !== selectedStopForDelete.id)
       setStops(newStops)
-      setFilteredStops(newStops)
       setSelectedStops((prev) => prev.filter((id) => id !== selectedStopForDelete.id))
       toast.success("Stop removed from trip")
     } catch (error) {
@@ -433,7 +427,7 @@ export default function PlannerDetailPage() {
 
   const tripStopToRouteOption = useCallback((stop: TripStop): RouteStopOption => ({
     id: normalizeStopId(stop.stop_id || stop.id) || stop.id,
-    location_name: stop.location_name,
+    location_name: stop.location_name || "",
     latitude: stop.latitude,
     longitude: stop.longitude,
     state: stop.state,
@@ -617,7 +611,6 @@ export default function PlannerDetailPage() {
     try {
       const sorted = await sortStopsAlongRoute(stops)
       setStops(sorted)
-      setFilteredStops(sorted)
       setSelectedSegmentOptionIds({})
       setExpandedSegmentOptions(new Set())
       toast.success("Plan rebuilt")
@@ -792,7 +785,6 @@ export default function PlannerDetailPage() {
         const sortedStops = await sortStopsAlongRoute(updatedStops)
 
         setStops(sortedStops)
-        setFilteredStops(sortedStops)
         toast.success(`${stop.location_name} added to trip`)
       } else {
         toast.error("Failed to add stop")
@@ -832,7 +824,6 @@ export default function PlannerDetailPage() {
         validateFuelAfterEdit(stopId, stopName)
         const newStops = stops.filter((s) => normalizeStopId(s.id) !== normalizedStopId)
         setStops(newStops)
-        setFilteredStops(newStops)
 
         // Recalculate route after removing stop
         if (map) {
@@ -1490,10 +1481,9 @@ export default function PlannerDetailPage() {
       if (!hasAccess()) { router.replace("/no-access"); return }
 
       try {
-        const tripData = await fetchTrip(tripId, uid)
-
         const response = await fetch(`/api/trips/${tripId}${uid ? `?user_id=${uid}` : ""}`)
         const data = await response.json()
+        console.log("Fetch trip response:", data);
 
         if (!data.success || !data.trip) {
           setTripNotFound(true)
@@ -1501,99 +1491,85 @@ export default function PlannerDetailPage() {
           return
         }
 
-        if (data.trip.status === "in_progress") {
-          setIsPolling(true)
-          setLoading(false)
-          return
-        }
-
-        setIsPolling(false)
         setTrip(data.trip)
-        const routeJson = (data.trip as TripData).route_data_json ?? {}
-        const savedNarrative = routeJson.narrative as TripNarrative | undefined
-        if (savedNarrative?.days?.length) {
-          setTripNarrative(savedNarrative)
-        }
 
-        const stopsResponse = await fetch(`/api/trips/${tripId}/stops`)
-        const stopsData = await stopsResponse.json()
-        console.log("Stops API response:", stopsData)
+        // Handle itinerary_days rows from the API
+        if (Array.isArray(data.stops) && data.stops.length > 0) {
+          const firstStop = data.stops[0]
+          
+          // Check if this is an itinerary_days row (has day_number) or old trip_itineraries (has stops_by_day_json)
+          if (typeof firstStop.day_number === "number") {
+            // New format: data.stops is array of itinerary_days rows
+            console.log("Setting activeItineraryDays from itinerary_days rows:", data.stops)
+            setActiveItineraryDays(data.stops as ActiveItineraryDayRow[])
+          } else if (firstStop.stops_by_day_json) {
+            // Old format: data.stops is array of trip_itineraries with stops_by_day_json
+            const stopsByDayJson = firstStop.stops_by_day_json as Record<string, Array<{
+              id: string
+              name: string
+              dayOrder?: number
+              isSelected?: boolean
+              sourceType?: string
+            }>>
 
-        let formattedStops: TripStop[] = []
+            console.log("Raw stops_by_day_json:", stopsByDayJson)
 
-        if (stopsData.success && stopsData.stops && Array.isArray(stopsData.stops)) {
-          formattedStops = stopsData.stops.map(
-            (item: { id?: string; stop?: Stop; stop_id?: string; distance_to_route_km?: number }) => ({
-              id: item.id,
-              stop_id: item.stop_id,
-              ...(item.stop || item),
-              distance_to_route_km: item.distance_to_route_km,
+            const formattedItineraryDays: ActiveItineraryDayRow[] = []
+            Object.entries(stopsByDayJson).forEach(([dayKey, dayStops]) => {
+              if (Array.isArray(dayStops)) {
+                dayStops.forEach((stop) => {
+                  const dayNum = parseInt(dayKey.replace("day", ""), 10) || 1
+                  formattedItineraryDays.push({
+                    day_number: dayNum,
+                    day_order: stop.dayOrder,
+                    source_type: stop.sourceType,
+                    stop_id: stop.sourceType === "custom" ? null : stop.id,
+                    custom_stop_id: stop.sourceType === "custom" ? stop.id : null,
+                    is_selected: stop.isSelected,
+                    to_location: stop.name,
+                  })
+                })
+              }
             })
-          )
-        }
-
-        try {
-          const customStopsResponse = await fetch(`/api/custom-stops?trip_id=${tripId}`)
-          const customStopsData = await customStopsResponse.json()
-
-          if (customStopsData.success && customStopsData.stops && Array.isArray(customStopsData.stops)) {
-            const customFormattedStops = customStopsData.stops.map(
-              (item: {
-                id: string
-                location_name: string
-                latitude: string
-                longitude: string
-                address?: string
-                place_type?: string
-                day_index?: number
-                distance_from_start_km?: number
-                distance_to_route_km?: number
-              }) => ({
-                id: item.id,
-                location_name: item.location_name,
-                latitude: item.latitude,
-                longitude: item.longitude,
-                address: item.address || "",
-                state: item.place_type || "",
-                nearest_town: "",
-                region: "",
-                route_type: "",
-                rig_suitability: "",
-                access_type: "",
-                water: "",
-                dump_point: "",
-                pet_friendly: "",
-                best_season: "",
-                stay_type: "",
-                why_we_d_stay_again: "",
-                confidence_level: "",
-                tier: "",
-                aao_tip: "",
-                why_stop_here: "",
-                best_travel_window: "",
-                corridor: "",
-                road_suitability: "",
-                max_rig_length: "",
-                cost_band: "",
-                verification_status: "custom",
-                day_index: item.day_index ?? 0,
-                distance_from_start_km: item.distance_from_start_km,
-                distance_to_route_km: item.distance_to_route_km,
-                created_at: new Date().toISOString(),
-              })
-            )
-
-            const existingIds = new Set(formattedStops.map((s: { id: string }) => s.id))
-            const newCustomStops = customFormattedStops.filter((s: { id: string }) => !existingIds.has(s.id))
-
-            formattedStops = [...formattedStops, ...newCustomStops]
+            setActiveItineraryDays(formattedItineraryDays)
           }
-        } catch (err) {
-          console.error("Error fetching custom stops:", err)
         }
 
-        setStops(formattedStops)
-        setFilteredStops(formattedStops)
+        // Legacy: populate TripStop array (used for map rendering and other legacy code)
+        const formattedStops: TripStop[] = []
+        if (Array.isArray(data.stops) && data.stops.length > 0) {
+          const firstStop = data.stops[0]
+          if (firstStop.stops_by_day_json) {
+            const stopsByDayJson = firstStop.stops_by_day_json as Record<string, Array<{
+              id: string
+              name: string
+              dayOrder?: number
+              isSelected?: boolean
+              sourceType?: string
+            }>>
+            Object.entries(stopsByDayJson).forEach(([dayKey, dayStops]) => {
+              if (Array.isArray(dayStops)) {
+                dayStops.forEach((stop, idx) => {
+                  const dayNum = parseInt(dayKey.replace("day", ""), 10) || 1
+                  formattedStops.push({
+                    id: stop.id,
+                    stop_id: stop.id,
+                    location_name: stop.name,
+                    day_index: dayNum - 1,
+                    verification_status: stop.sourceType || "custom",
+                    is_selected: stop.isSelected ?? false,
+                    day_order: stop.dayOrder ?? idx + 1,
+                  })
+                })
+              }
+            })
+          }
+        }
+
+        console.log("Formatted stops:", formattedStops)
+        if (formattedStops.length > 0) {
+          setStops(formattedStops)
+        }
       } catch (error) {
         console.error("Error fetching trip:", error)
       } finally {
@@ -1611,6 +1587,8 @@ export default function PlannerDetailPage() {
 
     pollingIntervalRef.current = setInterval(async () => {
       try {
+        const storedUser = getStoredUser()
+        const uid = storedUser?.id
         const response = await fetch(`/api/trips/${tripId}`)
         const data = await response.json()
 
@@ -1621,6 +1599,43 @@ export default function PlannerDetailPage() {
           }
           setIsPolling(false)
           setTrip(data.trip)
+
+          const itinerariesResponse = await fetch(`/api/trips/${tripId}/itineraries?user_id=${uid}`)
+          const itinerariesData = await itinerariesResponse.json()
+
+          if (itinerariesData.success) {
+            setActiveItineraryDays(Array.isArray(itinerariesData.activeDays) ? itinerariesData.activeDays : [])
+          }
+
+          const formattedStops: TripStop[] = []
+          const stopsByDayJson = data.stops?.[0]?.stops_by_day_json as Record<string, Array<{
+            id: string
+            name: string
+            dayOrder?: number
+            isSelected?: boolean
+            sourceType?: string
+          }>> | undefined
+
+          if (stopsByDayJson) {
+            Object.entries(stopsByDayJson).forEach(([dayKey, dayStops]) => {
+              if (Array.isArray(dayStops)) {
+                dayStops.forEach((stop, idx) => {
+                  const dayNum = parseInt(dayKey.replace("day", ""), 10) || 1
+                  formattedStops.push({
+                    id: stop.id,
+                    stop_id: stop.id,
+                    location_name: stop.name,
+                    day_index: dayNum,
+                    verification_status: stop.sourceType || "custom",
+                    is_selected: stop.isSelected ?? false,
+                    day_order: stop.dayOrder ?? idx + 1,
+                  })
+                })
+              }
+            })
+          }
+
+          setStops(formattedStops)
           setLoading(false)
         }
       } catch (error) {
@@ -1692,17 +1707,17 @@ export default function PlannerDetailPage() {
         .filter((stop) => stopBelongsToDay(stop, segment, index))
         .map((stop) => ({
           id: normalizeStopId(stop.stop_id || stop.id),
-          location_name: stop.location_name,
-          latitude: stop.latitude,
-          longitude: stop.longitude,
-          state: stop.state,
-          region: stop.region,
-          route_type: stop.route_type,
-          stay_type: stop.stay_type,
-          pet_friendly: stop.pet_friendly,
-          water: stop.water,
-          cost_band: stop.cost_band,
-          tier: stop.tier,
+          location_name: stop.location_name ?? "",
+          latitude: stop.latitude ?? "0",
+          longitude: stop.longitude ?? "0",
+          state: stop.state ?? "",
+          region: stop.region ?? "",
+          route_type: stop.route_type ?? "",
+          stay_type: stop.stay_type ?? "",
+          pet_friendly: stop.pet_friendly ?? "",
+          water: stop.water ?? "",
+          cost_band: stop.cost_band ?? "",
+          tier: stop.tier ?? "",
           is_verified: true,
           distance_from_start_km: Number.isFinite(Number(stop.distance_from_start_km))
             ? Number(stop.distance_from_start_km)
@@ -1744,6 +1759,7 @@ export default function PlannerDetailPage() {
 
       const seenCustomStopKeys = new Set<string>()
       const dedupedCustomStopsForDay = customStopsForDay.filter((stop) => {
+        if (!stop.location_name) return false
         const key = getCustomStopDisplayKey(stop)
 
         if (seenCustomStopKeys.has(key)) return false
@@ -1920,34 +1936,6 @@ export default function PlannerDetailPage() {
 
     const savedStops = stops.filter((stop) => stop.verification_status !== "custom")
     const customStops = stops.filter((stop) => stop.verification_status === "custom")
-
-    console.log("[PlannerDebug] saved stops", {
-      count: savedStops.length,
-      ids: savedStops.map((stop) => normalizeStopId(stop.stop_id || stop.id)),
-      names: savedStops.map((stop) => stop.location_name),
-    })
-
-    console.log("[PlannerDebug] custom stops", {
-      count: customStops.length,
-      ids: customStops.map((stop) => normalizeStopId(stop.stop_id || stop.id)),
-      names: customStops.map((stop) => stop.location_name),
-      dayIndexes: customStops.map((stop) => stop.day_index ?? null),
-    })
-
-    console.log("[PlannerDebug] central combined source", {
-      unifiedCount: unifiedOrderedMapStops.length,
-      persistedFallbackCount: fallbackMapStopsFromPersisted.length,
-      effectiveCount: effectiveMapStops.length,
-      effectiveNames: effectiveMapStops.map((stop) => stop.location_name),
-      perDay: unifiedDayRouteData.map((day, idx) => ({
-        day: idx + 1,
-        routeCount: day.routeStops.length,
-        customCount: day.customStopsForDay.length,
-        routeNames: day.routeStops.map((stop) => stop.location_name),
-        customNames: day.customStopsForDay.map((stop) => stop.location_name),
-      })),
-      planningAlerts: routeWarnings,
-    })
   }, [
     loading,
     stops,
@@ -2117,6 +2105,7 @@ export default function PlannerDetailPage() {
                   <TripDayByDayLoading targetDays={targetDays} />
                 ) : (
                   <TripDayByDay
+                    stops={stops}
                     daySegments={daySegments}
                     expandedSegments={expandedSegments}
                     activeSegmentIndex={activeSegmentIndex}
@@ -2145,25 +2134,17 @@ export default function PlannerDetailPage() {
 
                 <TripTrackMateOverview
                   savedNarrative={tripNarrative}
-                  setRestoringVersion={setRestoringVersion}
-                  itineraryVersions={itineraryVersions}
                   tripNarrative={tripNarrative}
                   setTripNarrative={setTripNarrative}
                   hasSegments={!!routeMeta.segments?.length}
-                  restoringVersion={restoringVersion}
                   effectiveDayCount={effectiveDayCount}
                   daySegments={daySegments}
                   selectedSegmentOptionIds={selectedSegmentOptionIds}
                   trip={trip}
                   tripId={tripId}
                   userId={userId}
-                  routeMeta={routeMeta}
-                  setItineraryVersions={setItineraryVersions}
                   setActiveItineraryDays={setActiveItineraryDays}
-                  getSelectedOption={getSelectedOption}
-                  estimateSegmentDistance={estimateSegmentDistance}
-                  estimateSegmentDuration={estimateSegmentDuration}
-                  autoGenerateOnMount={(trip?.status === "completed" || trip?.status === "saved") && !tripNarrative && itineraryVersions.length === 0}
+                  autoGenerateOnMount={(trip?.status === "completed" || trip?.status === "saved") && !tripNarrative}
                 />
               </div>
 

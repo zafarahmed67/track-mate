@@ -1,7 +1,6 @@
 
 CREATE TABLE IF NOT EXISTS itinerary_days (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  itinerary_id UUID NOT NULL REFERENCES trip_itineraries(id) ON DELETE CASCADE,
   day_number INTEGER NOT NULL,
   from_location TEXT,
   to_location TEXT,

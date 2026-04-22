@@ -72,6 +72,15 @@ interface TripDayByDayProps {
   toggleSegmentExpanded: (index: number) => void
   setActiveSegmentIndex: (index: number) => void
   handleChooseFuel: (index: number, fuelKey: string) => void
+  stops: {
+    day_index: number
+    day_order: number
+    id: string
+    is_selected: boolean
+    location_name: string
+    stop_id: string
+    verification_status: string
+  }[]
 }
 
 export default function TripDayByDay({
@@ -98,7 +107,9 @@ export default function TripDayByDay({
   toggleSegmentExpanded,
   setActiveSegmentIndex,
   handleChooseFuel,
+  stops
 }: TripDayByDayProps) {
+  console.log("Rendering TripDayByDay with segments:", stops)
   return (
     <>
       {daySegments.map((segment, index) => {
@@ -123,8 +134,32 @@ export default function TripDayByDay({
           ? getMergedSegmentOptions(segment, index, 12)
           : getMergedSegmentOptions(segment, index, 3)
         const dayShownStopCount = optionsToShow.length
-       
+        console.log("optionsToShow:", optionsToShow);
+
         const selectedFuelSuggestion = getSelectedFuelSuggestion(segment, index)
+
+        // Initialize an object to hold stops by day
+const stopsByDay: Record<number, Array<{ title: string; value: string }>> = {};
+
+// Group stops by day_index
+stops.forEach(stop => {
+    const dayIndex = stop.day_index;
+    if (!stopsByDay[dayIndex]) {
+        stopsByDay[dayIndex] = [];
+    }
+    stopsByDay[dayIndex].push({
+        title: stop.location_name,
+        value: stop.stop_id
+    });
+});
+
+// Convert the stopsByDay object into an array with day titles
+const dayOptions = Object.entries(stopsByDay).map(([dayIndex, options]) => ({
+    day_title: `Day ${dayIndex}`,
+    options: options
+}));
+
+console.log("Formatted Day Options:", dayOptions);
 
         return (
           <Card key={`day-card-${index}`} className={active ? "border-primary shadow-lg" : "border"}>

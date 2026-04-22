@@ -24,16 +24,16 @@ export interface TripData {
   suggested_days?: number
 }
 
-export interface TripStop extends Omit<Stop, "id"> {
+export interface TripStop extends Partial<Stop> {
   id: string
   stop_id?: string
+  day_index?: number
+  day_order?: number
+  is_selected?: boolean
+  routeDistance?: number
   distance_to_route_km?: number
   distance_from_start_km?: number
-  stop?: Stop
   stop_type?: string
-  address?: string
-  day_index?: number
-  routeDistance?: number
 }
 
 export interface FuelStation {
