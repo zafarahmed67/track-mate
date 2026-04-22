@@ -2,12 +2,10 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import React from 'react'
 
 interface TripPlanningAlertsProps {
-    routeOptionsLoading: boolean
     routeWarnings: string[]
 }
 
 export default function TripPlanningAlerts({
-    routeOptionsLoading,
     routeWarnings,
 }: TripPlanningAlertsProps) {
     return (
@@ -16,9 +14,7 @@ export default function TripPlanningAlerts({
                 <CardTitle className="text-lg">Planning Alerts</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3 text-sm">
-                {routeOptionsLoading ? (
-                    <div className="text-muted-foreground">Loading route alerts…</div>
-                ) : routeWarnings.length > 0 ? (
+                {routeWarnings.length > 0 ? (
                     <ul className="space-y-2">
                         {routeWarnings.map((warning, index) => (
                             <li key={index} className="rounded-lg border border-destructive/20 bg-destructive/5 p-3">

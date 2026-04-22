@@ -16,7 +16,6 @@ interface TripPlanningControlsCardProps {
   setIncludeFreeCamps: (updater: (prev: boolean) => boolean) => void
   includeFuelPlanning: boolean
   setIncludeFuelPlanning: (updater: (prev: boolean) => boolean) => void
-  routeOptionsLoading: boolean
   handleRebuildPlan: () => void
 }
 
@@ -35,7 +34,6 @@ export default function TripPlanningControlsCard({
   setIncludeFreeCamps,
   includeFuelPlanning,
   setIncludeFuelPlanning,
-  routeOptionsLoading,
   handleRebuildPlan,
 }: TripPlanningControlsCardProps) {
   return (
@@ -98,7 +96,7 @@ export default function TripPlanningControlsCard({
           </div>
         </div>
         <div className="flex flex-col gap-2">
-          <Button className="w-full" onClick={handleRebuildPlan} disabled={routeOptionsLoading}>
+          <Button className="w-full" onClick={handleRebuildPlan}>
             Rebuild plan
           </Button>
         </div>

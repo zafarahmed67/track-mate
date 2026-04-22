@@ -2,7 +2,6 @@
 
 import { useEffect, useState, useCallback, useRef, useMemo } from "react"
 import { useParams, useRouter } from "next/navigation"
-import { PointerSensor, useSensor, useSensors } from "@dnd-kit/core"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
@@ -71,7 +70,7 @@ export default function PlannerDetailPage() {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [selectedStopForDelete, setSelectedStopForDelete] = useState<{ id: string; name: string } | null>(null)
   const [routeMeta, setRouteMeta] = useState<Partial<RouteMeta>>({})
-  const [routeOptionsLoading, setRouteOptionsLoading] = useState(false)
+  
   const [routeWarnings, setRouteWarnings] = useState<string[]>([])
   const [activeSegmentIndex, setActiveSegmentIndex] = useState<number | null>(null)
   const [expandedSegments, setExpandedSegments] = useState<Set<number>>(new Set())
@@ -271,17 +270,15 @@ export default function PlannerDetailPage() {
   const adjustedDays = effectiveDaysAdjustment?.adjustedToDays
   const targetDays = adjustedDays ?? requestedDays
 
-  const showPlanningSkeleton =
-    routeOptionsLoading &&
-    (!routeMeta.segments || routeMeta.segments.length === 0)
+  const totalTripDistanceKm = trip?.total_distance_km || 0
+
+  const showPlanningSkeleton = false
 
   const allDaySegments = useMemo(
-    () =>
-      routeMeta.segments && routeMeta.segments.length > 0
-        ? normalizeSegmentsToDays(routeMeta.segments, targetDays)
-        : Array.from({ length: targetDays }, (_, index) => ({
-          startKm: Math.round((routeMeta.drivingInfo?.totalDistanceKm || 0) * (index / targetDays)),
-          endKm: Math.round((routeMeta.drivingInfo?.totalDistanceKm || 0) * ((index + 1) / targetDays)),
+    () => {
+      return Array.from({ length: targetDays }, (_, index) => ({
+          startKm: Math.round(totalTripDistanceKm * (index / targetDays)),
+          endKm: Math.round(totalTripDistanceKm * ((index + 1) / targetDays)),
           verifiedStops: [] as RouteStopOption[],
           otherStops: [] as RouteStopOption[],
           options: [] as RouteStopOption[],
@@ -298,9 +295,9 @@ export default function PlannerDetailPage() {
           overnightAnchorName: null as string | null,
           overnightAnchorLat: null as number | null,
           overnightAnchorLng: null as number | null,
-        })),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [routeMeta.segments, routeMeta.drivingInfo?.totalDistanceKm, routeMeta.paceConfig?.kmPerDay, targetDays]
+        }))
+    },
+    [totalTripDistanceKm, targetDays]
   )
 
   const plannedDays = allDaySegments.length
@@ -589,7 +586,6 @@ export default function PlannerDetailPage() {
     })
 
     await handleAddStopFromOptions(normalizeRouteOption(option))
-    await loadRouteOptions()
 
     // Recalculate route to include selected stops as waypoints
     if (map) {
@@ -618,9 +614,7 @@ export default function PlannerDetailPage() {
 
   const handleRebuildPlan = async () => {
     setTripNarrative(null)
-    setRouteOptionsLoading(true)
     try {
-      await loadRouteOptions()
       const sorted = await sortStopsAlongRoute(stops)
       setStops(sorted)
       setFilteredStops(sorted)
@@ -630,8 +624,6 @@ export default function PlannerDetailPage() {
     } catch (error) {
       console.error("Error rebuilding plan:", error)
       toast.error("Failed to rebuild plan")
-    } finally {
-      setRouteOptionsLoading(false)
     }
   }
 
@@ -801,7 +793,6 @@ export default function PlannerDetailPage() {
 
         setStops(sortedStops)
         setFilteredStops(sortedStops)
-        await loadRouteOptions()
         toast.success(`${stop.location_name} added to trip`)
       } else {
         toast.error("Failed to add stop")
@@ -842,7 +833,6 @@ export default function PlannerDetailPage() {
         const newStops = stops.filter((s) => normalizeStopId(s.id) !== normalizedStopId)
         setStops(newStops)
         setFilteredStops(newStops)
-        await loadRouteOptions()
 
         // Recalculate route after removing stop
         if (map) {
@@ -1440,55 +1430,6 @@ export default function PlannerDetailPage() {
     return routeMeta.fuelStations?.length ?? 0
   }
 
-  const loadRouteOptions = async () => {
-    if (!trip?.start_lat || !trip?.start_lng || !trip?.destination_lat || !trip?.destination_lng) {
-      return
-    }
-
-    setRouteOptionsLoading(true)
-    try {
-      const response = await fetch("/api/stops/options", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          startLat: trip.start_lat,
-          startLng: trip.start_lng,
-          destLat: trip.destination_lat,
-          destLng: trip.destination_lng,
-          travelPace: trip.travel_pace || "moderate",
-          tripId,
-          preferredLegKm: preferredLegLengthKm,
-          avoidLongDays,
-          preferVerified: preferVerifiedStops,
-          includeFreeCamps,
-          includeAlternatives: true,
-        }),
-      })
-      console.log("Route options response status:", response.status)
-      const data = await response.json()
-      if (data.success) {
-        setRouteMeta({
-          corridor: data.corridor,
-          drivingInfo: data.drivingInfo,
-          paceConfig: data.paceConfig,
-          segments: data.segments,
-          fuelStations: data.fuelStations,
-          planningMode: data.planningMode,
-          daysAdjustment: data.daysAdjustment ?? null,
-        })
-      }
-    } catch (error) {
-      console.error("Error loading route options:", error)
-    } finally {
-      setRouteOptionsLoading(false)
-    }
-  }
-
-  useEffect(() => {
-    if (!trip) return
-    loadRouteOptions()
-  }, [trip?.start_lat, trip?.start_lng, trip?.destination_lat, trip?.destination_lng, trip?.travel_pace, tripId])
-
   useEffect(() => {
     if (routeMeta.segments && routeMeta.segments.length > 0 && map) {
       calculateRouteWithWaypoints(map)
@@ -2057,7 +1998,6 @@ export default function PlannerDetailPage() {
                 getRouteDescription={getRouteDescription}
               />
               <TripPlanningAlerts
-                routeOptionsLoading={routeOptionsLoading}
                 routeWarnings={routeWarnings}
               />
             </div>
@@ -2240,7 +2180,6 @@ export default function PlannerDetailPage() {
                   setIncludeFreeCamps={setIncludeFreeCamps}
                   includeFuelPlanning={includeFuelPlanning}
                   setIncludeFuelPlanning={setIncludeFuelPlanning}
-                  routeOptionsLoading={routeOptionsLoading}
                   handleRebuildPlan={handleRebuildPlan}
                 />
 
@@ -2261,7 +2200,6 @@ export default function PlannerDetailPage() {
                   tripNarrative={tripNarrative}
                   routeMeta={routeMeta}
                   tripTitle={trip?.title}
-                  loadRouteOptions={loadRouteOptions}
                 />
 
               </div>

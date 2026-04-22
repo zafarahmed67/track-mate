@@ -13,7 +13,6 @@ interface TripAIChatCardProps {
   tripNarrative: { overview: string; days: unknown[] } | null
   routeMeta: { corridor?: string }
   tripTitle?: string | null
-  loadRouteOptions: () => void
 }
 
 export default function TripAIChatCard({
@@ -22,7 +21,6 @@ export default function TripAIChatCard({
   tripNarrative,
   routeMeta,
   tripTitle,
-  loadRouteOptions,
 }: TripAIChatCardProps) {
   const router = useRouter()
   const chatEndRef = useRef<HTMLDivElement | null>(null)
@@ -73,7 +71,6 @@ export default function TripAIChatCard({
         setChatMessages((prev) => [...prev, result.message])
         if (result.action?.type === "refilter") {
           setRefilterBanner({ preferenceHint: result.action.preferenceHint ?? null })
-          loadRouteOptions()
         }
       }
     } catch (error) {

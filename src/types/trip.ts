@@ -20,6 +20,8 @@ export interface TripData {
   rig_length_m?: number | null
   avoid_gravel_roads?: boolean
   pet_friendly_required?: boolean
+  total_distance_km?: number
+  suggested_days?: number
 }
 
 export interface TripStop extends Omit<Stop, "id"> {
