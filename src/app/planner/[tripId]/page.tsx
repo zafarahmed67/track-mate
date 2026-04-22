@@ -73,6 +73,16 @@ export default function PlannerDetailPage() {
   const [expandedSegments, setExpandedSegments] = useState<Set<number>>(new Set())
   const [selectedSegmentOptionIds, setSelectedSegmentOptionIds] = useState<Record<number, string>>({})
   const [selectedSegmentFuelIds, setSelectedSegmentFuelIds] = useState<Record<number, string>>({})
+  const [fuelByDay, setFuelByDay] = useState<Record<string, {
+    suggestions: FuelStation[]
+    primarySuggestion: FuelStation | null
+    fuelCritical: boolean
+    fuelWarning: string | null
+    gapFromLastFuelKm: number
+    gapToNextFuelKm: number
+    fuelDistanceIntoLegKm: number | undefined
+    isRemote: boolean
+  }>>({})
   const [expandedSegmentOptions, setExpandedSegmentOptions] = useState<Set<number>>(new Set())
   const [segmentRouteOrderIds, setSegmentRouteOrderIds] = useState<Record<number, string[]>>({})
   const [excludedOptionIds, setExcludedOptionIds] = useState<Set<string>>(new Set())
@@ -271,28 +281,32 @@ export default function PlannerDetailPage() {
 
   const allDaySegments = useMemo(
     () => {
-      return Array.from({ length: targetDays }, (_, index) => ({
-        startKm: Math.round(totalTripDistanceKm * (index / targetDays)),
-        endKm: Math.round(totalTripDistanceKm * ((index + 1) / targetDays)),
-        verifiedStops: [] as RouteStopOption[],
-        otherStops: [] as RouteStopOption[],
-        options: [] as RouteStopOption[],
-        recommendedOption: null as RouteStopOption | null,
-        fuelSuggestions: [] as FuelStation[],
-        primaryFuelSuggestion: undefined,
-        isRemote: false,
-        fuelCritical: false,
-        degradedMode: false,
-        fuelDistanceIntoLegKm: undefined,
-        gapFromLastFuelKm: undefined,
-        gapToNextFuelKm: undefined,
-        fuelWarning: undefined,
-        overnightAnchorName: null as string | null,
-        overnightAnchorLat: null as number | null,
-        overnightAnchorLng: null as number | null,
-      }))
+      return Array.from({ length: targetDays }, (_, index) => {
+        const dayKey = String(index + 1)
+        const fuel = fuelByDay[dayKey]
+        return {
+          startKm: Math.round(totalTripDistanceKm * (index / targetDays)),
+          endKm: Math.round(totalTripDistanceKm * ((index + 1) / targetDays)),
+          verifiedStops: [] as RouteStopOption[],
+          otherStops: [] as RouteStopOption[],
+          options: [] as RouteStopOption[],
+          recommendedOption: null as RouteStopOption | null,
+          fuelSuggestions: fuel?.suggestions ?? [] as FuelStation[],
+          primaryFuelSuggestion: fuel?.primarySuggestion ?? undefined,
+          isRemote: fuel?.isRemote ?? false,
+          fuelCritical: fuel?.fuelCritical ?? false,
+          degradedMode: false,
+          fuelDistanceIntoLegKm: fuel?.fuelDistanceIntoLegKm,
+          gapFromLastFuelKm: fuel?.gapFromLastFuelKm,
+          gapToNextFuelKm: fuel?.gapToNextFuelKm,
+          fuelWarning: fuel?.fuelWarning ?? undefined,
+          overnightAnchorName: null as string | null,
+          overnightAnchorLat: null as number | null,
+          overnightAnchorLng: null as number | null,
+        }
+      })
     },
-    [totalTripDistanceKm, targetDays]
+    [totalTripDistanceKm, targetDays, fuelByDay]
   )
 
   const plannedDays = allDaySegments.length
@@ -732,8 +746,8 @@ export default function PlannerDetailPage() {
           origin,
           destination,
           waypoints: stopsToSort.map(s => ({
-            lat: parseFloat(s.latitude),
-            lng: parseFloat(s.longitude),
+            lat: parseFloat(s.latitude ?? "0"),
+            lng: parseFloat(s.longitude ?? "0"),
           })),
           minSpacingKm: 50,
         }),
@@ -1301,21 +1315,34 @@ export default function PlannerDetailPage() {
   }, [routeMeta.segments, map, calculateRouteWithWaypoints])
 
   useEffect(() => {
-    if (routeMeta.fuelStations && routeMeta.fuelStations.length > 0) {
-      setFuelStations(routeMeta.fuelStations.map((station, index) => ({
-        id: station.name || `fuel-${index}`,
-        name: station.name,
-        lat: station.lat,
-        lng: station.lng,
-        address: station.address,
-        isOpenNow: station.isOpenNow,
-        rating: station.rating,
-        distanceFromStartKm: station.distanceFromStartKm,
-      })))
-    } else {
+    if (!includeFuelPlanning || Object.keys(fuelByDay).length === 0) {
       setFuelStations([])
+      setShowFuelOverlay(false)
+      return
     }
-  }, [routeMeta.fuelStations])
+    const selected: typeof fuelStations = []
+    Object.entries(fuelByDay).forEach(([dayKey, dayFuel]) => {
+      const segmentIndex = Number(dayKey) - 1
+      const selectedId = selectedSegmentFuelIds[segmentIndex]
+      const station = selectedId
+        ? dayFuel.suggestions.find(s => (s.id ?? `${s.lat}-${s.lng}`) === selectedId)
+        : dayFuel.primarySuggestion ?? dayFuel.suggestions[0]
+      if (station) {
+        selected.push({
+          id: station.id ?? `${station.lat}-${station.lng}`,
+          name: station.name,
+          lat: station.lat,
+          lng: station.lng,
+          address: station.address,
+          isOpenNow: station.isOpenNow,
+          rating: station.rating,
+          distanceFromStartKm: station.distanceFromStartKm ?? 0,
+        })
+      }
+    })
+    setFuelStations(selected)
+    setShowFuelOverlay(true)
+  }, [fuelByDay, includeFuelPlanning, selectedSegmentFuelIds])
 
   useEffect(() => {
     const warnings: string[] = []
@@ -1385,6 +1412,15 @@ export default function PlannerDetailPage() {
               totalDurationMinutes,
             },
           }))
+
+          // Restore persisted fuel station selections from route_data_json.
+          const routeJson = data.trip.route_data_json
+          if (routeJson && typeof routeJson === "object") {
+            const savedFuelIds = (routeJson as Record<string, unknown>).selectedSegmentFuelIds
+            if (savedFuelIds && typeof savedFuelIds === "object") {
+              setSelectedSegmentFuelIds(savedFuelIds as Record<number, string>)
+            }
+          }
         }
 
         // Handle itinerary_days rows from the API
@@ -1398,37 +1434,41 @@ export default function PlannerDetailPage() {
             setActiveItineraryDays(data.stops as ActiveItineraryDayRow[])
           } else if (firstStop.stops_by_day_json) {
             // Old format: data.stops is array of trip_itineraries with stops_by_day_json
-            const stopsByDayJson = firstStop.stops_by_day_json as Record<string, Array<{
-              id: string
-              name: string
-              latitude?: number
-              longitude?: number
-              distance_from_start_km?: number
-              dayOrder?: number
-              isSelected?: boolean
-              sourceType?: string
-            }>>
+            const stopsByDayJson = firstStop.stops_by_day_json as Record<string, unknown>
 
             console.log("Raw stops_by_day_json:", stopsByDayJson)
 
+            // Restore persisted fuel data stored alongside stops.
+            if (stopsByDayJson.fuelByDay && typeof stopsByDayJson.fuelByDay === "object") {
+              setFuelByDay(stopsByDayJson.fuelByDay as typeof fuelByDay)
+            }
+
             const formattedItineraryDays: ActiveItineraryDayRow[] = []
             Object.entries(stopsByDayJson).forEach(([dayKey, dayStops]) => {
-              if (Array.isArray(dayStops)) {
-                dayStops.forEach((stop) => {
-                  const dayNum = parseInt(dayKey.replace("day", ""), 10) || 1
-                  formattedItineraryDays.push({
-                    day_number: dayNum,
-                    day_order: stop.dayOrder,
-                    source_type: stop.sourceType,
-                    stop_id: stop.sourceType === "custom" ? null : stop.id,
-                    custom_stop_id: stop.sourceType === "custom" ? stop.id : null,
-                    is_selected: stop.isSelected,
-                    to_location: stop.name,
-                    latitude: stop.latitude,
-                    longitude: stop.longitude,
-                  })
+              if (!Array.isArray(dayStops)) return
+              ;(dayStops as Array<{
+                id: string
+                name: string
+                latitude?: number
+                longitude?: number
+                distance_from_start_km?: number
+                dayOrder?: number
+                isSelected?: boolean
+                sourceType?: string
+              }>).forEach((stop) => {
+                const dayNum = parseInt(dayKey.replace("day", ""), 10) || 1
+                formattedItineraryDays.push({
+                  day_number: dayNum,
+                  day_order: stop.dayOrder,
+                  source_type: stop.sourceType,
+                  stop_id: stop.sourceType === "custom" ? null : stop.id,
+                  custom_stop_id: stop.sourceType === "custom" ? stop.id : null,
+                  is_selected: stop.isSelected,
+                  to_location: stop.name,
+                  latitude: stop.latitude,
+                  longitude: stop.longitude,
                 })
-              }
+              })
             })
             setActiveItineraryDays(formattedItineraryDays)
           }
@@ -1484,6 +1524,25 @@ export default function PlannerDetailPage() {
 
     fetchTripData()
   }, [router, tripId])
+
+  // Load per-day fuel stations from the fuel-planning API whenever the trip
+  // loads and the user has fuel planning enabled. Results are saved to
+  // stops_by_day_json by the API and returned as fuelByDay, which flows into
+  // allDaySegments so TripDayByDay can render the fuel options.
+  useEffect(() => {
+    if (!trip?.id || !includeFuelPlanning) return
+    let cancelled = false
+    fetch(`/api/trips/${trip.id}/fuel-planning`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (cancelled) return
+        if (data.success && data.fuelByDay) {
+          setFuelByDay(data.fuelByDay)
+        }
+      })
+      .catch(() => {/* fuel planning is optional — ignore errors */})
+    return () => { cancelled = true }
+  }, [trip?.id, includeFuelPlanning])
 
   useEffect(() => {
     if (!isPolling || !tripId) return
@@ -1660,7 +1719,7 @@ export default function PlannerDetailPage() {
         if (!stopBelongsToDay(stop, segment, index)) return false
 
         const normalizedId = normalizeStopId(stop.stop_id || stop.id)
-        const displayKey = getCustomStopDisplayKey(stop)
+        const displayKey = getCustomStopDisplayKey({ ...stop, location_name: stop.location_name ?? "" })
 
         return !routeStopIds.has(normalizedId)
           && !hiddenCustomKeysForDay.has(displayKey)
@@ -1669,7 +1728,7 @@ export default function PlannerDetailPage() {
       const seenCustomStopKeys = new Set<string>()
       const dedupedCustomStopsForDay = customStopsForDay.filter((stop) => {
         if (!stop.location_name) return false
-        const key = getCustomStopDisplayKey(stop)
+        const key = getCustomStopDisplayKey({ ...stop, location_name: stop.location_name ?? "" })
 
         if (seenCustomStopKeys.has(key)) return false
         seenCustomStopKeys.add(key)

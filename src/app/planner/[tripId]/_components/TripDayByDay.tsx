@@ -5,6 +5,8 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { ChevronDown, ChevronUp, Fuel, Droplets, Star } from "lucide-react"
 
+import type { TripStop } from "@/types/trip"
+
 interface StopOption {
   id: string
   location_name: string
@@ -72,15 +74,7 @@ interface TripDayByDayProps {
   toggleSegmentExpanded: (index: number) => void
   setActiveSegmentIndex: (index: number) => void
   handleChooseFuel: (index: number, fuelKey: string) => void
-  stops: {
-    day_index: number
-    day_order: number
-    id: string
-    is_selected: boolean
-    location_name: string
-    stop_id: string
-    verification_status: string
-  }[]
+  stops: TripStop[]
 }
 
 export default function TripDayByDay({
@@ -138,28 +132,29 @@ export default function TripDayByDay({
 
         const selectedFuelSuggestion = getSelectedFuelSuggestion(segment, index)
 
-        // Initialize an object to hold stops by day
-const stopsByDay: Record<number, Array<{ title: string; value: string }>> = {};
+        const stopsByDay: Record<number, Array<{ title: string; value: string }>> = {}
 
-// Group stops by day_index
-stops.forEach(stop => {
-    const dayIndex = stop.day_index;
-    if (!stopsByDay[dayIndex]) {
-        stopsByDay[dayIndex] = [];
-    }
-    stopsByDay[dayIndex].push({
-        title: stop.location_name,
-        value: stop.stop_id
-    });
-});
+        stops.forEach((stop) => {
+          if (typeof stop.day_index !== "number" || !stop.stop_id || !stop.location_name) {
+            return
+          }
 
-// Convert the stopsByDay object into an array with day titles
-const dayOptions = Object.entries(stopsByDay).map(([dayIndex, options]) => ({
-    day_title: `Day ${dayIndex}`,
-    options: options
-}));
+          if (!stopsByDay[stop.day_index]) {
+            stopsByDay[stop.day_index] = []
+          }
 
-console.log("Formatted Day Options:", dayOptions);
+          stopsByDay[stop.day_index].push({
+            title: stop.location_name,
+            value: stop.stop_id
+          })
+        })
+
+        const dayOptions = Object.entries(stopsByDay).map(([dayIndex, options]) => ({
+          day_title: `Day ${dayIndex}`,
+          options
+        }))
+
+        console.log("Formatted Day Options:", dayOptions)
 
         return (
           <Card key={`day-card-${index}`} className={active ? "border-primary shadow-lg" : "border"}>
