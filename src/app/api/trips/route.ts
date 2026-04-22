@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "@/config/supabase"
+import { generateNarrativeForTrip } from "@/utils/generateItineraryNarrative"
 import { NextRequest, NextResponse, after } from "next/server"
 
 export const maxDuration = 300
@@ -196,6 +197,7 @@ const TRAVEL_PACE_KM = {
 
 interface TripGenerationJob {
   tripId: string
+  userId: string
   title: string
   startLat: number
   startLng: number
@@ -424,6 +426,42 @@ async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
       trip_duration_days: job.tripDurationDays,
     }
   )
+
+  // Generate and save narrative into the v1 itinerary record created above
+  try {
+    const { narrative } = await generateNarrativeForTrip(job.tripId)
+
+    const { data: activeItinerary } = await supabaseAdmin
+      .from("trip_itineraries")
+      .select("id")
+      .eq("trip_id", job.tripId)
+      .eq("status", "active")
+      .order("version", { ascending: false })
+      .limit(1)
+      .maybeSingle()
+
+    if (activeItinerary?.id) {
+      await supabaseAdmin
+        .from("trip_itineraries")
+        .update({ itinerary_json: narrative })
+        .eq("id", activeItinerary.id)
+    }
+
+    // Also patch route_data_json for fast loading
+    const { data: tripDataRow } = await supabaseAdmin
+      .from("trips")
+      .select("route_data_json")
+      .eq("id", job.tripId)
+      .single()
+
+    const existingJson = (tripDataRow?.route_data_json as Record<string, unknown>) ?? {}
+    await supabaseAdmin
+      .from("trips")
+      .update({ route_data_json: { ...existingJson, narrative } })
+      .eq("id", job.tripId)
+  } catch (err) {
+    console.error("[narrative] Failed to generate initial narrative for trip", job.tripId, err)
+  }
 
   const { data: tripRouteDataRow } = await supabaseAdmin
     .from("trips")
@@ -837,6 +875,7 @@ export async function POST(req: NextRequest) {
 
     const job: TripGenerationJob = {
       tripId: data.id,
+      userId,
       title: data.title,
       startLat: Number(resolvedStartLat),
       startLng: Number(resolvedStartLng),
