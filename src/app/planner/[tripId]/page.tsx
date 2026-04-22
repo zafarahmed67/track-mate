@@ -1493,6 +1493,27 @@ export default function PlannerDetailPage() {
 
         setTrip(data.trip)
 
+        // Populate routeMeta with distance and estimated duration from trip
+        if (data.trip && typeof data.trip.total_distance_km === "number") {
+          const totalDistanceKm = data.trip.total_distance_km
+          // Estimate duration based on travel pace and distance
+          const paceMap: Record<string, number> = {
+            leisurely: 70,
+            moderate: 80,
+            fast: 90,
+          }
+          const avgSpeedKmh = paceMap[data.trip.travel_pace] || 80
+          const totalDurationMinutes = Math.round((totalDistanceKm / avgSpeedKmh) * 60)
+          
+          setRouteMeta((prev) => ({
+            ...prev,
+            drivingInfo: {
+              totalDistanceKm,
+              totalDurationMinutes,
+            },
+          }))
+        }
+
         // Handle itinerary_days rows from the API
         if (Array.isArray(data.stops) && data.stops.length > 0) {
           const firstStop = data.stops[0]
