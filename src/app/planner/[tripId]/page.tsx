@@ -379,21 +379,6 @@ export default function PlannerDetailPage() {
     }
   }
 
-  const normalizeRouteOption = (option: RouteStopOption) => ({
-    id: option.id,
-    location_name: option.location_name,
-    latitude: option.latitude ?? "0",
-    longitude: option.longitude ?? "0",
-    state: option.state ?? "",
-    region: option.region ?? "",
-    route_type: option.route_type ?? "",
-    stay_type: option.stay_type ?? "",
-    pet_friendly: option.pet_friendly ?? "",
-    water: option.water ?? "",
-    cost_band: option.cost_band ?? "",
-    tier: option.tier ?? "",
-  })
-
   const filterStopsBySegmentDistance = useCallback((segment: RouteSegment, options: RouteStopOption[]) => {
     if (options.length === 0) return options
 
@@ -562,14 +547,25 @@ export default function PlannerDetailPage() {
   }, [activeItineraryDays, excludedOptionIds, filterStopsBySegmentDistance, getOptionIdentityKeys, stops, tripStopToRouteOption])
 
   const handleChooseSegmentOption = async (segment: RouteSegment, segmentIndex: number, option: RouteStopOption) => {
-    const currentSelected = getSelectedOption(segment, segmentIndex)
-    if (currentSelected && currentSelected.id !== option.id && stops.some((stop) => stop.id === currentSelected.id)) {
-      await handleRemoveStopFromOptions(currentSelected.id)
-    }
-
     setSelectedSegmentOptionIds((prev) => ({
       ...prev,
       [segmentIndex]: option.id,
+    }))
+
+    setActiveItineraryDays((prev) => prev.map((row) => {
+      if (Number(row.day_number) !== segmentIndex + 1) return row
+
+      const rowStopIds = [row.stop_id, row.custom_stop_id]
+        .map((id) => normalizeStopId(String(id || "")))
+        .filter(Boolean)
+      const optionId = normalizeStopId(option.id)
+      const matchesSelectedRow = rowStopIds.includes(optionId)
+        || normalizeStopName(row.to_location || "") === normalizeStopName(option.location_name)
+
+      return {
+        ...row,
+        is_selected: matchesSelectedRow,
+      }
     }))
 
     setExcludedOptionIds((prev) => {
@@ -578,8 +574,6 @@ export default function PlannerDetailPage() {
       next.delete(option.id)
       return next
     })
-
-    await handleAddStopFromOptions(normalizeRouteOption(option))
 
     // Recalculate route to include selected stops as waypoints
     if (map) {
@@ -715,127 +709,6 @@ export default function PlannerDetailPage() {
       console.error("Error deleting trip:", error)
     } finally {
       setDeleting(false)
-    }
-  }
-
-  const handleAddStopFromOptions = async (stop: {
-    id: string
-    location_name: string
-    latitude: string
-    longitude: string
-    state: string
-    region: string
-    route_type: string
-    stay_type: string
-    pet_friendly: string
-    water: string
-    cost_band: string
-    tier: string
-  }) => {
-    const existingStop = stops.find(s => s.id === stop.id)
-
-    if (existingStop) {
-      toast.error("This stop is already in your trip")
-      return
-    }
-
-    try {
-      const response = await fetch(`/api/trips/${tripId}/stops`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          stop_ids: [stop.id],
-          selected_by_ai: false,
-        }),
-      })
-      const result = await response.json()
-
-      if (result.success) {
-        const newStop: TripStop = {
-          id: stop.id,
-          location_name: stop.location_name,
-          latitude: stop.latitude,
-          longitude: stop.longitude,
-          state: stop.state,
-          region: stop.region,
-          route_type: stop.route_type,
-          stay_type: stop.stay_type,
-          pet_friendly: stop.pet_friendly,
-          water: stop.water,
-          cost_band: stop.cost_band,
-          tier: stop.tier,
-          nearest_town: "",
-          rig_suitability: "",
-          access_type: "",
-          dump_point: "",
-          best_season: "",
-          why_we_d_stay_again: "",
-          confidence_level: "",
-          aao_tip: "",
-          why_stop_here: "",
-          best_travel_window: "",
-          corridor: "",
-          road_suitability: "",
-          max_rig_length: "",
-          verification_status: "",
-          created_at: new Date().toISOString(),
-        }
-
-        const updatedStops = [...stops, newStop]
-        const sortedStops = await sortStopsAlongRoute(updatedStops)
-
-        setStops(sortedStops)
-        toast.success(`${stop.location_name} added to trip`)
-      } else {
-        toast.error("Failed to add stop")
-      }
-    } catch (error) {
-      console.error("Error adding stop:", error)
-      toast.error("Error adding stop")
-    }
-  }
-
-  const handleRemoveStopFromOptions = async (stopId: string) => {
-    try {
-      const normalizedStopId = normalizeStopId(stopId)
-      const stopToRemove = stops.find((s) => normalizeStopId(s.id) === normalizedStopId)
-      const stopName = stopToRemove?.location_name || "Unknown stop"
-      const isCustomStop = stopToRemove?.verification_status === "custom" || stopId.startsWith("custom-")
-
-      const tryDeleteTripStop = async () => {
-        const response = await fetch(`/api/trips/${tripId}/stops?id=${normalizedStopId}`, {
-          method: "DELETE",
-        })
-        return response.json()
-      }
-
-      const tryDeleteCustomStop = async () => {
-        const response = await fetch(`/api/custom-stops?id=${stopId}`, {
-          method: "DELETE",
-        })
-        return response.json()
-      }
-
-      const result = isCustomStop
-        ? (await tryDeleteCustomStop())
-        : (await tryDeleteTripStop())
-
-      if (result.success) {
-        validateFuelAfterEdit(stopId, stopName)
-        const newStops = stops.filter((s) => normalizeStopId(s.id) !== normalizedStopId)
-        setStops(newStops)
-
-        // Recalculate route after removing stop
-        if (map) {
-          calculateRoute(map)
-        }
-
-        toast.success("Stop removed from trip")
-      } else {
-        toast.error(result.error || "Failed to remove stop")
-      }
-    } catch (error) {
-      toast.error("Error removing stop")
     }
   }
 
