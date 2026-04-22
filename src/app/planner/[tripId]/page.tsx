@@ -1528,6 +1528,8 @@ export default function PlannerDetailPage() {
             const stopsByDayJson = firstStop.stops_by_day_json as Record<string, Array<{
               id: string
               name: string
+              latitude?: number
+              longitude?: number
               dayOrder?: number
               isSelected?: boolean
               sourceType?: string
@@ -1548,6 +1550,8 @@ export default function PlannerDetailPage() {
                     custom_stop_id: stop.sourceType === "custom" ? stop.id : null,
                     is_selected: stop.isSelected,
                     to_location: stop.name,
+                    latitude: stop.latitude,
+                    longitude: stop.longitude,
                   })
                 })
               }
@@ -1564,6 +1568,8 @@ export default function PlannerDetailPage() {
             const stopsByDayJson = firstStop.stops_by_day_json as Record<string, Array<{
               id: string
               name: string
+              latitude?: number
+              longitude?: number
               dayOrder?: number
               isSelected?: boolean
               sourceType?: string
@@ -1576,6 +1582,8 @@ export default function PlannerDetailPage() {
                     id: stop.id,
                     stop_id: stop.id,
                     location_name: stop.name,
+                    latitude: stop.latitude !== undefined ? String(stop.latitude) : undefined,
+                    longitude: stop.longitude !== undefined ? String(stop.longitude) : undefined,
                     day_index: dayNum - 1,
                     verification_status: stop.sourceType || "custom",
                     is_selected: stop.isSelected ?? false,
@@ -1632,6 +1640,8 @@ export default function PlannerDetailPage() {
           const stopsByDayJson = data.stops?.[0]?.stops_by_day_json as Record<string, Array<{
             id: string
             name: string
+            latitude?: number
+            longitude?: number
             dayOrder?: number
             isSelected?: boolean
             sourceType?: string
@@ -1646,6 +1656,8 @@ export default function PlannerDetailPage() {
                     id: stop.id,
                     stop_id: stop.id,
                     location_name: stop.name,
+                    latitude: stop.latitude !== undefined ? String(stop.latitude) : undefined,
+                    longitude: stop.longitude !== undefined ? String(stop.longitude) : undefined,
                     day_index: dayNum,
                     verification_status: stop.sourceType || "custom",
                     is_selected: stop.isSelected ?? false,

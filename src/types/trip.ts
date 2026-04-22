@@ -93,6 +93,8 @@ export interface ActiveItineraryDayRow {
   custom_stop_id?: string | null
   is_selected?: boolean
   to_location?: string | null
+  latitude?: number
+  longitude?: number
 }
 
 export interface RouteSegment {

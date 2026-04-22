@@ -280,6 +280,8 @@ export async function organizeStopsByDay(
     const dayStopsJson: Array<{
       id: string
       name: string
+      latitude: number
+      longitude: number
       sourceType: string
       isSelected: boolean
       dayOrder: number
@@ -292,6 +294,8 @@ export async function organizeStopsByDay(
       dayStopsJson.push({
         id: opt.id,
         name: opt.name,
+        latitude: opt.latitude,
+        longitude: opt.longitude,
         sourceType: opt.sourceType,
         isSelected,
         dayOrder: i + 1,
