@@ -73,38 +73,4 @@ export interface Trip {
   updated_at: string
 }
 
-export interface TripCandidateStop {
-  id: string
-  trip_id: string
-  stop_id: string
-  stop?: Stop
-  rank_score: number | null
-  distance_to_route_km: number | null
-  detour_minutes: number | null
-  suitability_json: Record<string, unknown>
-  rejected_reason: string | null
-  selected_by_ai: boolean
-  generation_version: number
-  created_at: string
-}
-
 export type TravelPace = "leisurely" | "moderate" | "fast"
-export type TripStatus = "planned" | "in_progress" | "completed" | "cancelled"
-
-export interface TripFormData {
-  title: string
-  startLocation: string
-  destination: string
-  startLat?: number
-  startLng?: number
-  destLat?: number
-  destLng?: number
-  tripDurationDays: number
-  travelPace: TravelPace
-  rigType?: string
-  rigLengthM?: number
-  petFriendlyRequired: boolean
-  stayPreference?: string
-  avoidGravelRoads: boolean
-  budgetPreference?: string
-}

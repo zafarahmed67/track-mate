@@ -80,6 +80,3 @@ export function calculateDistance(lat1: number, lng1: number, lat2: number, lng2
     return R * c
 }
 
-export function clearCorridorCache(): void {
-    cachedCorridors = null
-}

@@ -16,7 +16,6 @@ import TripWarningsAndNotesCard from "./_components/TripWarningsAndNotesCard"
 import TripHeader from "./_components/TripHeader"
 import TripTrackMateOverview from "./_components/TripTrackMateOverview"
 import TripDayByDay from "./_components/TripDayByDay"
-import TripDayByDayLoading from "./_components/TripDayByDayLoading"
 import DeleteStop from "./_components/DeleteStop"
 import DeleteTrip from "./_components/DeleteTrip"
 import TripIsPolling from "./_components/TripIsPolling"
@@ -50,7 +49,6 @@ export default function PlannerDetailPage() {
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null)
   const [trip, setTrip] = useState<TripData | null>(null)
   const [stops, setStops] = useState<TripStop[]>([])
-  const [selectedStops, setSelectedStops] = useState<string[]>([])
   const [directions, setDirections] = useState<google.maps.DirectionsResult | null>(null)
   const [fuelStations, setFuelStations] = useState<Array<{
     id: string
@@ -97,7 +95,6 @@ export default function PlannerDetailPage() {
   const [showEditWarningBanner, setShowEditWarningBanner] = useState(false)
   const [tripNarrative, setTripNarrative] = useState<TripNarrative | null>(null)
   const [hoveredPin, setHoveredPin] = useState<{ lat: number; lng: number; label: string; distanceFromRoute?: number; sourceType?: "verified" | "custom" } | null>(null)
-  const [focusedFuelStation, setFocusedFuelStation] = useState<{ lat: number; lng: number; name: string } | null>(null)
   const [hiddenCustomStopsByDay, setHiddenCustomStopsByDay] = useState<Record<number, string[]>>({})
 
   const normalizeStopId = (id: string | null | undefined): string => (id || "").replace(/^custom-/, "")
@@ -169,8 +166,6 @@ export default function PlannerDetailPage() {
   const targetDays = adjustedDays ?? requestedDays
 
   const totalTripDistanceKm = trip?.total_distance_km || 0
-
-  const showPlanningSkeleton = false
 
   const allDaySegments = useMemo(
     () => {
@@ -277,7 +272,6 @@ export default function PlannerDetailPage() {
 
       const newStops = stops.filter((s) => s.id !== selectedStopForDelete.id)
       setStops(newStops)
-      setSelectedStops((prev) => prev.filter((id) => id !== selectedStopForDelete.id))
       toast.success("Stop removed from trip")
     } catch (error) {
       console.error("Error removing stop:", error)
@@ -1077,9 +1071,9 @@ export default function PlannerDetailPage() {
     return gaps.length > 0 ? Math.max(...gaps) : 0
   }
 
-  const clamp = (value: number, min: number, max: number) => {
+  const clamp = useCallback((value: number, min: number, max: number) => {
     return Math.max(min, Math.min(max, value))
-  }
+  }, [])
 
   const validateFuelAfterEdit = useCallback((removedStopId: string, removedStopName: string) => {
     if (!includeFuelPlanning) return
@@ -1215,8 +1209,6 @@ export default function PlannerDetailPage() {
       try {
         const response = await fetch(`/api/trips/${tripId}${uid ? `?user_id=${uid}` : ""}`)
         const data = await response.json()
-        console.log("Fetch trip response:", data);
-
         if (!data.success || !data.trip) {
           setTripNotFound(true)
           setLoading(false)
@@ -1262,13 +1254,10 @@ export default function PlannerDetailPage() {
           // Check if this is an itinerary_days row (has day_number) or old trip_itineraries (has stops_by_day_json)
           if (typeof firstStop.day_number === "number") {
             // New format: data.stops is array of itinerary_days rows
-            console.log("Setting activeItineraryDays from itinerary_days rows:", data.stops)
             setActiveItineraryDays(data.stops as ActiveItineraryDayRow[])
           } else if (firstStop.stops_by_day_json) {
             // Old format: data.stops is array of trip_itineraries with stops_by_day_json
             const stopsByDayJson = firstStop.stops_by_day_json as Record<string, unknown>
-
-            console.log("Raw stops_by_day_json:", stopsByDayJson)
 
             // Restore persisted fuel data stored alongside stops.
             if (stopsByDayJson.fuelByDay && typeof stopsByDayJson.fuelByDay === "object") {
@@ -1343,7 +1332,6 @@ export default function PlannerDetailPage() {
           }
         }
 
-        console.log("Formatted stops:", formattedStops)
         if (formattedStops.length > 0) {
           setStops(formattedStops)
         }
@@ -1731,12 +1719,6 @@ export default function PlannerDetailPage() {
   }, [daySegments, resolvedDaySelections, getSelectedOption])
 
 
-  useEffect(() => {
-    if (loading) return
-  }, [
-    loading,
-  ])
-
   if (loading) {
     return <TripLoading />
   }
@@ -1843,7 +1825,7 @@ export default function PlannerDetailPage() {
               getSelectedOption={getSelectedOption}
               fuelStations={fuelStations}
               selectedSegmentFuelIds={selectedSegmentFuelIds}
-              setFocusedFuelStation={setFocusedFuelStation}
+              setFocusedFuelStation={() => {}}
               routeMetaSegments={routeMeta.segments}
               estimateSegmentDistance={estimateSegmentDistance}
               getSegmentDayType={getSegmentDayType}
@@ -1892,10 +1874,7 @@ export default function PlannerDetailPage() {
                   </CardContent>
                 </Card>
 
-                {showPlanningSkeleton ? (
-                  <TripDayByDayLoading targetDays={targetDays} />
-                ) : (
-                  <TripDayByDay
+                <TripDayByDay
                     stops={stops}
                     daySegments={daySegments}
                     expandedSegments={expandedSegments}
@@ -1920,7 +1899,6 @@ export default function PlannerDetailPage() {
                     setActiveSegmentIndex={setActiveSegmentIndex}
                     handleChooseFuel={handleChooseFuel}
                   />
-                )}
 
                 <TripTrackMateOverview
                   savedNarrative={tripNarrative}

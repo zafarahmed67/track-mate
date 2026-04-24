@@ -247,12 +247,6 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
       )
     }
 
-    console.log("hello stops reorder request", {
-      tripId,
-      updatesCount: updates.length,
-      updateIds: updates.map((item) => item.normalizedId),
-    })
-
     const unmatchedIds: string[] = []
 
     for (const update of updates) {
@@ -350,10 +344,6 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
         )
       }
 
-      console.log("hello stops reorder auto-inserted unmatched ids", {
-        tripId,
-        insertedIds: unmatchedIds,
-      })
     }
 
     return NextResponse.json({

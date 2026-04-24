@@ -101,7 +101,6 @@ export default function TripDayByDay({
   handleChooseFuel,
   stops
 }: TripDayByDayProps) {
-  console.log("Rendering TripDayByDay with segments:", stops)
   return (
     <>
       {daySegments.map((segment, index) => {
@@ -124,8 +123,6 @@ export default function TripDayByDay({
 
         const optionsToShow = getMergedSegmentOptions(segment, index, 12)
         const dayShownStopCount = optionsToShow.length
-        console.log("optionsToShow:", optionsToShow);
-
         const selectedFuelSuggestion = getSelectedFuelSuggestion(segment, index)
 
         const stopsByDay: Record<number, Array<{ title: string; value: string }>> = {}
@@ -149,8 +146,6 @@ export default function TripDayByDay({
           day_title: `Day ${dayIndex}`,
           options
         }))
-
-        console.log("Formatted Day Options:", dayOptions)
 
         return (
           <Card key={`day-card-${index}`} className={active ? "border-primary shadow-lg" : "border"}>

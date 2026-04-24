@@ -536,31 +536,6 @@ export function getMaxStops(distanceKm: number): number {
   return Math.floor(distanceKm / 120);
 }
 
-// 🎯 Final Target Stops
-export function getTargetStops(
-  distanceKm: number,
-  tripDays: number
-): number {
-  const base = getBaseStops(distanceKm);
-  const bonus = getDayBonus(tripDays);
-  const max = getMaxStops(distanceKm);
-
-  return Math.max(0, Math.min(base + bonus, max));
-}
-
-// 🧩 Custom Stops Needed
-export function getCustomStopsNeeded(
-  targetStops: number,
-  dbStopsCount: number
-): number {
-  return Math.max(0, targetStops - dbStopsCount);
-}
-
-// Validate Coordinates
-export function isValidCoord(value: unknown): boolean {
-  return Number.isFinite(Number(value));
-}
-
 export function isValidLat(lat: unknown): boolean {
   const n = Number(lat);
   return Number.isFinite(n) && n >= -90 && n <= 90;
