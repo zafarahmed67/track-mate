@@ -614,19 +614,7 @@ export default function PlannerDetailPage() {
     })
   }
 
-  const handleRebuildPlan = async () => {
-    setTripNarrative(null)
-    try {
-      const sorted = await sortStopsAlongRoute(stops)
-      setStops(sorted)
-      setSelectedSegmentOptionIds({})
-      setExpandedSegmentOptions(new Set())
-      toast.success("Plan rebuilt")
-    } catch (error) {
-      console.error("Error rebuilding plan:", error)
-      toast.error("Failed to rebuild plan")
-    }
-  }
+  
 
 
 
@@ -724,55 +712,6 @@ export default function PlannerDetailPage() {
     } finally {
       setDeleting(false)
     }
-  }
-
-  const sortStopsAlongRoute = async (stopsToSort: TripStop[], routeOrigin?: { lat: number; lng: number }, routeDestination?: { lat: number; lng: number }): Promise<TripStop[]> => {
-    const origin = routeOrigin || (trip ? { lat: trip.start_lat, lng: trip.start_lng } : undefined)
-    const destination = routeDestination || (trip ? { lat: trip.destination_lat, lng: trip.destination_lng } : undefined)
-
-    if (!origin || !destination || stopsToSort.length === 0) return stopsToSort
-
-    try {
-      const response = await fetch("/api/stops/sort", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          stops: stopsToSort.map(s => ({
-            id: s.id,
-            latitude: s.latitude,
-            longitude: s.longitude,
-            location_name: s.location_name,
-          })),
-          origin,
-          destination,
-          waypoints: stopsToSort.map(s => ({
-            lat: parseFloat(s.latitude ?? "0"),
-            lng: parseFloat(s.longitude ?? "0"),
-          })),
-          minSpacingKm: 50,
-        }),
-      })
-
-      const data = await response.json()
-      console.log("Sort API response:", data)
-
-      if (data.success && data.sortedStops && data.sortedStops.length > 0) {
-        const sortedMap = new Map<string, number>()
-        data.sortedStops.forEach((s: { id: string; order: number; routeDistance: number }) => {
-          sortedMap.set(s.id, s.order)
-        })
-
-        return [...stopsToSort].sort((a, b) => {
-          const orderA = sortedMap.get(a.id) ?? 999
-          const orderB = sortedMap.get(b.id) ?? 999
-          return orderA - orderB
-        })
-      }
-    } catch (error) {
-      console.error("Error sorting stops along route:", error)
-    }
-
-    return stopsToSort
   }
 
   const calculateRoute = useCallback(async (mapInstance: google.maps.Map) => {
@@ -2129,7 +2068,6 @@ export default function PlannerDetailPage() {
                   setIncludeFreeCamps={setIncludeFreeCamps}
                   includeFuelPlanning={includeFuelPlanning}
                   setIncludeFuelPlanning={setIncludeFuelPlanning}
-                  handleRebuildPlan={handleRebuildPlan}
                 />
 
                 <TripRouteHealthCard
