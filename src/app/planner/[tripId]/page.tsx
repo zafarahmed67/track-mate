@@ -83,8 +83,6 @@ export default function PlannerDetailPage() {
     fuelDistanceIntoLegKm: number | undefined
     isRemote: boolean
   }>>({})
-  const [expandedSegmentOptions, setExpandedSegmentOptions] = useState<Set<number>>(new Set())
-  const [segmentRouteOrderIds, setSegmentRouteOrderIds] = useState<Record<number, string[]>>({})
   const [excludedOptionIds, setExcludedOptionIds] = useState<Set<string>>(new Set())
   const [activeItineraryDays, setActiveItineraryDays] = useState<ActiveItineraryDayRow[]>([])
   const [avoidLongDays, setAvoidLongDays] = useState(true)
@@ -127,127 +125,22 @@ export default function PlannerDetailPage() {
     return normalizedId || `${stop.location_name.toLowerCase().trim()}|${coordKey}`
   }
 
-  const getOrderedRouteStops = (segmentIndex: number, stopsForSegment: RouteStopOption[]) => {
-    const orderedIds = segmentRouteOrderIds[segmentIndex]
-    if (!orderedIds || orderedIds.length === 0) {
-      const persistedOrder = new Map(
-        stops.map((stop, idx) => [stop.stop_id || stop.id, idx])
-      )
+  const getOrderedRouteStops = (_segmentIndex: number, stopsForSegment: RouteStopOption[]) => {
+    const persistedOrder = new Map(
+      stops.map((stop, idx) => [stop.stop_id || stop.id, idx])
+    )
 
-      return [...stopsForSegment].sort((a, b) => {
-        const aIdx = persistedOrder.get(a.id)
-        const bIdx = persistedOrder.get(b.id)
-        const aRank = aIdx === undefined ? Number.MAX_SAFE_INTEGER : aIdx
-        const bRank = bIdx === undefined ? Number.MAX_SAFE_INTEGER : bIdx
+    return [...stopsForSegment].sort((a, b) => {
+      const aIdx = persistedOrder.get(a.id)
+      const bIdx = persistedOrder.get(b.id)
+      const aRank = aIdx === undefined ? Number.MAX_SAFE_INTEGER : aIdx
+      const bRank = bIdx === undefined ? Number.MAX_SAFE_INTEGER : bIdx
 
-        if (aRank !== bRank) return aRank - bRank
+      if (aRank !== bRank) return aRank - bRank
 
-        const aDistance = a.distance_from_start_km ?? Number.MAX_SAFE_INTEGER
-        const bDistance = b.distance_from_start_km ?? Number.MAX_SAFE_INTEGER
-        return aDistance - bDistance
-      })
-    }
-
-    const byId = new Map(stopsForSegment.map((stop) => [stop.id, stop]))
-    const ordered = orderedIds
-      .map((id) => byId.get(id))
-      .filter((stop): stop is RouteStopOption => !!stop)
-
-    const missing = stopsForSegment.filter((stop) => !orderedIds.includes(stop.id))
-    return [...ordered, ...missing]
-  }
-
-  const normalizeSegmentsToDays = (segments: RouteSegment[], targetDays: number): RouteSegment[] => {
-    if (targetDays <= 0) return segments
-    if (segments.length === targetDays) return segments
-
-    // When we have fewer segments than days, do NOT pad with phantom zero-distance
-    // segments. Instead return the actual segments — they cover the real route.
-    // Phantom days caused empty day cards with no stops and 0 km distances.
-    if (segments.length < targetDays) {
-      return segments
-    }
-
-    // More segments than days: merge by grouping consecutive segments into buckets.
-    // Each bucket keeps only the overnight anchor of the last segment in the group
-    // so stops don't bleed across a wide km range into a single day card.
-    const buckets: RouteSegment[][] = Array.from({ length: targetDays }, () => [])
-    segments.forEach((segment, index) => {
-      const bucket = Math.min(targetDays - 1, Math.floor((index * targetDays) / segments.length))
-      buckets[bucket].push(segment)
-    })
-
-    return buckets.map((group) => {
-      if (group.length === 0) {
-        return {
-          startKm: 0,
-          endKm: 0,
-          verifiedStops: [],
-          otherStops: [],
-          options: [],
-          recommendedOption: null,
-          fuelSuggestions: [],
-          primaryFuelSuggestion: undefined,
-          isRemote: false,
-          fuelCritical: false,
-          degradedMode: false,
-          fuelDistanceIntoLegKm: undefined,
-          gapFromLastFuelKm: undefined,
-          gapToNextFuelKm: undefined,
-          fuelWarning: undefined,
-          overnightAnchorName: null,
-          overnightAnchorLat: null,
-          overnightAnchorLng: null,
-        }
-      }
-
-      const first = group[0]
-      const last = group[group.length - 1]
-
-      const verifiedStopsMap = new Map<string, RouteStopOption>()
-      const otherStopsMap = new Map<string, RouteStopOption>()
-      const fuelMap = new Map<string, FuelStation>()
-
-      group.forEach((seg) => {
-        seg.verifiedStops.forEach((s) => verifiedStopsMap.set(s.id, s))
-        seg.otherStops.forEach((s) => otherStopsMap.set(s.id, s))
-          ; (seg.fuelSuggestions || []).forEach((f) => fuelMap.set(`${f.name}-${f.lat}-${f.lng}`, f))
-      })
-
-      const fuelSuggestions = Array.from(fuelMap.values()).slice(0, 3)
-
-      const allOptions: RouteStopOption[] = []
-      group.forEach((seg) => {
-        if (seg.options) {
-          seg.options.forEach((opt) => {
-            if (!allOptions.some((a) => a.id === opt.id)) {
-              allOptions.push(opt)
-            }
-          })
-        }
-      })
-      const recommendedOption = group.find((seg) => seg.recommendedOption)?.recommendedOption ?? null
-
-      return {
-        startKm: first.startKm,
-        endKm: last.endKm,
-        verifiedStops: Array.from(verifiedStopsMap.values()),
-        otherStops: Array.from(otherStopsMap.values()),
-        options: allOptions.length > 0 ? allOptions : undefined,
-        recommendedOption,
-        fuelSuggestions,
-        primaryFuelSuggestion: fuelSuggestions[0],
-        isRemote: group.some((s) => s.isRemote),
-        fuelCritical: group.some((s) => s.fuelCritical),
-        degradedMode: group.some((s) => s.degradedMode),
-        fuelDistanceIntoLegKm: group.find((s) => s.fuelDistanceIntoLegKm !== undefined)?.fuelDistanceIntoLegKm,
-        gapFromLastFuelKm: group.find((s) => s.gapFromLastFuelKm !== undefined)?.gapFromLastFuelKm,
-        gapToNextFuelKm: group.find((s) => s.gapToNextFuelKm !== undefined)?.gapToNextFuelKm,
-        fuelWarning: group.find((s) => s.fuelWarning)?.fuelWarning,
-        overnightAnchorName: last.overnightAnchorName ?? null,
-        overnightAnchorLat: last.overnightAnchorLat ?? null,
-        overnightAnchorLng: last.overnightAnchorLng ?? null,
-      }
+      const aDistance = a.distance_from_start_km ?? Number.MAX_SAFE_INTEGER
+      const bDistance = b.distance_from_start_km ?? Number.MAX_SAFE_INTEGER
+      return aDistance - bDistance
     })
   }
 
@@ -1840,17 +1733,8 @@ export default function PlannerDetailPage() {
 
   useEffect(() => {
     if (loading) return
-
-    const savedStops = stops.filter((stop) => stop.verification_status !== "custom")
-    const customStops = stops.filter((stop) => stop.verification_status === "custom")
   }, [
     loading,
-    stops,
-    unifiedDayRouteData,
-    unifiedOrderedMapStops,
-    fallbackMapStopsFromPersisted,
-    effectiveMapStops,
-    routeWarnings,
   ])
 
   if (loading) {
@@ -2016,7 +1900,6 @@ export default function PlannerDetailPage() {
                     daySegments={daySegments}
                     expandedSegments={expandedSegments}
                     activeSegmentIndex={activeSegmentIndex}
-                    expandedSegmentOptions={expandedSegmentOptions}
                     getMergedSegmentOptions={getMergedSegmentOptions}
                     resolvedDaySelections={resolvedDaySelections}
                     getSelectedOption={getSelectedOption}

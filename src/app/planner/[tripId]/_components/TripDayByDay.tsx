@@ -43,7 +43,6 @@ interface TripDayByDayProps {
   daySegments: any[]
   expandedSegments: Set<number>
   activeSegmentIndex: number | null
-  expandedSegmentOptions: Set<number>
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   getMergedSegmentOptions: (segment: any, index: number, limit: number) => StopOption[]
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -81,7 +80,6 @@ export default function TripDayByDay({
   daySegments,
   expandedSegments,
   activeSegmentIndex,
-  expandedSegmentOptions,
   getMergedSegmentOptions,
   resolvedDaySelections,
   getSelectedOption,
@@ -124,9 +122,7 @@ export default function TripDayByDay({
         const expanded = expandedSegments.has(index)
         const active = activeSegmentIndex === index
 
-        const optionsToShow = expandedSegmentOptions.has(index)
-          ? getMergedSegmentOptions(segment, index, 12)
-          : getMergedSegmentOptions(segment, index, 3)
+        const optionsToShow = getMergedSegmentOptions(segment, index, 12)
         const dayShownStopCount = optionsToShow.length
         console.log("optionsToShow:", optionsToShow);
 
