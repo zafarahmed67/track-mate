@@ -241,23 +241,19 @@ export async function GET(
     }
   }
 
-  // ── 6. Persist fuelByDay into stops_by_day_json of the active itinerary ──
-  const { data: activeItinerary } = await supabaseAdmin
-    .from("trip_itineraries")
-    .select("id, stops_by_day_json")
-    .eq("trip_id", tripId)
-    .eq("status", "active")
-    .order("version", { ascending: false })
-    .limit(1)
+  // ── 6. Persist fuelByDay onto trips.route_data_json (single source of truth
+  //       for trip-level compute outputs). ──
+  const { data: tripRow } = await supabaseAdmin
+    .from("trips")
+    .select("route_data_json")
+    .eq("id", tripId)
     .maybeSingle()
 
-  if (activeItinerary?.id) {
-    const existing = (activeItinerary.stops_by_day_json ?? {}) as Record<string, unknown>
-    await supabaseAdmin
-      .from("trip_itineraries")
-      .update({ stops_by_day_json: { ...existing, fuelByDay } })
-      .eq("id", activeItinerary.id)
-  }
+  const existingRouteData = (tripRow?.route_data_json as Record<string, unknown> | null) ?? {}
+  await supabaseAdmin
+    .from("trips")
+    .update({ route_data_json: { ...existingRouteData, fuelByDay } })
+    .eq("id", tripId)
 
   return NextResponse.json({ success: true, fuelByDay })
 }

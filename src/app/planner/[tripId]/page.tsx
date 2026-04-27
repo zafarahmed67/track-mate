@@ -751,8 +751,6 @@ export default function PlannerDetailPage() {
     }
   }
 
-=======
->>>>>>> 335d9a9a1aa6afe87d609a564e4f71e490855d3c
   const sortStopsAlongRoute = async (stopsToSort: TripStop[], routeOrigin?: { lat: number; lng: number }, routeDestination?: { lat: number; lng: number }): Promise<TripStop[]> => {
     const origin = routeOrigin || (trip ? { lat: trip.start_lat, lng: trip.start_lng } : undefined)
     const destination = routeDestination || (trip ? { lat: trip.destination_lat, lng: trip.destination_lng } : undefined)

@@ -1,4 +1,8 @@
 import { NextRequest, NextResponse } from "next/server"
+import { findNearby as findNearbyUnverified, upsertMany as upsertUnverified } from "@/lib/unverifiedStopsCache"
+import { env } from "@/config/env.config"
+
+const CACHEABLE_TYPES = new Set(["campground", "rv_park"])
 
 export async function GET(req: NextRequest) {
   try {
@@ -37,13 +41,37 @@ export async function GET(req: NextRequest) {
     }> = []
 
     for (const type of typesArray) {
-      const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=${radius}&type=${type}&key=${apiKey}`
+      // Cache-first for camp/rv types — these are the durable, reusable stops
+      // we already track globally. Other types (fuel, restaurants) are too
+      // volatile to cache.
+      if (CACHEABLE_TYPES.has(type)) {
+        const cached = await findNearbyUnverified(Number(lat), Number(lng), {
+          bboxDeg: env.UNVERIFIED_CACHE_BBOX_DEG / 4,
+          placeTypes: [type],
+        })
+        if (cached.length >= 5) {
+          for (const row of cached.slice(0, 10)) {
+            allPlaces.push({
+              name: row.location_name,
+              lat: row.latitude,
+              lng: row.longitude,
+              address: row.address ?? "",
+              type: row.place_type ?? type,
+              rating: row.rating ?? undefined,
+              placeId: row.place_id,
+            })
+          }
+          continue
+        }
+      }
 
+      const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=${radius}&type=${type}&key=${apiKey}`
       const response = await fetch(url)
       const data = await response.json()
 
       if (data.results) {
-        for (const place of data.results.slice(0, 10)) {
+        const sliced = data.results.slice(0, 10)
+        for (const place of sliced) {
           allPlaces.push({
             name: place.name,
             lat: place.geometry.location.lat,
@@ -54,6 +82,9 @@ export async function GET(req: NextRequest) {
             isOpenNow: place.opening_hours?.open_now,
             placeId: place.place_id,
           })
+        }
+        if (CACHEABLE_TYPES.has(type)) {
+          await upsertUnverified(sliced, { placeType: type })
         }
       }
     }

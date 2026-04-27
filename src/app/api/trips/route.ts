@@ -7,6 +7,7 @@ import { calculateDistance } from '@/utils/calculateDistance';
 import { generateDBStop } from '@/utils/generateDBStop';
 import { generateCustomStop } from '@/utils/generateCustomStop';
 import { organizeStopsByDay } from '@/utils/organizeStopsByDay';
+import { PlacesBudget } from '@/lib/placesBudget';
 
 interface UserMetadata {
   defaults?: {
@@ -338,6 +339,8 @@ async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
     console.log('[2/4] Saved verified stops', data);
   }
 
+  const placesBudget = new PlacesBudget({ tripDurationDays: suggestedDays });
+
   const {
     success: customSuccess,
     stopsGenerated = 0,
@@ -351,6 +354,9 @@ async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
     job.destLng,
     job.tripId,
     suggestedDays,
+    [],
+    0,
+    placesBudget,
   );
 
   if (customError) {
@@ -439,9 +445,14 @@ async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
     },
     encodedPolyline,
     process.env.NEXT_PUBLIC_GMAPS_API_KEY,
+    placesBudget,
   );
 
-  // Generate and save narrative into the v1 itinerary record created above
+  console.log('[places-budget] trip', job.tripId, placesBudget.summary());
+
+  // Generate and save narrative onto the v1 itinerary record created above.
+  // Narrative is the source of truth in trip_itineraries.itinerary_json — we
+  // intentionally do NOT duplicate it into trips.route_data_json.
   try {
     const { narrative } = await generateNarrativeForTrip(job.tripId);
 
@@ -460,20 +471,6 @@ async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
         .update({ itinerary_json: narrative })
         .eq('id', activeItinerary.id);
     }
-
-    // Also patch route_data_json for fast loading
-    const { data: tripDataRow } = await supabaseAdmin
-      .from('trips')
-      .select('route_data_json')
-      .eq('id', job.tripId)
-      .single();
-
-    const existingJson =
-      (tripDataRow?.route_data_json as Record<string, unknown>) ?? {};
-    await supabaseAdmin
-      .from('trips')
-      .update({ route_data_json: { ...existingJson, narrative } })
-      .eq('id', job.tripId);
   } catch (err) {
     console.error(
       '[narrative] Failed to generate initial narrative for trip',

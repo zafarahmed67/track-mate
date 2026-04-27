@@ -498,69 +498,72 @@ export async function POST(req: NextRequest) {
       googleRelatedFetched = googleRelatedStops.length
 
       if (googleRelatedStops.length > 0) {
-        const { data: existingCustom, error: existingCustomError } = await supabaseAdmin
-          .from("custom_stops")
-          .select("location_name, latitude, longitude")
-          .eq("trip_id", tripId)
+        const routeDistanceKm = Math.max(directDistance, filtered[filtered.length - 1]?.distance_from_start_km || 0)
+        const plannedDays = Math.max(1, Number(tripPreferences?.trip_duration_days || 14))
 
-        if (existingCustomError) {
-          console.error("❌ Error fetching existing custom stops:", existingCustomError)
-        } else {
-          const existingKeys = new Set(
-            (existingCustom || []).map((row) => {
-              const name = String(row.location_name || "").trim().toLowerCase()
-              const lat = Number(row.latitude || 0).toFixed(4)
-              const lng = Number(row.longitude || 0).toFixed(4)
-              return `${name}::${lat}::${lng}`
-            })
-          )
+        const cacheRows = googleRelatedStops
+          .map((stop) => {
+            const lat = Number(stop.latitude || 0)
+            const lng = Number(stop.longitude || 0)
+            if (Number.isNaN(lat) || Number.isNaN(lng) || !stop.name) return null
+            const placeId = `nearby:${stop.name.trim().toLowerCase()}|${lat.toFixed(5)}|${lng.toFixed(5)}`
+            return {
+              place_id: placeId,
+              location_name: stop.name,
+              latitude: lat,
+              longitude: lng,
+              address: stop.address || null,
+              place_type: `google_${stop.place_type}`,
+              source: "google_places",
+              first_seen_trip_id: tripId,
+            }
+          })
+          .filter((r): r is NonNullable<typeof r> => r !== null)
 
-          const routeDistanceKm = Math.max(directDistance, filtered[filtered.length - 1]?.distance_from_start_km || 0)
-          const plannedDays = Math.max(1, Number(tripPreferences?.trip_duration_days || 14))
-          const rowsToInsert = googleRelatedStops
-            .map((stop) => {
-              const lat = Number(stop.latitude || 0)
-              const lng = Number(stop.longitude || 0)
-              if (Number.isNaN(lat) || Number.isNaN(lng) || !stop.name) return null
+        if (cacheRows.length > 0) {
+          const { data: cached, error: cacheErr } = await supabaseAdmin
+            .from("unverified_stops")
+            .upsert(cacheRows, { onConflict: "place_id" })
+            .select("id, place_id, latitude, longitude")
 
-              const key = `${stop.name.trim().toLowerCase()}::${lat.toFixed(4)}::${lng.toFixed(4)}`
-              if (existingKeys.has(key)) return null
-              existingKeys.add(key)
-
-              const progressDistance = calculateDistance(startLat, startLng, lat, lng)
-              const progress = routeDistanceKm > 0 ? Math.min(0.999, Math.max(0, progressDistance / routeDistanceKm)) : 0
-              const dayIndex = Math.min(plannedDays - 1, Math.max(0, Math.floor(progress * plannedDays)))
-
+          if (cacheErr) {
+            console.error("❌ Error upserting unverified_stops:", cacheErr)
+          } else if (cached && cached.length > 0) {
+            const links = cached.map((row) => {
+              const progressDistance = calculateDistance(
+                startLat,
+                startLng,
+                Number(row.latitude),
+                Number(row.longitude),
+              )
+              const progress = routeDistanceKm > 0
+                ? Math.min(0.999, Math.max(0, progressDistance / routeDistanceKm))
+                : 0
+              const dayIndex = Math.min(
+                plannedDays - 1,
+                Math.max(0, Math.floor(progress * plannedDays)),
+              )
               return {
                 trip_id: tripId,
-                location_name: stop.name,
-                latitude: stop.latitude,
-                longitude: stop.longitude,
-                address: stop.address,
-                place_type: `google_${stop.place_type}`,
+                stop_id: null,
+                unverified_stop_id: row.id,
+                source_type: "unverified",
                 day_index: dayIndex,
+                distance_from_start_km: progressDistance,
               }
             })
-            .filter((row): row is {
-              trip_id: string
-              location_name: string
-              latitude: string
-              longitude: string
-              address: string
-              place_type: string
-              day_index: number
-            } => row !== null)
 
-          if (rowsToInsert.length > 0) {
-            const { error: customInsertError } = await supabaseAdmin
-              .from("custom_stops")
-              .insert(rowsToInsert)
-
-            if (customInsertError) {
-              console.error("❌ Error inserting Google related custom stops:", customInsertError)
+            const { error: linkErr } = await supabaseAdmin
+              .from("trip_candidate_stops")
+              .upsert(links, {
+                onConflict: "trip_id,unverified_stop_id",
+                ignoreDuplicates: true,
+              })
+            if (linkErr) {
+              console.error("❌ Error linking trip_candidate_stops:", linkErr)
             } else {
-              googleRelatedInserted = rowsToInsert.length
-              console.log(`✅ Inserted ${googleRelatedInserted} Google related stops into custom_stops`)
+              googleRelatedInserted = links.length
+              console.log(`✅ Linked ${googleRelatedInserted} unverified_stops to trip ${tripId}`)
             }
           }
         }
