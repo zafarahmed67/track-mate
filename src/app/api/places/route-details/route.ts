@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
+import { logPlacesCall } from "@/lib/placesApiLog"
 
 interface GoogleDirectionsRoute {
   summary?: string
@@ -47,6 +48,7 @@ export async function GET(req: NextRequest) {
     const waypoints = searchParams.get("waypoints")
     const rigType = searchParams.get("rigType")
     const avoidGravelRoads = searchParams.get("avoidGravelRoads") === "true"
+    const tripId = searchParams.get("tripId")
 
     if (!origin || !destination) {
       return NextResponse.json(
@@ -88,6 +90,11 @@ export async function GET(req: NextRequest) {
 
     const response = await fetch(url)
     const data = await response.json()
+    logPlacesCall({
+      tripId,
+      endpoint: "directions",
+      source: "places/route-details",
+    })
 
     if (data.status !== "OK") {
       return NextResponse.json(

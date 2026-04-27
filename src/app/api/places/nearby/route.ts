@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { findNearby as findNearbyUnverified, upsertMany as upsertUnverified } from "@/lib/unverifiedStopsCache"
+import { logPlacesCall } from "@/lib/placesApiLog"
 import { env } from "@/config/env.config"
-
-const CACHEABLE_TYPES = new Set(["campground", "rv_park"])
 
 export async function GET(req: NextRequest) {
   try {
@@ -11,6 +10,7 @@ export async function GET(req: NextRequest) {
     const lng = searchParams.get("lng")
     const types = searchParams.get("types") || "gas_station,restaurant,cafe,car_wash,car_repair,pharmacy,supermarket,campground,rv_park"
     const radius = searchParams.get("radius") || "10000"
+    const tripId = searchParams.get("tripId")
 
     if (!lat || !lng) {
       return NextResponse.json(
@@ -41,33 +41,48 @@ export async function GET(req: NextRequest) {
     }> = []
 
     for (const type of typesArray) {
-      // Cache-first for camp/rv types — these are the durable, reusable stops
-      // we already track globally. Other types (fuel, restaurants) are too
-      // volatile to cache.
-      if (CACHEABLE_TYPES.has(type)) {
-        const cached = await findNearbyUnverified(Number(lat), Number(lng), {
-          bboxDeg: env.UNVERIFIED_CACHE_BBOX_DEG / 4,
-          placeTypes: [type],
-        })
-        if (cached.length >= 5) {
-          for (const row of cached.slice(0, 10)) {
-            allPlaces.push({
-              name: row.location_name,
-              lat: row.latitude,
-              lng: row.longitude,
-              address: row.address ?? "",
-              type: row.place_type ?? type,
-              rating: row.rating ?? undefined,
-              placeId: row.place_id,
-            })
-          }
-          continue
+      // Cache-first across all types. The cache is keyed by place_id and
+      // partitioned by place_type, so a restaurant lookup never picks up a
+      // gas_station. We accept slight staleness on rating/hours in exchange
+      // for elimination of repeat Places calls.
+      const cached = await findNearbyUnverified(Number(lat), Number(lng), {
+        bboxDeg: env.UNVERIFIED_CACHE_BBOX_DEG / 4,
+        placeTypes: [type],
+      })
+      if (cached.length >= 5) {
+        for (const row of cached.slice(0, 10)) {
+          allPlaces.push({
+            name: row.location_name,
+            lat: row.latitude,
+            lng: row.longitude,
+            address: row.address ?? "",
+            type: row.place_type ?? type,
+            rating: row.rating ?? undefined,
+            placeId: row.place_id,
+          })
         }
+        logPlacesCall({
+          tripId,
+          endpoint: "nearbysearch",
+          placeType: type,
+          cacheOutcome: "skipped",
+          resultCount: cached.length,
+          source: "places/nearby",
+        })
+        continue
       }
 
       const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=${radius}&type=${type}&key=${apiKey}`
       const response = await fetch(url)
       const data = await response.json()
+      logPlacesCall({
+        tripId,
+        endpoint: "nearbysearch",
+        placeType: type,
+        cacheOutcome: "miss",
+        resultCount: Array.isArray(data?.results) ? data.results.length : 0,
+        source: "places/nearby",
+      })
 
       if (data.results) {
         const sliced = data.results.slice(0, 10)
@@ -83,9 +98,7 @@ export async function GET(req: NextRequest) {
             placeId: place.place_id,
           })
         }
-        if (CACHEABLE_TYPES.has(type)) {
-          await upsertUnverified(sliced, { placeType: type })
-        }
+        await upsertUnverified(sliced, { placeType: type })
       }
     }
 

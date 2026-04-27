@@ -28,6 +28,12 @@ export interface PlacesNearbyResult {
   user_ratings_total?: number;
 }
 
+/**
+ * Default exclusion list for overnight-stop discovery: filters paid lodging,
+ * roadside facilities, and fuel/service stations that aren't viable overnight
+ * stays. Callers caching non-overnight categories (e.g. fuel-station lookups)
+ * should pass `applyOvernightExclusion: false` to upsertMany.
+ */
 const NAME_EXCLUDE = /hotel|motel|hostel|backpacker|resort|inn\b|b&b|bed and breakfast|airbnb|toilet|toilets|amenities|amenity block|public toilet|car park|parking area|day use area|service station|fuel station|petrol station|\bservo\b|\bgas station\b/i;
 
 /** Bounding-box lookup near a probe point. */
@@ -88,9 +94,15 @@ export async function findByPlaceIds(
  */
 export async function upsertMany(
   places: PlacesNearbyResult[],
-  opts: { firstSeenTripId?: string | null; placeType?: string } = {},
+  opts: {
+    firstSeenTripId?: string | null;
+    placeType?: string;
+    /** Default true. Set false when caching non-overnight categories (fuel, etc.). */
+    applyOvernightExclusion?: boolean;
+  } = {},
 ): Promise<UnverifiedStopRow[]> {
   if (!supabaseAdmin || places.length === 0) return [];
+  const applyExclusion = opts.applyOvernightExclusion ?? true;
 
   const rows = places
     .map((p) => {
@@ -100,7 +112,7 @@ export async function upsertMany(
       const lng = Number(p.geometry?.location?.lng);
       if (!placeId || !name) return null;
       if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
-      if (NAME_EXCLUDE.test(name)) return null;
+      if (applyExclusion && NAME_EXCLUDE.test(name)) return null;
       return {
         place_id: placeId,
         location_name: name,

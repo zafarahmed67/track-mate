@@ -4,6 +4,13 @@ import { applySuitabilityFilter } from "@/lib/stopSuitabilityFilter"
 import type { TripPreferences } from "@/lib/stopSuitabilityFilter"
 import { env } from "@/config/env.config"
 import { getCorridorsFromStops, calculateDistance as calcDistance } from "@/lib/corridorUtils"
+import {
+  findNearby as findNearbyUnverified,
+  upsertMany as upsertUnverified,
+} from "@/lib/unverifiedStopsCache"
+import { logPlacesCall } from "@/lib/placesApiLog"
+
+const RELATED_CACHE_SUFFICIENT_PER_PROBE = 3
 
 // Maximum perpendicular distance a stop can be from the actual route polyline (km)
 const ROUTE_PROXIMITY_THRESHOLD_KM = 30
@@ -113,7 +120,8 @@ async function fetchRoutePolylineWithPreferences(
   startLng: number,
   destLat: number,
   destLng: number,
-  preferences?: Pick<TripPreferences, "rig_type" | "avoid_gravel_roads"> | null
+  preferences?: Pick<TripPreferences, "rig_type" | "avoid_gravel_roads"> | null,
+  tripId?: string | null
 ): Promise<Array<{ lat: number; lng: number }> | null> {
   const apiKey = process.env.NEXT_PUBLIC_GMAPS_API_KEY
   if (!apiKey) return null
@@ -129,6 +137,7 @@ async function fetchRoutePolylineWithPreferences(
       avoidGravelRoads: preferences?.avoid_gravel_roads,
     })
     const res = await fetch(url)
+    logPlacesCall({ tripId, endpoint: "directions", source: "stops/nearby" })
     const data = await res.json()
 
     if (data.status !== "OK" || !data.routes?.length) {
@@ -259,7 +268,7 @@ async function tripCandidateStops(stopsToInsert: TripCandidateStopInsert[]): Pro
   }
 }
 
-async function fetchGoogleRelatedStops(startLat: number, startLng: number, destLat: number, destLng: number): Promise<GoogleRelatedStop[]> {
+async function fetchGoogleRelatedStops(startLat: number, startLng: number, destLat: number, destLng: number, tripId?: string | null): Promise<GoogleRelatedStop[]> {
   const apiKey = process.env.NEXT_PUBLIC_GMAPS_API_KEY
   if (!apiKey) return []
 
@@ -272,10 +281,49 @@ async function fetchGoogleRelatedStops(startLat: number, startLng: number, destL
     const point = interpolatePoint(startLat, startLng, destLat, destLng, fraction)
 
     for (const type of searchTypes) {
+      // Cache-first: skip Places when we already have enough of this type near
+      // the probe point. Skips campground/gas_station/supermarket calls on
+      // repeat trips along the same corridor.
+      const cached = await findNearbyUnverified(point.lat, point.lng, {
+        bboxDeg: env.UNVERIFIED_CACHE_BBOX_DEG / 4,
+        placeTypes: [type],
+      })
+      if (cached.length >= RELATED_CACHE_SUFFICIENT_PER_PROBE) {
+        for (const row of cached.slice(0, 5)) {
+          const key = `${row.location_name.toLowerCase()}::${row.latitude.toFixed(4)}::${row.longitude.toFixed(4)}`
+          if (dedupe.has(key)) continue
+          dedupe.add(key)
+          results.push({
+            name: row.location_name,
+            latitude: String(row.latitude),
+            longitude: String(row.longitude),
+            address: row.address ?? "",
+            place_type: row.place_type ?? type,
+          })
+        }
+        logPlacesCall({
+          tripId,
+          endpoint: "nearbysearch",
+          placeType: type,
+          cacheOutcome: "skipped",
+          resultCount: cached.length,
+          source: "stops/nearby",
+        })
+        continue
+      }
+
       try {
         const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${point.lat},${point.lng}&radius=${env.NEARBY_STOPS_SEARCH_RADIUS}&type=${type}&key=${apiKey}`
         const response = await fetch(url)
         const data = await response.json()
+        logPlacesCall({
+          tripId,
+          endpoint: "nearbysearch",
+          placeType: type,
+          cacheOutcome: "miss",
+          resultCount: Array.isArray(data?.results) ? data.results.length : 0,
+          source: "stops/nearby",
+        })
 
         const places = Array.isArray(data?.results) ? data.results : []
         for (const place of places.slice(0, 5) as Array<{
@@ -300,6 +348,14 @@ async function fetchGoogleRelatedStops(startLat: number, startLng: number, destL
             longitude: String(lng),
             address: place.vicinity || "",
             place_type: placeType,
+          })
+        }
+
+        // Populate the cache for the next request along this corridor.
+        if (places.length > 0) {
+          await upsertUnverified(places, {
+            placeType: type,
+            applyOvernightExclusion: type === "campground",
           })
         }
       } catch (error) {
@@ -404,7 +460,7 @@ export async function POST(req: NextRequest) {
     console.log(`\n📋 Fetched ${stops.length} stops, filtering by route proximity...`)
 
     // Attempt to get the actual route polyline from Google Directions for precise proximity filtering
-    const polyline = await fetchRoutePolylineWithPreferences(startLat, startLng, destLat, destLng, tripPreferences)
+    const polyline = await fetchRoutePolylineWithPreferences(startLat, startLng, destLat, destLng, tripPreferences, tripId)
     const usingPolyline = polyline !== null && polyline.length > 2
     console.log(usingPolyline
       ? `🗺️  Using actual route polyline (${polyline!.length} points) — threshold: ${ROUTE_PROXIMITY_THRESHOLD_KM}km`
@@ -494,7 +550,7 @@ export async function POST(req: NextRequest) {
         console.log(`✅ Insert succeeded: ${stopsToInsert.length} candidate stops`)
       }
 
-      const googleRelatedStops = await fetchGoogleRelatedStops(startLat, startLng, destLat, destLng)
+      const googleRelatedStops = await fetchGoogleRelatedStops(startLat, startLng, destLat, destLng, tripId)
       googleRelatedFetched = googleRelatedStops.length
 
       if (googleRelatedStops.length > 0) {

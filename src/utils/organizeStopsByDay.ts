@@ -9,7 +9,8 @@ import {
   PolylinePoint,
 } from "@/lib/routePolyline"
 import { env } from "@/config/env.config"
-import { PlacesBudget, buildProbeKey } from "@/lib/placesBudget"
+import { PlacesBudget, buildProbeKey, buildPointKey } from "@/lib/placesBudget"
+import { logPlacesCall } from "@/lib/placesApiLog"
 import {
   findNearby as findNearbyUnverified,
   upsertMany as upsertUnverified,
@@ -76,13 +77,20 @@ async function searchPlacesForDay(
     collected.push(row)
   }
 
+  // If the cache fully satisfied this day, mark the point so the budget summary
+  // reflects skipped probes (UC3 observability) and we never call Places below.
+  if (collected.length >= needed) {
+    budget.markPointSatisfied(buildPointKey(lat, lng))
+    return collected
+  }
+
   // 2) Places fallback (budgeted).
   for (const search of OVERNIGHT_SEARCHES) {
     if (collected.length >= needed) break
     if (budget.exhausted) break
 
     const probeKey = buildProbeKey(lat, lng, radiusMetres, search.type, search.keyword)
-    if (!budget.tryConsume(probeKey)) continue
+    if (!budget.tryConsume(probeKey, "nearbysearch")) continue
 
     try {
       const params = new URLSearchParams({
@@ -98,6 +106,14 @@ async function searchPlacesForDay(
       )
       const data = await res.json()
       budget.noteCacheMiss()
+      logPlacesCall({
+        tripId,
+        endpoint: "nearbysearch",
+        placeType: search.type,
+        resultCount: Array.isArray(data?.results) ? data.results.length : 0,
+        cacheOutcome: "miss",
+        source: "organizeStopsByDay",
+      })
       const results: PlacesNearbyResult[] = Array.isArray(data?.results) ? data.results : []
       const fresh = results
         .slice(0, 15)

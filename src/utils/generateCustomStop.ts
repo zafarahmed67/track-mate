@@ -7,7 +7,8 @@ import {
 } from "@/lib/routePolyline"
 import { calculateDistance } from "./calculateDistance"
 import { env } from "@/config/env.config"
-import { PlacesBudget, buildProbeKey } from "@/lib/placesBudget"
+import { PlacesBudget, buildProbeKey, buildPointKey } from "@/lib/placesBudget"
+import { logPlacesCall } from "@/lib/placesApiLog"
 import {
   findNearby as findNearbyUnverified,
   upsertMany as upsertUnverified,
@@ -127,6 +128,12 @@ export async function generateCustomStop(
         key: apiKey,
       })
       const dirRes = await fetch(`https://maps.googleapis.com/maps/api/directions/json?${dirParams}`)
+      placesBudget.recordCall("directions")
+      logPlacesCall({
+        tripId,
+        endpoint: "directions",
+        source: "generateCustomStop",
+      })
       const dirData = await dirRes.json()
       if (dirData.status === "OK" && dirData.routes?.length) {
         const encoded = dirData.routes[0]?.overview_polyline?.points
@@ -191,6 +198,15 @@ export async function generateCustomStop(
     const candidates: Candidate[] = []
     let totalFetched = 0
 
+    // Early target: lets the probe loop bail once we have enough candidates
+    // even before the per-day balancing pass below recomputes targetCustomStops.
+    const earlyRouteDistanceKm = totalRouteKm > 0 ? totalRouteKm : directDistanceKmForProbes
+    const earlyTargetCount = requestedCustomStops > 0
+      ? requestedCustomStops
+      : Math.max(2, Math.min(10, Math.round(earlyRouteDistanceKm / 180)))
+    // Headroom factor so we discover enough alternatives for the spacing pass.
+    const earlyCandidateCeiling = earlyTargetCount * 4
+
     /** Process a list of cached/fetched results into Candidate rows. */
     const ingestCacheRows = (rows: UnverifiedStopRow[]) => {
       for (const row of rows) {
@@ -233,18 +249,30 @@ export async function generateCustomStop(
 
     // Per probe: cache-first, then Places (budgeted).
     for (const point of probePoints) {
+      // Global early-exit: cache already supplied enough candidates for the trip.
+      if (candidates.length >= earlyCandidateCeiling) break
+
       // 1) cache check (no API).
+      const cachedBefore = candidates.length
       const cached = await findNearbyUnverified(point.lat, point.lng, {
         bboxDeg: env.UNVERIFIED_CACHE_BBOX_DEG / 2,
       })
       if (cached.length > 0) placesBudget.noteCacheHit()
       ingestCacheRows(cached)
+      const cacheUsefulHere = candidates.length - cachedBefore
+
+      // If the cache supplied a healthy haul near this probe point, skip Places
+      // probes here entirely. This is what makes UC3 land at ~0 API calls.
+      if (cacheUsefulHere >= env.PROBE_CACHE_SUFFICIENT) {
+        placesBudget.markPointSatisfied(buildPointKey(point.lat, point.lng))
+        continue
+      }
 
       for (const search of overnightSearches) {
         if (placesBudget.exhausted) break
 
         const probeKey = buildProbeKey(point.lat, point.lng, search.radius, search.type, search.keyword)
-        if (!placesBudget.tryConsume(probeKey)) continue
+        if (!placesBudget.tryConsume(probeKey, "nearbysearch")) continue
 
         try {
           const params = new URLSearchParams({
@@ -260,6 +288,14 @@ export async function generateCustomStop(
           )
           const data = await response.json()
           placesBudget.noteCacheMiss()
+          logPlacesCall({
+            tripId,
+            endpoint: "nearbysearch",
+            placeType: search.type,
+            resultCount: Array.isArray(data?.results) ? data.results.length : 0,
+            cacheOutcome: "miss",
+            source: "generateCustomStop",
+          })
 
           const results: PlacesNearbyResult[] = Array.isArray(data?.results) ? data.results : []
           totalFetched += results.length

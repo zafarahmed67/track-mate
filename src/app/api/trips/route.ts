@@ -8,6 +8,8 @@ import { generateDBStop } from '@/utils/generateDBStop';
 import { generateCustomStop } from '@/utils/generateCustomStop';
 import { organizeStopsByDay } from '@/utils/organizeStopsByDay';
 import { PlacesBudget } from '@/lib/placesBudget';
+import { logPlacesCall } from '@/lib/placesApiLog';
+import { env } from '@/config/env.config';
 
 interface UserMetadata {
   defaults?: {
@@ -133,6 +135,7 @@ async function geocodeWithAustraliaBias(
     const timeoutId = setTimeout(() => controller.abort(), 8000);
     const response = await fetch(url, { signal: controller.signal });
     clearTimeout(timeoutId);
+    logPlacesCall({ endpoint: 'geocode', source: 'geocodeWithAustraliaBias' });
     if (!response.ok) {
       console.warn('[geocode] HTTP error, trying fallback');
       return geocodeWithNominatim(address);
@@ -339,7 +342,15 @@ async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
     console.log('[2/4] Saved verified stops', data);
   }
 
-  const placesBudget = new PlacesBudget({ tripDurationDays: suggestedDays });
+  // Gap-aware budget: only spend Places calls for the stops we still need
+  // beyond what the verified pool already supplied. A repeat trip with a
+  // healthy cache effectively gets a tiny budget, matching UC2.
+  const stopsTarget = suggestedDays * env.STOPS_PER_DAY_TARGET;
+  const gapToFill = Math.max(0, stopsTarget - generatedStopsCount);
+  const placesBudget = new PlacesBudget({
+    tripDurationDays: suggestedDays,
+    gapToFill,
+  });
 
   const {
     success: customSuccess,
@@ -488,14 +499,23 @@ async function processTripGenerationJob(job: TripGenerationJob): Promise<void> {
   const existingRouteDataJson =
     (tripRouteDataRow?.route_data_json as Record<string, unknown>) ?? {};
 
+  // Persist the Places budget summary so the dashboard can show users (and us)
+  // exactly how many API calls this trip cost vs how much the cache covered.
+  const placesBudgetSummary = {
+    ...placesBudget.summary(),
+    capturedAt: new Date().toISOString(),
+  };
+
   await supabaseAdmin
     .from('trips')
     .update({
       status: 'completed',
       trip_duration_days: finalTripDays,
-      route_data_json: daysAdjustment
-        ? { ...existingRouteDataJson, daysAdjustment }
-        : existingRouteDataJson,
+      route_data_json: {
+        ...existingRouteDataJson,
+        ...(daysAdjustment ? { daysAdjustment } : {}),
+        placesBudget: placesBudgetSummary,
+      },
     })
     .eq('id', job.tripId);
 

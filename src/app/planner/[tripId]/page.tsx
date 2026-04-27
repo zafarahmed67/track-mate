@@ -49,6 +49,11 @@ export default function PlannerDetailPage() {
   const [tripNotFound, setTripNotFound] = useState(false)
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null)
   const [trip, setTrip] = useState<TripData | null>(null)
+  const [placesApiLog, setPlacesApiLog] = useState<{
+    total: number
+    byEndpoint: Record<string, number>
+    byOutcome: Record<string, number>
+  } | null>(null)
   const [stops, setStops] = useState<TripStop[]>([])
   const [selectedStops, setSelectedStops] = useState<string[]>([])
   const [directions, setDirections] = useState<google.maps.DirectionsResult | null>(null)
@@ -272,6 +277,37 @@ export default function PlannerDetailPage() {
   }, [trip?.route_data_json])
 
   const effectiveDaysAdjustment = routeMeta.daysAdjustment ?? persistedDaysAdjustment
+
+  const placesBudgetSummary = useMemo(() => {
+    const routeJson = trip?.route_data_json
+    if (!routeJson || typeof routeJson !== "object") return null
+    const raw = (routeJson as { placesBudget?: Record<string, unknown> }).placesBudget
+    if (!raw || typeof raw !== "object") return null
+    const callsMade = Number(raw.callsMade)
+    const maxCalls = Number(raw.maxCalls)
+    if (!Number.isFinite(callsMade) || !Number.isFinite(maxCalls)) return null
+    const rawByEndpoint = raw.byEndpoint
+    const byEndpoint: Record<string, number> = {}
+    if (rawByEndpoint && typeof rawByEndpoint === "object") {
+      for (const [k, v] of Object.entries(rawByEndpoint as Record<string, unknown>)) {
+        const n = Number(v)
+        if (Number.isFinite(n)) byEndpoint[k] = n
+      }
+    }
+    return {
+      callsMade,
+      maxCalls,
+      cacheHits: Number(raw.cacheHits) || 0,
+      cacheMisses: Number(raw.cacheMisses) || 0,
+      pointsSatisfiedByCache: Number(raw.pointsSatisfiedByCache) || 0,
+      gapToFill:
+        raw.gapToFill === null || raw.gapToFill === undefined
+          ? null
+          : Number(raw.gapToFill),
+      byEndpoint,
+      capturedAt: typeof raw.capturedAt === "string" ? raw.capturedAt : undefined,
+    }
+  }, [trip?.route_data_json])
   const adjustedDays = effectiveDaysAdjustment?.adjustedToDays
   const targetDays = adjustedDays ?? requestedDays
 
@@ -1417,6 +1453,9 @@ export default function PlannerDetailPage() {
         }
 
         setTrip(data.trip)
+        if (data.placesApiLog && typeof data.placesApiLog === "object") {
+          setPlacesApiLog(data.placesApiLog)
+        }
 
         // Populate routeMeta with distance and estimated duration from trip
         if (data.trip && typeof data.trip.total_distance_km === "number") {
@@ -1980,6 +2019,8 @@ export default function PlannerDetailPage() {
               />
               <TripPlanningAlerts
                 routeWarnings={routeWarnings}
+                placesBudget={placesBudgetSummary}
+                placesApiLog={placesApiLog}
               />
             </div>
 

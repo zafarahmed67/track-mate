@@ -1,5 +1,13 @@
 import { NextRequest, NextResponse } from "next/server"
 import { env } from "@/config/env.config"
+import {
+  findNearby as findNearbyUnverified,
+  upsertMany as upsertUnverified,
+} from "@/lib/unverifiedStopsCache"
+import { logPlacesCall } from "@/lib/placesApiLog"
+
+const FUEL_PLACE_TYPE = "gas_station"
+const CACHE_SUFFICIENT_PER_POINT = 3
 
 interface GoogleDirectionsRoute {
   summary?: string
@@ -50,6 +58,7 @@ export async function GET(req: NextRequest) {
     const destination = searchParams.get("destination")
     const rigType = searchParams.get("rigType")
     const avoidGravelRoads = searchParams.get("avoidGravelRoads") === "true"
+    const tripId = searchParams.get("tripId")
 
     if (!origin || !destination) {
       return NextResponse.json(
@@ -87,6 +96,11 @@ export async function GET(req: NextRequest) {
     
     const directionsResponse = await fetch(directionsUrl)
     const directionsData = await directionsResponse.json()
+    logPlacesCall({
+      tripId,
+      endpoint: "directions",
+      source: "places/fuel-along-route",
+    })
 
     if (!directionsData.routes || directionsData.routes.length === 0) {
       return NextResponse.json(
@@ -117,27 +131,72 @@ export async function GET(req: NextRequest) {
     const samplePoints = Math.min(coordinates.length, 15)
     const step = Math.max(1, Math.floor(coordinates.length / samplePoints))
 
+    const distanceToRouteKm = (lat: number, lng: number): number => {
+      let minDistance = Infinity
+      for (const coord of coordinates) {
+        const distance =
+          Math.sqrt(Math.pow(coord.lat - lat, 2) + Math.pow(coord.lng - lng, 2)) *
+          111
+        minDistance = Math.min(minDistance, distance)
+      }
+      return minDistance
+    }
+
     for (let i = 0; i < coordinates.length; i += step) {
       const point = coordinates[i]
-      
-      const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${point.lat},${point.lng}&radius=${env.FUEL_ALONG_ROUTE_RADIUS}&type=gas_station&key=${apiKey}`
+
+      // Cache-first per probe point: this route iterates many points per
+      // request, so the savings from skipping Places when the cache is hot
+      // are large.
+      const cached = await findNearbyUnverified(point.lat, point.lng, {
+        bboxDeg: env.UNVERIFIED_CACHE_BBOX_DEG / 4,
+        placeTypes: [FUEL_PLACE_TYPE],
+      })
+      if (cached.length >= CACHE_SUFFICIENT_PER_POINT) {
+        for (const row of cached) {
+          const distance = distanceToRouteKm(row.latitude, row.longitude)
+          if (distance <= 10) {
+            fuelStations.push({
+              name: row.location_name,
+              lat: row.latitude,
+              lng: row.longitude,
+              address: row.address ?? "",
+              isOpenNow: false,
+              rating: row.rating ?? 0,
+              distanceToRoute: Math.round(distance * 10) / 10,
+            })
+          }
+        }
+        logPlacesCall({
+          tripId,
+          endpoint: "nearbysearch",
+          placeType: FUEL_PLACE_TYPE,
+          cacheOutcome: "skipped",
+          resultCount: cached.length,
+          source: "places/fuel-along-route",
+        })
+        continue
+      }
+
+      const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${point.lat},${point.lng}&radius=${env.FUEL_ALONG_ROUTE_RADIUS}&type=${FUEL_PLACE_TYPE}&key=${apiKey}`
 
       try {
         const response = await fetch(url)
         const data = await response.json()
+        logPlacesCall({
+          tripId,
+          endpoint: "nearbysearch",
+          placeType: FUEL_PLACE_TYPE,
+          cacheOutcome: "miss",
+          resultCount: Array.isArray(data?.results) ? data.results.length : 0,
+          source: "places/fuel-along-route",
+        })
 
         if (data.results) {
           for (const station of data.results) {
             const stationLat = station.geometry.location.lat
             const stationLng = station.geometry.location.lng
-            
-            let minDistance = Infinity
-            for (const coord of coordinates) {
-              const distance = Math.sqrt(
-                Math.pow(coord.lat - stationLat, 2) + Math.pow(coord.lng - stationLng, 2)
-              ) * 111
-              minDistance = Math.min(minDistance, distance)
-            }
+            const minDistance = distanceToRouteKm(stationLat, stationLng)
 
             if (minDistance <= 10) {
               fuelStations.push({
@@ -151,6 +210,10 @@ export async function GET(req: NextRequest) {
               })
             }
           }
+          await upsertUnverified(data.results, {
+            placeType: FUEL_PLACE_TYPE,
+            applyOvernightExclusion: false,
+          })
         }
       } catch (e) {
         console.error("Error fetching stations at point:", e)

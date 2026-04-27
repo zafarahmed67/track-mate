@@ -62,4 +62,9 @@ export const env = {
 
     // Cache lookup radius for unverified_stops (degrees) -- ~50 km at AU latitudes.
     UNVERIFIED_CACHE_BBOX_DEG: Number(process.env.UNVERIFIED_CACHE_BBOX_DEG) || 0.45,
+
+    // Usable cached candidates near a probe point above which we skip the Places search.
+    PROBE_CACHE_SUFFICIENT: Number(process.env.PROBE_CACHE_SUFFICIENT) || 4,
+    // Target stop count per day; combined with verified-stop count to derive the per-trip Places budget.
+    STOPS_PER_DAY_TARGET: Number(process.env.STOPS_PER_DAY_TARGET) || 5,
 };

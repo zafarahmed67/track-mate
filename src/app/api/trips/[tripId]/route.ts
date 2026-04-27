@@ -1,6 +1,7 @@
 import { supabaseAdmin } from "@/config/supabase"
 import { NextRequest, NextResponse } from "next/server"
 import { getTripStopsByDay } from "@/lib/tripStopsRepo"
+import { aggregatePlacesCallsForTrip } from "@/lib/placesApiLog"
 
 interface RouteParams {
   params: Promise<{ tripId: string }>
@@ -79,11 +80,14 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
       stops_by_day_json: row.status === "active" ? stopsByDayJson : {},
     }))
 
+    const placesApiLog = await aggregatePlacesCallsForTrip(tripId)
+
     return NextResponse.json({
       success: true,
       trip: data,
       stops: stopsResponse,
       stopsByDay,
+      placesApiLog,
     })
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Unknown error"
