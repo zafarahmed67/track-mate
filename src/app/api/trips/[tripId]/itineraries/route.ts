@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "@/config/supabase"
+import { generateNarrativeForTrip } from "@/utils/generateItineraryNarrative"
 import { NextRequest, NextResponse } from "next/server"
 
 interface RouteParams {
@@ -36,7 +37,7 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
     // Fetch all itinerary versions
     const { data: itineraries, error } = await supabaseAdmin
       .from("trip_itineraries")
-      .select("id, version, status, source, model_name, created_at, itinerary_json")
+      .select("id, version, status, created_at, itinerary_json")
       .eq("trip_id", tripId)
       .order("version", { ascending: false })
 
@@ -44,24 +45,23 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
       return NextResponse.json({ success: false, error: error.message }, { status: 500 })
     }
 
-    // For the active version, also fetch its day rows
-    const activeItinerary = (itineraries ?? []).find((it) => it.status === "active")
-    let activeDays: unknown[] = []
-
-    if (activeItinerary) {
-      const { data: days } = await supabaseAdmin
-        .from("itinerary_days")
-        .select("*")
-        .eq("itinerary_id", activeItinerary.id)
-        .order("day_number", { ascending: true })
-
-      activeDays = days ?? []
-    }
+    const totalVersions = (itineraries ?? []).map((itinerary) => `v${itinerary.version}`)
+    const activeItinerary = itineraries?.find((itinerary) => itinerary.status === "active") ?? null
+    const activeVersion = activeItinerary ? `v${activeItinerary.version}` : null
+    const itineraryRows = (itineraries ?? []).map((itinerary) => ({
+      id: itinerary.id,
+      version: itinerary.version,
+      status: itinerary.status,
+      model_name: null,
+      created_at: itinerary.created_at,
+    }))
 
     return NextResponse.json({
       success: true,
-      itineraries: itineraries ?? [],
-      activeDays,
+      totalVersions,
+      activeVersion,
+      data: activeItinerary?.itinerary_json ?? {},
+      itineraries: itineraryRows,
     })
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Unknown error"
@@ -129,6 +129,112 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
       .eq("id", tripId)
 
     return NextResponse.json({ success: true, narrative: targetItinerary.itinerary_json })
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Unknown error"
+    return NextResponse.json({ success: false, error: message }, { status: 500 })
+  }
+}
+
+export async function POST(req: NextRequest, { params }: RouteParams) {
+  try {
+    if (!supabaseAdmin) {
+      return NextResponse.json({ success: false, error: "Database not configured" }, { status: 500 })
+    }
+
+    const { tripId } = await params
+    const { userId } = await req.json()
+
+    if (!tripId || !userId) {
+      return NextResponse.json({ success: false, error: "Missing required fields" }, { status: 400 })
+    }
+
+    let result
+    try {
+      result = await generateNarrativeForTrip(tripId, userId)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error"
+      if (message === "Trip not found") return NextResponse.json({ success: false, error: message }, { status: 404 })
+      if (message === "No itinerary day data found for this trip") return NextResponse.json({ success: false, error: message }, { status: 409 })
+      throw err
+    }
+
+    const { narrative, days, trip, corridor, totalDistanceKm } = result
+
+    // Get next version number
+    const { data: existingVersions } = await supabaseAdmin
+      .from("trip_itineraries")
+      .select("version")
+      .eq("trip_id", tripId)
+      .order("version", { ascending: false })
+      .limit(1)
+
+    const nextVersion = existingVersions?.[0]?.version ? existingVersions[0].version + 1 : 1
+
+    // Mark previous active itineraries as superseded
+    await supabaseAdmin
+      .from("trip_itineraries")
+      .update({ status: "superseded" })
+      .eq("trip_id", tripId)
+      .eq("status", "active")
+
+    // Insert new itinerary record
+    const { data: itineraryRecord, error: itineraryError } = await supabaseAdmin
+      .from("trip_itineraries")
+      .insert({
+        trip_id: tripId,
+        version: nextVersion,
+        status: "active",
+        stops_by_day_json: days,
+        trip_snapshot_json: { trip, corridor, totalDistanceKm, days },
+        itinerary_json: narrative,
+      })
+      .select("id")
+      .single()
+
+    if (!itineraryError && itineraryRecord) {
+      const dayRows = (narrative.days as Array<{
+        dayNumber: number
+        narrative: string
+        aaoTips: string[]
+        gapNote: string | null
+        suggestedStay?: { name: string } | null
+      }>).map((day) => {
+        const dayData = days[day.dayNumber - 1] as {
+          distanceKm?: number
+          driveTimeMinutes?: number
+          fromLocation?: string
+          toLocation?: string
+        } | undefined
+        return {
+          itinerary_id: itineraryRecord.id,
+          day_number: day.dayNumber,
+          from_location: dayData?.fromLocation ?? null,
+          to_location: dayData?.toLocation ?? null,
+          distance_km: dayData?.distanceKm ?? null,
+          drive_time_minutes: dayData?.driveTimeMinutes ?? null,
+          aao_tip: day.aaoTips?.[0] ?? null,
+          reason: day.narrative,
+          day_json: day,
+          is_selected: day.suggestedStay?.name != null,
+        }
+      })
+      await supabaseAdmin.from("itinerary_days").insert(dayRows)
+    }
+
+    // Patch trip's route_data_json for quick loading
+    const { data: tripDataRow } = await supabaseAdmin
+      .from("trips")
+      .select("route_data_json")
+      .eq("id", tripId)
+      .single()
+
+    const existingJson = (tripDataRow?.route_data_json as Record<string, unknown>) ?? {}
+    await supabaseAdmin
+      .from("trips")
+      .update({ route_data_json: { ...existingJson, narrative } })
+      .eq("id", tripId)
+
+    return NextResponse.json({ success: true, narrative })
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Unknown error"
     return NextResponse.json({ success: false, error: message }, { status: 500 })
