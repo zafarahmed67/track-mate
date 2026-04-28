@@ -23,6 +23,7 @@ import {
 interface Stats {
   totalStops: number
   totalUsers: number
+  pendingUnverifiedStops?: number
   stopsByStatus: Record<string, number>
   recentAuditLog: Array<{
     id: string
@@ -221,6 +222,20 @@ export default function AdminDashboard() {
                   <span className="flex items-center gap-2">
                     <MapPin className="h-4 w-4 text-blue-500" />
                     Manage Stops
+                  </span>
+                  <ArrowRight className="h-4 w-4" />
+                </Button>
+              </Link>
+              <Link href="/admin/unverified-stops">
+                <Button variant="outline" className="w-full justify-between">
+                  <span className="flex items-center gap-2">
+                    <MapPin className="h-4 w-4 text-yellow-500" />
+                    Review Unverified
+                    {(stats?.pendingUnverifiedStops ?? 0) > 0 && (
+                      <span className="ml-1 inline-flex items-center justify-center rounded-full bg-yellow-100 px-2 py-0.5 text-xs font-medium text-yellow-800">
+                        {stats?.pendingUnverifiedStops}
+                      </span>
+                    )}
                   </span>
                   <ArrowRight className="h-4 w-4" />
                 </Button>

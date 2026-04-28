@@ -4,6 +4,13 @@ import { applySuitabilityFilter } from "@/lib/stopSuitabilityFilter"
 import type { TripPreferences } from "@/lib/stopSuitabilityFilter"
 import { env } from "@/config/env.config"
 import { getCorridorsFromStops, calculateDistance as calcDistance } from "@/lib/corridorUtils"
+import {
+  findNearby as findNearbyUnverified,
+  upsertMany as upsertUnverified,
+} from "@/lib/unverifiedStopsCache"
+import { logPlacesCall } from "@/lib/placesApiLog"
+
+const RELATED_CACHE_SUFFICIENT_PER_PROBE = 3
 
 // Maximum perpendicular distance a stop can be from the actual route polyline (km)
 const ROUTE_PROXIMITY_THRESHOLD_KM = 30
@@ -113,7 +120,8 @@ async function fetchRoutePolylineWithPreferences(
   startLng: number,
   destLat: number,
   destLng: number,
-  preferences?: Pick<TripPreferences, "rig_type" | "avoid_gravel_roads"> | null
+  preferences?: Pick<TripPreferences, "rig_type" | "avoid_gravel_roads"> | null,
+  tripId?: string | null
 ): Promise<Array<{ lat: number; lng: number }> | null> {
   const apiKey = process.env.NEXT_PUBLIC_GMAPS_API_KEY
   if (!apiKey) return null
@@ -129,6 +137,7 @@ async function fetchRoutePolylineWithPreferences(
       avoidGravelRoads: preferences?.avoid_gravel_roads,
     })
     const res = await fetch(url)
+    logPlacesCall({ tripId, endpoint: "directions", source: "stops/nearby" })
     const data = await res.json()
 
     if (data.status !== "OK" || !data.routes?.length) {
@@ -259,7 +268,7 @@ async function tripCandidateStops(stopsToInsert: TripCandidateStopInsert[]): Pro
   }
 }
 
-async function fetchGoogleRelatedStops(startLat: number, startLng: number, destLat: number, destLng: number): Promise<GoogleRelatedStop[]> {
+async function fetchGoogleRelatedStops(startLat: number, startLng: number, destLat: number, destLng: number, tripId?: string | null): Promise<GoogleRelatedStop[]> {
   const apiKey = process.env.NEXT_PUBLIC_GMAPS_API_KEY
   if (!apiKey) return []
 
@@ -272,10 +281,49 @@ async function fetchGoogleRelatedStops(startLat: number, startLng: number, destL
     const point = interpolatePoint(startLat, startLng, destLat, destLng, fraction)
 
     for (const type of searchTypes) {
+      // Cache-first: skip Places when we already have enough of this type near
+      // the probe point. Skips campground/gas_station/supermarket calls on
+      // repeat trips along the same corridor.
+      const cached = await findNearbyUnverified(point.lat, point.lng, {
+        bboxDeg: env.UNVERIFIED_CACHE_BBOX_DEG / 4,
+        placeTypes: [type],
+      })
+      if (cached.length >= RELATED_CACHE_SUFFICIENT_PER_PROBE) {
+        for (const row of cached.slice(0, 5)) {
+          const key = `${row.location_name.toLowerCase()}::${row.latitude.toFixed(4)}::${row.longitude.toFixed(4)}`
+          if (dedupe.has(key)) continue
+          dedupe.add(key)
+          results.push({
+            name: row.location_name,
+            latitude: String(row.latitude),
+            longitude: String(row.longitude),
+            address: row.address ?? "",
+            place_type: row.place_type ?? type,
+          })
+        }
+        logPlacesCall({
+          tripId,
+          endpoint: "nearbysearch",
+          placeType: type,
+          cacheOutcome: "skipped",
+          resultCount: cached.length,
+          source: "stops/nearby",
+        })
+        continue
+      }
+
       try {
         const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${point.lat},${point.lng}&radius=${env.NEARBY_STOPS_SEARCH_RADIUS}&type=${type}&key=${apiKey}`
         const response = await fetch(url)
         const data = await response.json()
+        logPlacesCall({
+          tripId,
+          endpoint: "nearbysearch",
+          placeType: type,
+          cacheOutcome: "miss",
+          resultCount: Array.isArray(data?.results) ? data.results.length : 0,
+          source: "stops/nearby",
+        })
 
         const places = Array.isArray(data?.results) ? data.results : []
         for (const place of places.slice(0, 5) as Array<{
@@ -300,6 +348,14 @@ async function fetchGoogleRelatedStops(startLat: number, startLng: number, destL
             longitude: String(lng),
             address: place.vicinity || "",
             place_type: placeType,
+          })
+        }
+
+        // Populate the cache for the next request along this corridor.
+        if (places.length > 0) {
+          await upsertUnverified(places, {
+            placeType: type,
+            applyOvernightExclusion: type === "campground",
           })
         }
       } catch (error) {
@@ -404,7 +460,7 @@ export async function POST(req: NextRequest) {
     console.log(`\n📋 Fetched ${stops.length} stops, filtering by route proximity...`)
 
     // Attempt to get the actual route polyline from Google Directions for precise proximity filtering
-    const polyline = await fetchRoutePolylineWithPreferences(startLat, startLng, destLat, destLng, tripPreferences)
+    const polyline = await fetchRoutePolylineWithPreferences(startLat, startLng, destLat, destLng, tripPreferences, tripId)
     const usingPolyline = polyline !== null && polyline.length > 2
     console.log(usingPolyline
       ? `🗺️  Using actual route polyline (${polyline!.length} points) — threshold: ${ROUTE_PROXIMITY_THRESHOLD_KM}km`
@@ -494,73 +550,76 @@ export async function POST(req: NextRequest) {
         console.log(`✅ Insert succeeded: ${stopsToInsert.length} candidate stops`)
       }
 
-      const googleRelatedStops = await fetchGoogleRelatedStops(startLat, startLng, destLat, destLng)
+      const googleRelatedStops = await fetchGoogleRelatedStops(startLat, startLng, destLat, destLng, tripId)
       googleRelatedFetched = googleRelatedStops.length
 
       if (googleRelatedStops.length > 0) {
-        const { data: existingCustom, error: existingCustomError } = await supabaseAdmin
-          .from("custom_stops")
-          .select("location_name, latitude, longitude")
-          .eq("trip_id", tripId)
+        const routeDistanceKm = Math.max(directDistance, filtered[filtered.length - 1]?.distance_from_start_km || 0)
+        const plannedDays = Math.max(1, Number(tripPreferences?.trip_duration_days || 14))
 
-        if (existingCustomError) {
-          console.error("❌ Error fetching existing custom stops:", existingCustomError)
-        } else {
-          const existingKeys = new Set(
-            (existingCustom || []).map((row) => {
-              const name = String(row.location_name || "").trim().toLowerCase()
-              const lat = Number(row.latitude || 0).toFixed(4)
-              const lng = Number(row.longitude || 0).toFixed(4)
-              return `${name}::${lat}::${lng}`
-            })
-          )
+        const cacheRows = googleRelatedStops
+          .map((stop) => {
+            const lat = Number(stop.latitude || 0)
+            const lng = Number(stop.longitude || 0)
+            if (Number.isNaN(lat) || Number.isNaN(lng) || !stop.name) return null
+            const placeId = `nearby:${stop.name.trim().toLowerCase()}|${lat.toFixed(5)}|${lng.toFixed(5)}`
+            return {
+              place_id: placeId,
+              location_name: stop.name,
+              latitude: lat,
+              longitude: lng,
+              address: stop.address || null,
+              place_type: `google_${stop.place_type}`,
+              source: "google_places",
+              first_seen_trip_id: tripId,
+            }
+          })
+          .filter((r): r is NonNullable<typeof r> => r !== null)
 
-          const routeDistanceKm = Math.max(directDistance, filtered[filtered.length - 1]?.distance_from_start_km || 0)
-          const plannedDays = Math.max(1, Number(tripPreferences?.trip_duration_days || 14))
-          const rowsToInsert = googleRelatedStops
-            .map((stop) => {
-              const lat = Number(stop.latitude || 0)
-              const lng = Number(stop.longitude || 0)
-              if (Number.isNaN(lat) || Number.isNaN(lng) || !stop.name) return null
+        if (cacheRows.length > 0) {
+          const { data: cached, error: cacheErr } = await supabaseAdmin
+            .from("unverified_stops")
+            .upsert(cacheRows, { onConflict: "place_id" })
+            .select("id, place_id, latitude, longitude")
 
-              const key = `${stop.name.trim().toLowerCase()}::${lat.toFixed(4)}::${lng.toFixed(4)}`
-              if (existingKeys.has(key)) return null
-              existingKeys.add(key)
-
-              const progressDistance = calculateDistance(startLat, startLng, lat, lng)
-              const progress = routeDistanceKm > 0 ? Math.min(0.999, Math.max(0, progressDistance / routeDistanceKm)) : 0
-              const dayIndex = Math.min(plannedDays - 1, Math.max(0, Math.floor(progress * plannedDays)))
-
+          if (cacheErr) {
+            console.error("❌ Error upserting unverified_stops:", cacheErr)
+          } else if (cached && cached.length > 0) {
+            const links = cached.map((row) => {
+              const progressDistance = calculateDistance(
+                startLat,
+                startLng,
+                Number(row.latitude),
+                Number(row.longitude),
+              )
+              const progress = routeDistanceKm > 0
+                ? Math.min(0.999, Math.max(0, progressDistance / routeDistanceKm))
+                : 0
+              const dayIndex = Math.min(
+                plannedDays - 1,
+                Math.max(0, Math.floor(progress * plannedDays)),
+              )
               return {
                 trip_id: tripId,
-                location_name: stop.name,
-                latitude: stop.latitude,
-                longitude: stop.longitude,
-                address: stop.address,
-                place_type: `google_${stop.place_type}`,
+                stop_id: null,
+                unverified_stop_id: row.id,
+                source_type: "unverified",
                 day_index: dayIndex,
+                distance_from_start_km: progressDistance,
               }
             })
-            .filter((row): row is {
-              trip_id: string
-              location_name: string
-              latitude: string
-              longitude: string
-              address: string
-              place_type: string
-              day_index: number
-            } => row !== null)
 
-          if (rowsToInsert.length > 0) {
-            const { error: customInsertError } = await supabaseAdmin
-              .from("custom_stops")
-              .insert(rowsToInsert)
-
-            if (customInsertError) {
-              console.error("❌ Error inserting Google related custom stops:", customInsertError)
+            const { error: linkErr } = await supabaseAdmin
+              .from("trip_candidate_stops")
+              .upsert(links, {
+                onConflict: "trip_id,unverified_stop_id",
+                ignoreDuplicates: true,
+              })
+            if (linkErr) {
+              console.error("❌ Error linking trip_candidate_stops:", linkErr)
             } else {
-              googleRelatedInserted = rowsToInsert.length
-              console.log(`✅ Inserted ${googleRelatedInserted} Google related stops into custom_stops`)
+              googleRelatedInserted = links.length
+              console.log(`✅ Linked ${googleRelatedInserted} unverified_stops to trip ${tripId}`)
             }
           }
         }

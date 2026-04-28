@@ -328,32 +328,24 @@ export async function generateNarrativeForTrip(
   }
 
   if (days.length === 0) {
-    const { data: activeItinerary } = await supabaseAdmin
-      .from("trip_itineraries")
-      .select("stops_by_day_json")
-      .eq("trip_id", tripId)
-      .eq("status", "active")
-      .order("version", { ascending: false })
-      .limit(1)
-      .maybeSingle()
+    // Fall back to trip_candidate_stops (single source of truth) when the
+    // segments-based path didn't populate days.
+    const { getTripStopsByDay } = await import("@/lib/tripStopsRepo")
+    const stopsByDay = await getTripStopsByDay(tripId)
+    const keys = Object.keys(stopsByDay)
+      .filter((key) => /^day\d+$/i.test(key))
+      .sort((a, b) => Number(a.replace(/\D/g, "")) - Number(b.replace(/\D/g, "")))
 
-    const stopsByDay = (activeItinerary?.stops_by_day_json as Record<string, Array<{ name?: string; isSelected?: boolean }>> | null) ?? null
-    if (stopsByDay) {
-      const keys = Object.keys(stopsByDay)
-        .filter((key) => /^day\d+$/i.test(key))
-        .sort((a, b) => Number(a.replace(/\D/g, "")) - Number(b.replace(/\D/g, "")))
-
+    if (keys.length > 0) {
       const selectedByDay = keys.map((key) => {
-        const items = Array.isArray(stopsByDay[key]) ? stopsByDay[key] : []
-        const selected = items.find((item) => item?.isSelected && typeof item?.name === "string")?.name
-        return selected ?? items.find((item) => typeof item?.name === "string")?.name ?? null
+        const items = stopsByDay[key] ?? []
+        const selected = items.find((item) => item.isSelected)?.name
+        return selected ?? items[0]?.name ?? null
       })
 
       days = keys.map((key, idx) => {
-        const items = Array.isArray(stopsByDay[key]) ? stopsByDay[key] : []
-        const names = items
-          .map((item) => (typeof item?.name === "string" ? item.name : null))
-          .filter((name): name is string => Boolean(name))
+        const items = stopsByDay[key] ?? []
+        const names = items.map((item) => item.name).filter(Boolean)
         const chosen = selectedByDay[idx]
         return {
           dayNumber: idx + 1,

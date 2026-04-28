@@ -23,6 +23,8 @@ import {
     SelectValue,
 } from "@/components/ui/select"
 import { toast } from "sonner"
+import { ArrowUpDown } from "lucide-react"
+import { PlaceAutocomplete } from "@/components/planner/PlaceAutocomplete"
 import type { Stop } from "@/lib/types"
 
 // Decode a Google Maps encoded polyline into lat/lng pairs
@@ -178,7 +180,43 @@ export default function NewPlannerPage() {
       ? destCoords 
       : { lat: -25.2744, lng: 133.7751 }
 
-  const canProceedToDetails = title.trim() && startLocation.trim() && destination.trim()
+  const hasStartCoords = startCoords.lat !== 0 || startCoords.lng !== 0
+  const hasDestCoords = destCoords.lat !== 0 || destCoords.lng !== 0
+  const canProceedToDetails = startLocation.trim() && destination.trim()
+
+  function swapEndpoints() {
+    setStartLocation(destination)
+    setDestination(startLocation)
+    setStartCoords(destCoords)
+    setDestCoords(startCoords)
+  }
+
+  async function fetchRoutePolyline(
+    start: { lat: number; lng: number },
+    dest: { lat: number; lng: number }
+  ) {
+    try {
+      const directionsUrl = `https://maps.googleapis.com/maps/api/directions/json?origin=${start.lat},${start.lng}&destination=${dest.lat},${dest.lng}&key=${process.env.NEXT_PUBLIC_GMAPS_API_KEY}`
+      const dirResponse = await fetch(directionsUrl)
+      const dirData = await dirResponse.json()
+      if (dirData.routes?.[0]?.overview_polyline?.points) {
+        const decoded = decodePolyline(dirData.routes[0].overview_polyline.points)
+        setRouteCoords(decoded)
+      }
+    } catch {
+      // Non-fatal — map preview just won't show the polyline
+    }
+  }
+
+  // Refresh polyline whenever both endpoints have coords
+  useEffect(() => {
+    if (hasStartCoords && hasDestCoords) {
+      fetchRoutePolyline(startCoords, destCoords)
+    } else {
+      setRouteCoords([])
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startCoords.lat, startCoords.lng, destCoords.lat, destCoords.lng])
 
   async function handleProceedToDetails() {
     if (!canProceedToDetails) return
@@ -186,40 +224,30 @@ export default function NewPlannerPage() {
     setGeocoding(true)
     setGeocodeError(null)
     try {
-      const [startResult, destResult] = await Promise.all([
-        fetchGeocode(startLocation),
-        fetchGeocode(destination),
-      ])
+      let nextStart = hasStartCoords ? { ...startCoords } : null
+      let nextDest = hasDestCoords ? { ...destCoords } : null
 
-      if (!startResult && !destResult) {
-        setGeocodeError(`Could not find coordinates for "${startLocation}" or "${destination}". Please check the spelling and try again.`)
-        return
-      }
-      if (!startResult) {
-        setGeocodeError(`Could not find "${startLocation}". Please check the spelling and try again.`)
-        return
-      }
-      if (!destResult) {
-        setGeocodeError(`Could not find "${destination}". Please check the spelling and try again.`)
-        return
-      }
+      if (!nextStart || !nextDest) {
+        const [startResult, destResult] = await Promise.all([
+          nextStart ? Promise.resolve(nextStart) : fetchGeocode(startLocation),
+          nextDest ? Promise.resolve(nextDest) : fetchGeocode(destination),
+        ])
 
-      setStartCoords({ lat: startResult.lat, lng: startResult.lng })
-      setDestCoords({ lat: destResult.lat, lng: destResult.lng })
-
-      // Fetch route polyline for the map preview (Gap 10)
-      try {
-        const directionsUrl = `https://maps.googleapis.com/maps/api/directions/json?origin=${startResult.lat},${startResult.lng}&destination=${destResult.lat},${destResult.lng}&key=${process.env.NEXT_PUBLIC_GMAPS_API_KEY}`
-        const dirResponse = await fetch(directionsUrl)
-        const dirData = await dirResponse.json()
-        if (dirData.routes?.[0]?.overview_polyline?.points) {
-          const decoded = decodePolyline(dirData.routes[0].overview_polyline.points)
-          setRouteCoords(decoded)
+        if (!startResult) {
+          setGeocodeError(`Could not find "${startLocation}". Please pick a suggestion or check the spelling.`)
+          return
         }
-      } catch {
-        // Non-fatal — map preview just won't show the polyline
+        if (!destResult) {
+          setGeocodeError(`Could not find "${destination}". Please pick a suggestion or check the spelling.`)
+          return
+        }
+        nextStart = startResult
+        nextDest = destResult
+        setStartCoords(startResult)
+        setDestCoords(destResult)
       }
 
+      await fetchRoutePolyline(nextStart, nextDest)
       setStep("details")
     } catch (error) {
       console.error("Geocoding error:", error)
@@ -363,6 +391,9 @@ export default function NewPlannerPage() {
         <div className="grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
           <Card>
             <CardHeader>
+              <div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                Step {step === "initial" ? "1" : "2"} of 2
+              </div>
               <CardTitle className="text-2xl">Plan a New Trip</CardTitle>
               <CardDescription>
                 {step === "initial" && "Enter your trip details to find verified stops along your route."}
@@ -384,22 +415,57 @@ export default function NewPlannerPage() {
                   </div>
 
                   <div className="space-y-2">
-                    <Label htmlFor="startLocation">Start Location</Label>
-                    <Input
+                    <Label htmlFor="startLocation">
+                      Start Location <span className="text-red-500">*</span>
+                    </Label>
+                    <PlaceAutocomplete
                       id="startLocation"
                       value={startLocation}
-                      onChange={(e) => setStartLocation(e.target.value)}
+                      onChange={(text) => {
+                        setStartLocation(text)
+                        if (hasStartCoords) setStartCoords({ lat: 0, lng: 0 })
+                      }}
+                      onPlaceSelect={(p) => {
+                        setStartLocation(p.description)
+                        setStartCoords({ lat: p.lat, lng: p.lng })
+                      }}
                       placeholder="e.g. Brisbane QLD"
+                      required
                     />
                   </div>
 
+                  <div className="flex justify-center">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={swapEndpoints}
+                      disabled={!startLocation && !destination}
+                      className="h-8 px-2 text-muted-foreground"
+                      aria-label="Swap start and destination"
+                    >
+                      <ArrowUpDown className="size-4" />
+                      <span className="ml-1 text-xs">Swap</span>
+                    </Button>
+                  </div>
+
                   <div className="space-y-2">
-                    <Label htmlFor="destination">Destination</Label>
-                    <Input
+                    <Label htmlFor="destination">
+                      Destination <span className="text-red-500">*</span>
+                    </Label>
+                    <PlaceAutocomplete
                       id="destination"
                       value={destination}
-                      onChange={(e) => setDestination(e.target.value)}
+                      onChange={(text) => {
+                        setDestination(text)
+                        if (hasDestCoords) setDestCoords({ lat: 0, lng: 0 })
+                      }}
+                      onPlaceSelect={(p) => {
+                        setDestination(p.description)
+                        setDestCoords({ lat: p.lat, lng: p.lng })
+                      }}
                       placeholder="e.g. Cairns QLD"
+                      required
                     />
                   </div>
 
@@ -421,47 +487,33 @@ export default function NewPlannerPage() {
 
               {step === "details" && (
                 <>
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <div className="space-y-2">
-                      <Label>Start Location</Label>
-                      <Input value={startLocation} disabled />
-                      <div className="flex gap-2">
-                        <Input 
-                          placeholder="Lat" 
-                          value={startCoords.lat === 0 ? "" : startCoords.lat.toFixed(4)}
-                          onChange={(e) => setStartCoords(s => ({ ...s, lat: parseFloat(e.target.value) || 0 }))}
-                          type="number"
-                          step="any"
-                        />
-                        <Input 
-                          placeholder="Lng" 
-                          value={startCoords.lng === 0 ? "" : startCoords.lng.toFixed(4)}
-                          onChange={(e) => setStartCoords(s => ({ ...s, lng: parseFloat(e.target.value) || 0 }))}
-                          type="number"
-                          step="any"
-                        />
+                  <div className="rounded-lg border bg-muted/30 p-4">
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <div>
+                        <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">From</div>
+                        <div className="mt-1 text-sm font-medium">{startLocation}</div>
+                        <div className="text-xs text-muted-foreground">
+                          {startCoords.lat.toFixed(4)}, {startCoords.lng.toFixed(4)}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">To</div>
+                        <div className="mt-1 text-sm font-medium">{destination}</div>
+                        <div className="text-xs text-muted-foreground">
+                          {destCoords.lat.toFixed(4)}, {destCoords.lng.toFixed(4)}
+                        </div>
                       </div>
                     </div>
-
-                    <div className="space-y-2">
-                      <Label>Destination</Label>
-                      <Input value={destination} disabled />
-                      <div className="flex gap-2">
-                        <Input 
-                          placeholder="Lat" 
-                          value={destCoords.lat === 0 ? "" : destCoords.lat.toFixed(4)}
-                          onChange={(e) => setDestCoords(s => ({ ...s, lat: parseFloat(e.target.value) || 0 }))}
-                          type="number"
-                          step="any"
-                        />
-                        <Input 
-                          placeholder="Lng" 
-                          value={destCoords.lng === 0 ? "" : destCoords.lng.toFixed(4)}
-                          onChange={(e) => setDestCoords(s => ({ ...s, lng: parseFloat(e.target.value) || 0 }))}
-                          type="number"
-                          step="any"
-                        />
-                      </div>
+                    <div className="mt-3 flex justify-end">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setStep("initial")}
+                        className="h-7 text-xs"
+                      >
+                        Edit locations
+                      </Button>
                     </div>
                   </div>
 
@@ -482,7 +534,9 @@ export default function NewPlannerPage() {
                     </div>
 
                     <div className="space-y-2">
-                      <Label htmlFor="travelPace">Travel Pace</Label>
+                      <Label htmlFor="travelPace">
+                        Travel Pace <span className="text-red-500">*</span>
+                      </Label>
                       <Select value={travelPace} onValueChange={setTravelPace}>
                         <SelectTrigger id="travelPace">
                           <SelectValue placeholder="Select travel pace" />

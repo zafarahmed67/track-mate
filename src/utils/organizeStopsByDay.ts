@@ -1,31 +1,34 @@
-import { supabaseAdmin } from "@/config/supabase";
-import { applySuitabilityFilter } from "@/lib/stopSuitabilityFilter";
-import { calculateDistance } from "./calculateDistance";
+import { supabaseAdmin } from "@/config/supabase"
+import { applySuitabilityFilter } from "@/lib/stopSuitabilityFilter"
+import { calculateDistance } from "./calculateDistance"
 import {
   decodePolyline,
   buildCumulativeDistanceTable,
   samplePolylineAtKm,
   projectPointOntoPolyline,
   PolylinePoint,
-} from "@/lib/routePolyline";
+} from "@/lib/routePolyline"
+import { env } from "@/config/env.config"
+import { PlacesBudget, buildProbeKey, buildPointKey } from "@/lib/placesBudget"
+import { logPlacesCall } from "@/lib/placesApiLog"
+import {
+  findNearby as findNearbyUnverified,
+  upsertMany as upsertUnverified,
+  isExcludedName,
+  PlacesNearbyResult,
+  UnverifiedStopRow,
+} from "@/lib/unverifiedStopsCache"
 
 interface DayStopOption {
-  id: string
-  sourceType: "verified" | "custom"
+  unverifiedStopId?: string
+  stopId?: string
+  sourceType: "verified" | "unverified"
   name: string
   latitude: number
   longitude: number
   distanceFromStartKm: number
-  stopId?: string
-  customStopId?: string
 }
 
-// Name patterns to exclude from overnight stop options — fuel/service stations
-// can appear under rv_park/campground searches in rural Australia.
-const OVERNIGHT_EXCLUDE =
-  /hotel|motel|hostel|backpacker|resort|inn\b|b&b|bed and breakfast|airbnb|toilet|toilets|amenities|amenity block|public toilet|car park|parking area|day use area|service station|fuel station|petrol station|\bservo\b|\bgas station\b/i
-
-// Google Places search types used for targeted per-day overnight stop lookups.
 const OVERNIGHT_SEARCHES: Array<{ type: string; keyword?: string }> = [
   { type: "rv_park" },
   { type: "campground" },
@@ -38,10 +41,11 @@ const OVERNIGHT_SEARCHES: Array<{ type: string; keyword?: string }> = [
 ]
 
 /**
- * Search Google Places for overnight stops near a lat/lng.
- * Returns candidates sorted by lateral distance from the route (closest first).
+ * Cache-first per-day top-up for overnight stop options. Calls Google Places
+ * only when the unverified_stops cache + verified pool can't satisfy the day's
+ * target, and only within the trip's PlacesBudget.
  */
-async function searchGooglePlacesForDay(
+async function searchPlacesForDay(
   lat: number,
   lng: number,
   radiusMetres: number,
@@ -49,11 +53,45 @@ async function searchGooglePlacesForDay(
   polyline: PolylinePoint[],
   cumTable: number[],
   maxLateralKm: number,
-): Promise<DayStopOption[]> {
-  const seenNames = new Set<string>()
-  const candidates: DayStopOption[] = []
+  budget: PlacesBudget,
+  tripId: string,
+  needed: number,
+): Promise<UnverifiedStopRow[]> {
+  if (needed <= 0) return []
+  const collected: UnverifiedStopRow[] = []
 
+  // 1) Cache check.
+  const cached = await findNearbyUnverified(lat, lng, {
+    bboxDeg: env.UNVERIFIED_CACHE_BBOX_DEG / 2,
+  })
+  if (cached.length > 0) budget.noteCacheHit()
+  for (const row of cached) {
+    if (collected.length >= needed) break
+    if (isExcludedName(row.location_name)) continue
+    if (polyline.length >= 2) {
+      const { lateralKm } = projectPointOntoPolyline(row.latitude, row.longitude, polyline, cumTable)
+      if (lateralKm > maxLateralKm) continue
+    }
+    if (budget.hasSeenPlace(row.place_id)) continue
+    budget.recordPlace(row.place_id)
+    collected.push(row)
+  }
+
+  // If the cache fully satisfied this day, mark the point so the budget summary
+  // reflects skipped probes (UC3 observability) and we never call Places below.
+  if (collected.length >= needed) {
+    budget.markPointSatisfied(buildPointKey(lat, lng))
+    return collected
+  }
+
+  // 2) Places fallback (budgeted).
   for (const search of OVERNIGHT_SEARCHES) {
+    if (collected.length >= needed) break
+    if (budget.exhausted) break
+
+    const probeKey = buildProbeKey(lat, lng, radiusMetres, search.type, search.keyword)
+    if (!budget.tryConsume(probeKey, "nearbysearch")) continue
+
     try {
       const params = new URLSearchParams({
         location: `${lat},${lng}`,
@@ -64,48 +102,45 @@ async function searchGooglePlacesForDay(
       if (search.keyword) params.set("keyword", search.keyword)
 
       const res = await fetch(
-        `https://maps.googleapis.com/maps/api/place/nearbysearch/json?${params.toString()}`
+        `https://maps.googleapis.com/maps/api/place/nearbysearch/json?${params.toString()}`,
       )
       const data = await res.json()
-      if (!data.results) continue
+      budget.noteCacheMiss()
+      logPlacesCall({
+        tripId,
+        endpoint: "nearbysearch",
+        placeType: search.type,
+        resultCount: Array.isArray(data?.results) ? data.results.length : 0,
+        cacheOutcome: "miss",
+        source: "organizeStopsByDay",
+      })
+      const results: PlacesNearbyResult[] = Array.isArray(data?.results) ? data.results : []
+      const fresh = results
+        .slice(0, 15)
+        .filter((p) => p.place_id && !budget.hasSeenPlace(p.place_id))
+        .filter((p) => !isExcludedName(p.name ?? ""))
+      if (fresh.length === 0) continue
 
-      for (const place of data.results.slice(0, 15)) {
-        const name = String(place.name ?? "").trim()
-        if (!name || OVERNIGHT_EXCLUDE.test(name)) continue
-
-        const placeLat = Number(place.geometry?.location?.lat ?? 0)
-        const placeLng = Number(place.geometry?.location?.lng ?? 0)
-        if (!placeLat || !placeLng) continue
-
-        const nameKey = name.toLowerCase()
-        if (seenNames.has(nameKey)) continue
-
-        const { distanceFromStartKm, lateralKm } = projectPointOntoPolyline(
-          placeLat, placeLng, polyline, cumTable
-        )
-        if (lateralKm > maxLateralKm) continue
-
-        seenNames.add(nameKey)
-        candidates.push({
-          id: place.place_id ?? `gp-${nameKey}`,
-          sourceType: "custom",
-          name,
-          latitude: placeLat,
-          longitude: placeLng,
-          distanceFromStartKm,
-        })
+      const upserted = await upsertUnverified(fresh, {
+        firstSeenTripId: tripId,
+        placeType: "campground",
+      })
+      for (const row of upserted) {
+        if (collected.length >= needed) break
+        if (polyline.length >= 2) {
+          const { lateralKm } = projectPointOntoPolyline(row.latitude, row.longitude, polyline, cumTable)
+          if (lateralKm > maxLateralKm) continue
+        }
+        if (budget.hasSeenPlace(row.place_id)) continue
+        budget.recordPlace(row.place_id)
+        collected.push(row)
       }
     } catch {
       // skip failed search type
     }
   }
 
-  // Sort by lateral distance (closest to route wins)
-  return candidates.sort(
-    (a, b) =>
-      projectPointOntoPolyline(a.latitude, a.longitude, polyline, cumTable).lateralKm -
-      projectPointOntoPolyline(b.latitude, b.longitude, polyline, cumTable).lateralKm
-  )
+  return collected
 }
 
 export async function organizeStopsByDay(
@@ -128,6 +163,7 @@ export async function organizeStopsByDay(
   } | null,
   encodedPolyline?: string,
   googleApiKey?: string,
+  budget?: PlacesBudget,
 ): Promise<void> {
   if (!supabaseAdmin) {
     throw new Error("Database not configured")
@@ -135,27 +171,25 @@ export async function organizeStopsByDay(
 
   const userDays = Math.max(1, Math.round(Number(tripDays) || 1))
   const kmPerDay = totalDistanceKm / userDays
+  const placesBudget = budget ?? new PlacesBudget({ tripDurationDays: userDays })
 
-  // Decode polyline for accurate per-day target locations.
   let polyline: PolylinePoint[] = []
   let cumTable: number[] = []
   if (encodedPolyline) {
     polyline = decodePolyline(encodedPolyline)
     cumTable = buildCumulativeDistanceTable(polyline)
   }
-
   const hasPolyline = polyline.length >= 2
 
-  // Whether this is a remote/sparse route — allows wider lateral corridor.
   const directDistanceKm = calculateDistance(startLat, startLng, destLat, destLng)
   const isRemoteRoute = directDistanceKm > 500 && destLat > startLat
   const maxLateralKm = isRemoteRoute ? 50 : 30
 
-  // ── Load verified stops (trip_candidate_stops) ──────────────────────────────
+  // Verified pool from trip_candidate_stops + stops join.
   const { data: verifiedRows } = await supabaseAdmin
     .from("trip_candidate_stops")
     .select(
-      "*, stops:stops(id, location_name, latitude, longitude, rig_suitability, road_suitability, pet_friendly, stay_type, cost_band, max_rig_length, best_season)"
+      "id, distance_from_start_km, distance_to_route_km, stops:stops(id, location_name, latitude, longitude, rig_suitability, road_suitability, pet_friendly, stay_type, cost_band, max_rig_length, best_season)",
     )
     .eq("trip_id", tripId)
     .eq("source_type", "verified")
@@ -175,19 +209,35 @@ export async function organizeStopsByDay(
 
   const filterableVerified = (verifiedRows ?? [])
     .map((vs) => {
-      const stop = vs.stops as {
-        id: string
-        location_name: string
-        latitude: number
-        longitude: number
-        rig_suitability?: string
-        road_suitability?: string
-        pet_friendly?: string
-        stay_type?: string
-        cost_band?: string
-        max_rig_length?: string
-        best_season?: string
-      } | null
+      const stopRaw = vs.stops as unknown as
+        | {
+            id: string
+            location_name: string
+            latitude: number
+            longitude: number
+            rig_suitability?: string
+            road_suitability?: string
+            pet_friendly?: string
+            stay_type?: string
+            cost_band?: string
+            max_rig_length?: string
+            best_season?: string
+          }
+        | Array<{
+            id: string
+            location_name: string
+            latitude: number
+            longitude: number
+            rig_suitability?: string
+            road_suitability?: string
+            pet_friendly?: string
+            stay_type?: string
+            cost_band?: string
+            max_rig_length?: string
+            best_season?: string
+          }>
+        | null
+      const stop = Array.isArray(stopRaw) ? stopRaw[0] ?? null : stopRaw
       if (!stop) return null
       return {
         rig_suitability: stop.rig_suitability ?? "",
@@ -207,56 +257,83 @@ export async function organizeStopsByDay(
     ? applySuitabilityFilter(filterableVerified, tripPrefs)
     : filterableVerified
 
-  const verifiedPool: DayStopOption[] = filteredVerified
-    .flatMap((vs) => {
-      const stop = vs._stop
-      if (!stop) return []
-      const distFromStart =
-        vs.distance_from_start_km ??
-        (vs.distance_to_route_km ??
-          calculateDistance(startLat, startLng, stop.latitude, stop.longitude))
-      const opt: DayStopOption = {
-        id: stop.id,
-        sourceType: "verified",
+  const verifiedPool: DayStopOption[] = filteredVerified.flatMap((vs) => {
+    const stop = vs._stop
+    if (!stop) return []
+    const distFromStart =
+      vs.distance_from_start_km ??
+      vs.distance_to_route_km ??
+      calculateDistance(startLat, startLng, stop.latitude, stop.longitude)
+    return [
+      {
+        stopId: stop.id,
+        sourceType: "verified" as const,
         name: stop.location_name,
         latitude: stop.latitude,
         longitude: stop.longitude,
         distanceFromStartKm: distFromStart,
-        stopId: stop.id,
+      },
+    ]
+  })
+
+  // Unverified pool: trip_candidate_stops + unverified_stops join.
+  const { data: unverifiedRows } = await supabaseAdmin
+    .from("trip_candidate_stops")
+    .select(
+      "id, distance_from_start_km, unverified_stops:unverified_stops(id, place_id, location_name, latitude, longitude)",
+    )
+    .eq("trip_id", tripId)
+    .eq("source_type", "unverified")
+
+  const unverifiedPool: DayStopOption[] = (unverifiedRows ?? [])
+    .flatMap((row) => {
+      const usRaw = row.unverified_stops as unknown as
+        | {
+            id: string
+            place_id: string
+            location_name: string
+            latitude: number
+            longitude: number
+          }
+        | Array<{
+            id: string
+            place_id: string
+            location_name: string
+            latitude: number
+            longitude: number
+          }>
+        | null
+      const us = Array.isArray(usRaw) ? usRaw[0] ?? null : usRaw
+      if (!us) return []
+      if (isExcludedName(us.location_name)) return []
+      const opt: DayStopOption = {
+        unverifiedStopId: us.id,
+        sourceType: "unverified",
+        name: us.location_name,
+        latitude: Number(us.latitude),
+        longitude: Number(us.longitude),
+        distanceFromStartKm:
+          row.distance_from_start_km ??
+          calculateDistance(startLat, startLng, Number(us.latitude), Number(us.longitude)),
       }
       return [opt]
     })
 
-  // ── Load pre-generated custom stops (broad sweep from generateCustomStop) ──
-  const { data: customRows } = await supabaseAdmin
-    .from("custom_stops")
-    .select("id, location_name, latitude, longitude, place_type, distance_from_start_km")
-    .eq("trip_id", tripId)
+  for (const us of unverifiedPool) placesBudget.recordPlace(us.unverifiedStopId)
 
-  const customPool: DayStopOption[] = (customRows ?? [])
-    .filter((cs) => !OVERNIGHT_EXCLUDE.test(cs.location_name ?? ""))
-    .map((cs) => ({
-      id: cs.id,
-      sourceType: "custom" as const,
-      name: cs.location_name,
-      latitude: Number(cs.latitude),
-      longitude: Number(cs.longitude),
-      distanceFromStartKm:
-        cs.distance_from_start_km ??
-        calculateDistance(startLat, startLng, Number(cs.latitude), Number(cs.longitude)),
-      customStopId: cs.id,
-    }))
-
-  console.log("[organizeStopsByDay] pools loaded", {
+  console.log("[organizeStopsByDay] pools", {
     verified: verifiedPool.length,
-    custom: customPool.length,
+    unverified: unverifiedPool.length,
     days: userDays,
     kmPerDay,
   })
 
-  // ── Per-day assignment ───────────────────────────────────────────────────────
+  // Per-day assignment.
   const byProximity = (target: number) => (a: DayStopOption, b: DayStopOption) =>
     Math.abs(a.distanceFromStartKm - target) - Math.abs(b.distanceFromStartKm - target)
+
+  const optionKey = (o: DayStopOption) =>
+    o.sourceType === "verified" ? `v:${o.stopId}` : `u:${o.unverifiedStopId}`
 
   const dedupByName = (stops: DayStopOption[]): DayStopOption[] => {
     const seen = new Map<string, DayStopOption>()
@@ -267,26 +344,17 @@ export async function organizeStopsByDay(
     return Array.from(seen.values())
   }
 
-  // Lock only selected overnights (dayOrder 1) from reuse.
-  const selectedIds = new Set<string>()
+  const lockedKeys = new Set<string>()
 
-  // Collect new Google Places stops that need to be stored in custom_stops.
-  const newCustomStopsToStore: Array<{
-    trip_id: string
-    location_name: string
-    latitude: string
-    longitude: string
-    place_type: string
-    distance_from_start_km: number
-    day_index: number
-  }> = []
-  const storedCustomNames = new Set(customPool.map((c) => c.name.toLowerCase().trim()))
+  // Track new unverified stops we add via per-day Places top-up so we can link
+  // them to trip_candidate_stops at the end.
+  const newlyDiscovered = new Map<string, UnverifiedStopRow>()
 
+  const optionsPerDayCap = env.MAX_STOP_OPTIONS_PER_DAY
   const dayOptions: Array<{ dayNumber: number; targetKm: number; options: DayStopOption[] }> = []
 
   for (let day = 1; day <= userDays; day++) {
     const targetKm = kmPerDay * day
-    // Window: 55% behind → 45% ahead of the target km mark.
     const windowMin = targetKm - kmPerDay * 0.55
     const windowMax = targetKm + kmPerDay * 0.45
 
@@ -294,17 +362,16 @@ export async function organizeStopsByDay(
       s.distanceFromStartKm >= windowMin && s.distanceFromStartKm <= windowMax
 
     const verifiedInWindow = dedupByName(
-      verifiedPool.filter(inWindow).filter((s) => !selectedIds.has(s.id)).sort(byProximity(targetKm))
+      verifiedPool.filter(inWindow).filter((s) => !lockedKeys.has(optionKey(s))).sort(byProximity(targetKm)),
     )
-    const customInWindow = dedupByName(
-      customPool.filter(inWindow).filter((s) => !selectedIds.has(s.id)).sort(byProximity(targetKm))
+    const unverifiedInWindow = dedupByName(
+      unverifiedPool.filter(inWindow).filter((s) => !lockedKeys.has(optionKey(s))).sort(byProximity(targetKm)),
     )
 
-    // Merge: verified first, then custom stops from broad sweep.
-    let options = dedupByName([...verifiedInWindow, ...customInWindow]).slice(0, 3)
+    let options = dedupByName([...verifiedInWindow, ...unverifiedInWindow]).slice(0, optionsPerDayCap)
 
-    // If still fewer than 3, do a targeted Google Places search at the day's target location.
-    if (options.length < 3 && googleApiKey) {
+    // Top-up: cache-first + Places fallback (budget-bound).
+    if (options.length < optionsPerDayCap && googleApiKey && !placesBudget.exhausted) {
       let targetPoint: { lat: number; lng: number }
       if (hasPolyline) {
         targetPoint = samplePolylineAtKm(targetKm, polyline, cumTable)
@@ -315,11 +382,10 @@ export async function organizeStopsByDay(
           lng: startLng + (destLng - startLng) * frac,
         }
       }
-
-      // Search radius: 30 km standard; expand to 50 km for remote routes.
       const searchRadius = isRemoteRoute ? 50_000 : 30_000
+      const needed = optionsPerDayCap - options.length
 
-      const gPlaces = await searchGooglePlacesForDay(
+      const fetched = await searchPlacesForDay(
         targetPoint.lat,
         targetPoint.lng,
         searchRadius,
@@ -327,69 +393,115 @@ export async function organizeStopsByDay(
         hasPolyline ? polyline : [],
         hasPolyline ? cumTable : [],
         maxLateralKm,
+        placesBudget,
+        tripId,
+        needed,
       )
 
-      // Only add places that aren't already selected and aren't duplicates by name.
       const existingNames = new Set(options.map((o) => o.name.toLowerCase().trim()))
-      for (const gp of gPlaces) {
-        if (options.length >= 3) break
-        const key = gp.name.toLowerCase().trim()
-        if (existingNames.has(key) || selectedIds.has(gp.id)) continue
-        existingNames.add(key)
-        options.push(gp)
+      for (const row of fetched) {
+        if (options.length >= optionsPerDayCap) break
+        const k = row.location_name.toLowerCase().trim()
+        if (existingNames.has(k)) continue
+        existingNames.add(k)
 
-        // Queue for storage in custom_stops if not already there.
-        if (!storedCustomNames.has(key)) {
-          storedCustomNames.add(key)
-          newCustomStopsToStore.push({
-            trip_id: tripId,
-            location_name: gp.name,
-            latitude: String(gp.latitude),
-            longitude: String(gp.longitude),
-            place_type: "campground",
-            distance_from_start_km: gp.distanceFromStartKm,
-            day_index: day - 1,
-          })
+        const distFromStart = hasPolyline
+          ? projectPointOntoPolyline(row.latitude, row.longitude, polyline, cumTable).distanceFromStartKm
+          : calculateDistance(startLat, startLng, row.latitude, row.longitude)
+
+        const opt: DayStopOption = {
+          unverifiedStopId: row.id,
+          sourceType: "unverified",
+          name: row.location_name,
+          latitude: row.latitude,
+          longitude: row.longitude,
+          distanceFromStartKm: distFromStart,
         }
+        options.push(opt)
+        newlyDiscovered.set(row.id, row)
       }
     }
 
-    // If still fewer than 2 with a very sparse route, expand window and retry from existing pools.
+    // If still very thin, expand window (no API call, just relax filter).
     if (options.length < 2) {
       const expandedMin = targetKm - kmPerDay * 1.1
       const expandedMax = targetKm + kmPerDay * 0.9
       const inExpanded = (s: DayStopOption) =>
         s.distanceFromStartKm >= expandedMin && s.distanceFromStartKm <= expandedMax
       const expandedVerified = verifiedPool.filter(inExpanded).sort(byProximity(targetKm))
-      const expandedCustom = customPool.filter(inExpanded).sort(byProximity(targetKm))
-      const allExpanded = dedupByName([...expandedVerified, ...expandedCustom])
+      const expandedUnverified = unverifiedPool.filter(inExpanded).sort(byProximity(targetKm))
+      const allExpanded = dedupByName([...expandedVerified, ...expandedUnverified])
       const extra = allExpanded.filter(
-        (s) => !options.some((o) => o.id === s.id) && !selectedIds.has(s.id)
+        (s) => !options.some((o) => optionKey(o) === optionKey(s)) && !lockedKeys.has(optionKey(s)),
       )
-      options = dedupByName([...options, ...extra]).slice(0, 3)
+      options = dedupByName([...options, ...extra]).slice(0, optionsPerDayCap)
     }
 
-    console.log("[organizeStopsByDay] day", day, {
-      targetKm: Math.round(targetKm),
-      options: options.map((o) => ({
-        name: o.name,
-        source: o.sourceType,
-        dist: Math.round(o.distanceFromStartKm),
-      })),
-    })
-
     dayOptions.push({ dayNumber: day, targetKm, options })
-
-    // Lock the selected (first) overnight stop.
-    if (options.length > 0) selectedIds.add(options[0].id)
+    if (options.length > 0) lockedKeys.add(optionKey(options[0]))
   }
 
-  // Persist any newly fetched Google Places stops into custom_stops.
-  if (newCustomStopsToStore.length > 0) {
-    await supabaseAdmin.from("custom_stops").insert(newCustomStopsToStore).throwOnError()
+  // Persist newly-discovered unverified stops as trip_candidate_stops links so
+  // the cross-day Places API call propagates back to the trip.
+  if (newlyDiscovered.size > 0) {
+    const linkRows = Array.from(newlyDiscovered.values()).map((row) => ({
+      trip_id: tripId,
+      stop_id: null,
+      unverified_stop_id: row.id,
+      source_type: "unverified",
+    }))
+    await supabaseAdmin
+      .from("trip_candidate_stops")
+      .upsert(linkRows, {
+        onConflict: "trip_id,unverified_stop_id",
+        ignoreDuplicates: true,
+      })
   }
 
-  // ── Write itinerary ─────────────────────────────────────────────────────────
+  // Update per-day fields on trip_candidate_stops (single source of truth).
+  // Build (trip_id, stop_id|unverified_stop_id) -> {day_index, day_order, is_selected, distance_from_start_km}
+  type DayPatch = {
+    day_index: number
+    day_order: number
+    is_selected: boolean
+    distance_from_start_km: number
+  }
+  const verifiedPatches = new Map<string, DayPatch>()
+  const unverifiedPatches = new Map<string, DayPatch>()
+  for (const day of dayOptions) {
+    day.options.forEach((opt, i) => {
+      const patch: DayPatch = {
+        day_index: day.dayNumber - 1,
+        day_order: i + 1,
+        is_selected: i === 0,
+        distance_from_start_km: opt.distanceFromStartKm,
+      }
+      if (opt.sourceType === "verified" && opt.stopId) {
+        verifiedPatches.set(opt.stopId, patch)
+      } else if (opt.sourceType === "unverified" && opt.unverifiedStopId) {
+        unverifiedPatches.set(opt.unverifiedStopId, patch)
+      }
+    })
+  }
+
+  await Promise.all([
+    ...Array.from(verifiedPatches.entries()).map(([stopId, patch]) =>
+      supabaseAdmin!
+        .from("trip_candidate_stops")
+        .update(patch)
+        .eq("trip_id", tripId)
+        .eq("stop_id", stopId),
+    ),
+    ...Array.from(unverifiedPatches.entries()).map(([uid, patch]) =>
+      supabaseAdmin!
+        .from("trip_candidate_stops")
+        .update(patch)
+        .eq("trip_id", tripId)
+        .eq("unverified_stop_id", uid),
+    ),
+  ])
+
+  // Trip itinerary versioning + per-day route metadata.
   const existingItinerary = await supabaseAdmin
     .from("trip_itineraries")
     .select("version")
@@ -406,58 +518,12 @@ export async function organizeStopsByDay(
     .eq("trip_id", tripId)
     .eq("status", "active")
 
-  const stopsByDayJson: Record<string, unknown> = {}
-  const itineraryDayRows: Array<{
-    itinerary_id?: string
-    day_number: number
-    day_order: number
-    source_type: string
-    stop_id: string | null
-    custom_stop_id: string | null
-    is_selected: boolean
-    from_location: string
-    to_location: string
-    distance_km: number | null
-  }> = []
-
-  for (const day of dayOptions) {
-    const dayStopsJson = day.options.map((opt, i) => ({
-      id: opt.id,
-      name: opt.name,
-      latitude: opt.latitude,
-      longitude: opt.longitude,
-      distance_from_start_km: opt.distanceFromStartKm,
-      sourceType: opt.sourceType,
-      isSelected: i === 0,
-      dayOrder: i + 1,
-    }))
-
-    stopsByDayJson[`day${day.dayNumber}`] = dayStopsJson
-
-    for (let i = 0; i < day.options.length; i++) {
-      const opt = day.options[i]
-      itineraryDayRows.push({
-        day_number: day.dayNumber,
-        day_order: i + 1,
-        source_type: opt.sourceType,
-        stop_id: opt.stopId ?? null,
-        custom_stop_id: opt.customStopId ?? null,
-        is_selected: i === 0,
-        from_location: day.dayNumber === 1 ? "Start" : `Day ${day.dayNumber - 1}`,
-        to_location: opt.name,
-        distance_km: Math.round(kmPerDay),
-      })
-    }
-  }
-
   const { data: itineraryRecord, error: itineraryError } = await supabaseAdmin
     .from("trip_itineraries")
     .insert({
       trip_id: tripId,
       version: nextVersion,
-      source: "system",
       status: "active",
-      stops_by_day_json: stopsByDayJson,
     })
     .select("id")
     .single()
@@ -467,17 +533,30 @@ export async function organizeStopsByDay(
     return
   }
 
-  if (itineraryRecord && itineraryDayRows.length > 0) {
-    await supabaseAdmin.from("itinerary_days").insert(
-      itineraryDayRows.map((row) => ({ ...row, itinerary_id: itineraryRecord.id }))
-    )
+  if (itineraryRecord) {
+    const itineraryDayRows = dayOptions.map((day) => {
+      const selected = day.options[0]
+      return {
+        itinerary_id: itineraryRecord.id,
+        day_number: day.dayNumber,
+        source_type: selected?.sourceType ?? "verified",
+        from_location: day.dayNumber === 1 ? "Start" : `Day ${day.dayNumber - 1}`,
+        to_location: selected?.name ?? "",
+        distance_km: Math.round(kmPerDay),
+      }
+    })
+    if (itineraryDayRows.length > 0) {
+      await supabaseAdmin.from("itinerary_days").insert(itineraryDayRows)
+    }
   }
 
   console.log("[organizeStopsByDay] complete", {
     tripId,
     days: userDays,
-    totalStops: verifiedPool.length + customPool.length,
-    newGooglePlaces: newCustomStopsToStore.length,
+    verified: verifiedPool.length,
+    unverified: unverifiedPool.length,
+    newlyDiscovered: newlyDiscovered.size,
     optionsPerDay: dayOptions.map((d) => d.options.length),
+    budget: placesBudget.summary(),
   })
 }

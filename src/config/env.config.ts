@@ -40,4 +40,18 @@ export const env = {
     NEXT_PUBLIC_PLANNER_NEARBY_RADIUS: Number(process.env.NEXT_PUBLIC_PLANNER_NEARBY_RADIUS) || 35000,
 
     SHORT_ROUTE_THRESHOLD_KM: 200,
+
+    // Places API budget (per trip)
+    MAX_PLACES_CALLS_PER_TRIP_BASE: Number(process.env.MAX_PLACES_CALLS_PER_TRIP_BASE) || 20,
+    MAX_PLACES_CALLS_PER_TRIP_HARD_CAP: Number(process.env.MAX_PLACES_CALLS_PER_TRIP_HARD_CAP) || 150,
+    MAX_RADIUS_EXPANSIONS: Number(process.env.MAX_RADIUS_EXPANSIONS) || 2,
+    MAX_STOP_OPTIONS_PER_DAY: Number(process.env.MAX_STOP_OPTIONS_PER_DAY) || 5,
+
+    // Cache lookup radius for unverified_stops (degrees) -- ~50 km at AU latitudes.
+    UNVERIFIED_CACHE_BBOX_DEG: Number(process.env.UNVERIFIED_CACHE_BBOX_DEG) || 0.45,
+
+    // Usable cached candidates near a probe point above which we skip the Places search.
+    PROBE_CACHE_SUFFICIENT: Number(process.env.PROBE_CACHE_SUFFICIENT) || 4,
+    // Target stop count per day; combined with verified-stop count to derive the per-trip Places budget.
+    STOPS_PER_DAY_TARGET: Number(process.env.STOPS_PER_DAY_TARGET) || 5,
 };

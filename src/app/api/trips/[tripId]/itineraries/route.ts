@@ -87,7 +87,7 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
     // Verify trip belongs to user
     const { data: trip, error: tripError } = await supabaseAdmin
       .from("trips")
-      .select("id, route_data_json")
+      .select("id")
       .eq("id", tripId)
       .eq("user_id", userId)
       .single()
@@ -120,13 +120,6 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
       .from("trip_itineraries")
       .update({ status: "active" })
       .eq("id", itineraryId)
-
-    // Sync restored narrative back to trips.route_data_json for fast loading
-    const existingJson = (trip.route_data_json as Record<string, unknown>) ?? {}
-    await supabaseAdmin
-      .from("trips")
-      .update({ route_data_json: { ...existingJson, narrative: targetItinerary.itinerary_json } })
-      .eq("id", tripId)
 
     return NextResponse.json({ success: true, narrative: targetItinerary.itinerary_json })
   } catch (error: unknown) {
@@ -177,14 +170,14 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       .eq("trip_id", tripId)
       .eq("status", "active")
 
-    // Insert new itinerary record
+    // Insert new itinerary record (no stops_by_day_json — that lives on
+    // trip_candidate_stops and is reconstructed on read).
     const { data: itineraryRecord, error: itineraryError } = await supabaseAdmin
       .from("trip_itineraries")
       .insert({
         trip_id: tripId,
         version: nextVersion,
         status: "active",
-        stops_by_day_json: days,
         trip_snapshot_json: { trip, corridor, totalDistanceKm, days },
         itinerary_json: narrative,
       })
@@ -215,25 +208,13 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
           aao_tip: day.aaoTips?.[0] ?? null,
           reason: day.narrative,
           day_json: day,
-          is_selected: day.suggestedStay?.name != null,
         }
       })
       await supabaseAdmin.from("itinerary_days").insert(dayRows)
     }
 
-    // Patch trip's route_data_json for quick loading
-    const { data: tripDataRow } = await supabaseAdmin
-      .from("trips")
-      .select("route_data_json")
-      .eq("id", tripId)
-      .single()
-
-    const existingJson = (tripDataRow?.route_data_json as Record<string, unknown>) ?? {}
-    await supabaseAdmin
-      .from("trips")
-      .update({ route_data_json: { ...existingJson, narrative } })
-      .eq("id", tripId)
-
+    // Narrative lives only on trip_itineraries.itinerary_json (no duplication
+    // into trips.route_data_json).
     return NextResponse.json({ success: true, narrative })
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Unknown error"

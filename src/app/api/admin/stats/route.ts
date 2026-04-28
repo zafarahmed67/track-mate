@@ -16,7 +16,7 @@ export async function GET() {
       )
     }
 
-    const [stopsResult, usersResult, auditResult] = await Promise.all([
+    const [stopsResult, usersResult, auditResult, unverifiedResult] = await Promise.all([
       supabaseAdmin
         .from("stops")
         .select("verification_status", { count: "exact" }),
@@ -28,11 +28,16 @@ export async function GET() {
         .select("id,action,entity_type,entity_id,created_at")
         .order("created_at", { ascending: false })
         .limit(10),
+      supabaseAdmin
+        .from("unverified_stops")
+        .select("id", { count: "exact", head: true })
+        .eq("review_status", "pending"),
     ])
 
     const stops = stopsResult.data ?? []
     const totalStops = stopsResult.count ?? 0
     const totalUsers = usersResult.count ?? 0
+    const pendingUnverifiedStops = unverifiedResult.count ?? 0
 
     const byStatus = stops.reduce<Record<string, number>>((acc, s) => {
       const key = s.verification_status ?? "unknown"
@@ -45,6 +50,7 @@ export async function GET() {
       totalStops,
       totalUsers,
       stopsByStatus: byStatus,
+      pendingUnverifiedStops,
       recentAuditLog: auditResult.data ?? [],
     })
   } catch (error: unknown) {

@@ -48,6 +48,11 @@ export default function PlannerDetailPage() {
   const [tripNotFound, setTripNotFound] = useState(false)
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null)
   const [trip, setTrip] = useState<TripData | null>(null)
+  const [placesApiLog, setPlacesApiLog] = useState<{
+    total: number
+    byEndpoint: Record<string, number>
+    byOutcome: Record<string, number>
+  } | null>(null)
   const [stops, setStops] = useState<TripStop[]>([])
   const [directions, setDirections] = useState<google.maps.DirectionsResult | null>(null)
   const [fuelStations, setFuelStations] = useState<Array<{
@@ -162,6 +167,37 @@ export default function PlannerDetailPage() {
   }, [trip?.route_data_json])
 
   const effectiveDaysAdjustment = routeMeta.daysAdjustment ?? persistedDaysAdjustment
+
+  const placesBudgetSummary = useMemo(() => {
+    const routeJson = trip?.route_data_json
+    if (!routeJson || typeof routeJson !== "object") return null
+    const raw = (routeJson as { placesBudget?: Record<string, unknown> }).placesBudget
+    if (!raw || typeof raw !== "object") return null
+    const callsMade = Number(raw.callsMade)
+    const maxCalls = Number(raw.maxCalls)
+    if (!Number.isFinite(callsMade) || !Number.isFinite(maxCalls)) return null
+    const rawByEndpoint = raw.byEndpoint
+    const byEndpoint: Record<string, number> = {}
+    if (rawByEndpoint && typeof rawByEndpoint === "object") {
+      for (const [k, v] of Object.entries(rawByEndpoint as Record<string, unknown>)) {
+        const n = Number(v)
+        if (Number.isFinite(n)) byEndpoint[k] = n
+      }
+    }
+    return {
+      callsMade,
+      maxCalls,
+      cacheHits: Number(raw.cacheHits) || 0,
+      cacheMisses: Number(raw.cacheMisses) || 0,
+      pointsSatisfiedByCache: Number(raw.pointsSatisfiedByCache) || 0,
+      gapToFill:
+        raw.gapToFill === null || raw.gapToFill === undefined
+          ? null
+          : Number(raw.gapToFill),
+      byEndpoint,
+      capturedAt: typeof raw.capturedAt === "string" ? raw.capturedAt : undefined,
+    }
+  }, [trip?.route_data_json])
   const adjustedDays = effectiveDaysAdjustment?.adjustedToDays
   const targetDays = adjustedDays ?? requestedDays
 
@@ -347,9 +383,21 @@ export default function PlannerDetailPage() {
   }, [])
 
   const getMergedSegmentOptions = useCallback((segment: RouteSegment, segmentIndex: number, maxOptions = 3) => {
-    const apiOptions = segment.options && segment.options.length > 0
+    const isFuelStopOption = (o: RouteStopOption) => {
+      const rt = (o.route_type ?? "").toLowerCase()
+      const st = (o.stay_type ?? "").toLowerCase()
+      const nm = (o.location_name ?? "").toLowerCase()
+      if (rt === "fuel" || rt === "gas_station" || rt === "service_station" || rt === "truckstop") return true
+      if (st === "fuel" || st === "gas_station" || st === "service_station" || st === "truckstop") return true
+      if (/\b(bp|shell|caltex|ampol|united|puma|mobil|liberty|metro|esso)\b/.test(nm)) return true
+      if (/\b(truck\s*stop|truckstop|service\s*station|servo|petrol|fuel\s*stop|roadhouse)\b/.test(nm)) return true
+      return false
+    }
+
+    const apiOptions = (segment.options && segment.options.length > 0
       ? segment.options
       : filterStopsBySegmentDistance(segment, [...segment.verifiedStops, ...segment.otherStops])
+    ).filter((o) => !isFuelStopOption(o))
 
     const itineraryOptions = activeItineraryDays
       .filter((row) => Number(row.day_number) === segmentIndex + 1)
@@ -374,14 +422,20 @@ export default function PlannerDetailPage() {
       })
       .filter((option): option is RouteStopOption => Boolean(option))
 
+    const isLastSegment = segmentIndex === daySegments.length - 1
     const persistedOptions = stops
       .filter((stop) => {
         if (excludedOptionIds.has(normalizeStopId(stop.stop_id || stop.id) || stop.id)) return false
+        const rt = (stop.route_type ?? "").toLowerCase()
+        const st = (stop.stay_type ?? stop.stop_type ?? "").toLowerCase()
+        if (rt === "fuel" || rt === "gas_station" || st === "fuel" || st === "gas_station") return false
         if (typeof stop.day_index === "number" && Number.isFinite(stop.day_index)) {
           return Math.trunc(stop.day_index) === segmentIndex
         }
         const distance = Number(stop.distance_from_start_km)
-        return Number.isFinite(distance) && distance >= segment.startKm && distance <= segment.endKm
+        return Number.isFinite(distance) &&
+          distance >= segment.startKm &&
+          (isLastSegment ? distance <= segment.endKm : distance < segment.endKm)
       })
       .map(tripStopToRouteOption)
 
@@ -444,8 +498,15 @@ export default function PlannerDetailPage() {
       merged.unshift(recommended)
     }
 
-    return merged.slice(0, maxOptions)
-  }, [activeItineraryDays, excludedOptionIds, filterStopsBySegmentDistance, getOptionIdentityKeys, stops, tripStopToRouteOption])
+    // Remove stops that are behind the segment start (prevents 0 km entries caused by
+    // backwards or misattributed stops appearing in the wrong day's options).
+    const forward = merged.filter((opt) => {
+      const km = getStopDistanceKm(opt)
+      return km === null || km >= segment.startKm - 5
+    })
+
+    return forward.slice(0, maxOptions)
+  }, [activeItineraryDays, daySegments.length, excludedOptionIds, filterStopsBySegmentDistance, getOptionIdentityKeys, stops, tripStopToRouteOption])
 
   const handleChooseSegmentOption = async (segment: RouteSegment, segmentIndex: number, option: RouteStopOption) => {
     setSelectedSegmentOptionIds((prev) => ({
@@ -1216,6 +1277,9 @@ export default function PlannerDetailPage() {
         }
 
         setTrip(data.trip)
+        if (data.placesApiLog && typeof data.placesApiLog === "object") {
+          setPlacesApiLog(data.placesApiLog)
+        }
 
         // Populate routeMeta with distance and estimated duration from trip
         if (data.trip && typeof data.trip.total_distance_km === "number") {
@@ -1760,6 +1824,8 @@ export default function PlannerDetailPage() {
               />
               <TripPlanningAlerts
                 routeWarnings={routeWarnings}
+                placesBudget={placesBudgetSummary}
+                placesApiLog={placesApiLog}
               />
             </div>
 

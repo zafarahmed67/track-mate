@@ -1,10 +1,19 @@
 import { NextRequest, NextResponse } from "next/server"
 import { env } from "@/config/env.config"
+import {
+  findNearby as findNearbyUnverified,
+  upsertMany as upsertUnverified,
+} from "@/lib/unverifiedStopsCache"
+import { logPlacesCall } from "@/lib/placesApiLog"
+
+const FUEL_PLACE_TYPE = "gas_station"
+const CACHE_SUFFICIENT_PER_POINT = 3
 
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url)
     const route = searchParams.get("route")
+    const tripId = searchParams.get("tripId")
 
     if (!route) {
       return NextResponse.json(
@@ -47,27 +56,66 @@ export async function GET(req: NextRequest) {
     const samplePoints = Math.min(coordinates.length, 10)
     const step = Math.floor(coordinates.length / samplePoints)
 
+    const distanceToRouteKm = (lat: number, lng: number): number => {
+      let minDistance = Infinity
+      for (const coord of coordinates) {
+        const distance =
+          Math.sqrt(Math.pow(coord.lat - lat, 2) + Math.pow(coord.lng - lng, 2)) *
+          111
+        minDistance = Math.min(minDistance, distance)
+      }
+      return Math.round(minDistance * 10) / 10
+    }
+
     for (let i = 0; i < samplePoints; i++) {
       const point = coordinates[i * step]
-      
-      const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${point.lat},${point.lng}&radius=${env.FUEL_STATIONS_RADIUS}&type=gas_station&key=${apiKey}`
+
+      // Cache-first: skip Google entirely when our unverified_stops table
+      // already has enough fuel stops near this probe point.
+      const cached = await findNearbyUnverified(point.lat, point.lng, {
+        bboxDeg: env.UNVERIFIED_CACHE_BBOX_DEG / 4,
+        placeTypes: [FUEL_PLACE_TYPE],
+      })
+      if (cached.length >= CACHE_SUFFICIENT_PER_POINT) {
+        for (const row of cached) {
+          fuelStations.push({
+            name: row.location_name,
+            lat: row.latitude,
+            lng: row.longitude,
+            address: row.address ?? "",
+            isOpenNow: false,
+            rating: row.rating ?? 0,
+            distanceToRoute: distanceToRouteKm(row.latitude, row.longitude),
+          })
+        }
+        logPlacesCall({
+          tripId,
+          endpoint: "nearbysearch",
+          placeType: FUEL_PLACE_TYPE,
+          cacheOutcome: "skipped",
+          resultCount: cached.length,
+          source: "places/fuel-stations",
+        })
+        continue
+      }
+
+      const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${point.lat},${point.lng}&radius=${env.FUEL_STATIONS_RADIUS}&type=${FUEL_PLACE_TYPE}&key=${apiKey}`
 
       const response = await fetch(url)
       const data = await response.json()
+      logPlacesCall({
+        tripId,
+        endpoint: "nearbysearch",
+        placeType: FUEL_PLACE_TYPE,
+        cacheOutcome: "miss",
+        resultCount: Array.isArray(data?.results) ? data.results.length : 0,
+        source: "places/fuel-stations",
+      })
 
       if (data.results) {
         for (const station of data.results) {
           const stationLat = station.geometry.location.lat
           const stationLng = station.geometry.location.lng
-          
-          let minDistance = Infinity
-          for (const coord of coordinates) {
-            const distance = Math.sqrt(
-              Math.pow(coord.lat - stationLat, 2) + Math.pow(coord.lng - stationLng, 2)
-            ) * 111
-            minDistance = Math.min(minDistance, distance)
-          }
-
           fuelStations.push({
             name: station.name,
             lat: stationLat,
@@ -75,9 +123,13 @@ export async function GET(req: NextRequest) {
             address: station.vicinity || "",
             isOpenNow: station.opening_hours?.open_now || false,
             rating: station.rating || 0,
-            distanceToRoute: Math.round(minDistance * 10) / 10,
+            distanceToRoute: distanceToRouteKm(stationLat, stationLng),
           })
         }
+        await upsertUnverified(data.results, {
+          placeType: FUEL_PLACE_TYPE,
+          applyOvernightExclusion: false,
+        })
       }
     }
 
