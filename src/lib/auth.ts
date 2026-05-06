@@ -32,6 +32,7 @@ export function isAuthenticated(): boolean {
 
 export function logout(): void {
   if (typeof window === "undefined") return
+  void fetch("/api/auth/logout", { method: "POST" }).catch(() => undefined)
   localStorage.removeItem("trackmate_access_token")
   localStorage.removeItem("trackmate_refresh_token")
   localStorage.removeItem("trackmate_expires_at")

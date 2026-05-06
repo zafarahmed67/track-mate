@@ -54,8 +54,9 @@ export default function AdminDashboard() {
 
   useEffect(() => {
     const user = getStoredUser()
+    console.log("AdminDashboard - current user:", user)
     if (!user) {
-      router.replace("/login")
+      // router.replace("/login")
       return
     }
     // Check if user has admin role

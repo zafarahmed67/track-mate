@@ -22,6 +22,26 @@ interface UserRecord {
   access_status: string
 }
 
+async function syncServerSession(session: {
+  access_token: string
+  refresh_token: string | null
+  expires_at?: number
+}) {
+  try {
+    await fetch("/api/auth/session", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        access_token: session.access_token,
+        refresh_token: session.refresh_token,
+        expires_at: session.expires_at,
+      }),
+    })
+  } catch {
+    // Best effort; localStorage remains as fallback for client-side checks.
+  }
+}
+
 async function ensureUserInDatabase(email: string, userId: string): Promise<UserRecord | null> {
   try {
     const response = await fetch("/api/auth/callback", {
@@ -44,7 +64,6 @@ async function ensureUserInDatabase(email: string, userId: string): Promise<User
 function AuthCallbackContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
-  const [error, setError] = useState<string | null>(null)
   const [redirecting, setRedirecting] = useState(false)
 
   useEffect(() => {
@@ -96,6 +115,8 @@ function AuthCallbackContent() {
               access_status: userRecord.access_status,
             }))
 
+            await syncServerSession(session)
+
             router.replace(userRecord.access_status === "active" || userRecord.role === "admin" ? "/planner" : "/no-access")
             return
           }
@@ -122,6 +143,8 @@ function AuthCallbackContent() {
             role: userRecord.role,
             access_status: userRecord.access_status,
           }))
+
+          await syncServerSession(session)
 
           router.replace(userRecord.access_status === "active" || userRecord.role === "admin" ? "/planner" : "/no-access")
           return
@@ -151,6 +174,8 @@ function AuthCallbackContent() {
                 access_status: userRecord.access_status,
               }))
 
+              await syncServerSession(session)
+
               router.replace(userRecord.access_status === "active" || userRecord.role === "admin" ? "/planner" : "/no-access")
             }
           }
@@ -167,7 +192,7 @@ function AuthCallbackContent() {
     handleCallback()
   }, [router, searchParams])
 
-  if (error || redirecting) {
+  if (redirecting) {
     return (
       <main className="flex min-h-screen items-center justify-center">
         <p className="text-muted-foreground">Redirecting…</p>
