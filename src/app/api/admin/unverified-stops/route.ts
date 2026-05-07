@@ -158,7 +158,7 @@ export async function DELETE(req: NextRequest) {
   }
 }
 
-/** Promote: copy unverified -> stops (verification_status='verified'),
+/** Promote: copy unverified -> stops (verification_status='AAO Verified'),
  *  mark unverified as review_status='promoted'. */
 export async function POST(req: NextRequest) {
   try {
@@ -187,14 +187,22 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, error: srcError?.message ?? "Not found" }, { status: 404 })
     }
 
+    const { verification_status: overrideStatus, ...overrideFields } = overrides ?? {}
+    const normalizedStatus =
+      overrideStatus === "verified"
+        ? "AAO Verified"
+        : typeof overrideStatus === "string"
+          ? overrideStatus
+          : "AAO Verified"
+
     const stopRow: Record<string, unknown> = {
       location_name: src.location_name,
       state: src.state ?? "",
       region: src.region ?? "",
       latitude: String(src.latitude),
       longitude: String(src.longitude),
-      verification_status: "verified",
-      ...overrides,
+      ...overrideFields,
+      verification_status: normalizedStatus,
     }
 
     const { data: inserted, error: insertError } = await supabaseAdmin
