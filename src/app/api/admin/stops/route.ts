@@ -126,7 +126,7 @@ export async function POST(req: NextRequest) {
         road_suitability: body.road_suitability ?? null,
         max_rig_length: body.max_rig_length ?? null,
         cost_band: body.cost_band ?? null,
-        verification_status: body.verification_status ?? "unverified",
+        verification_status: body.verification_status ?? "AAO Verified",
       })
       .select()
       .single()

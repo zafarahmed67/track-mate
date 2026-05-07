@@ -117,7 +117,7 @@ function AuthCallbackContent() {
 
             await syncServerSession(session)
 
-            router.replace(userRecord.access_status === "active" || userRecord.role === "admin" ? "/planner" : "/no-access")
+            router.replace(userRecord.role === "admin" ? "/admin" : userRecord.access_status === "active" ? "/planner" : "/no-access")
             return
           }
         }
@@ -146,7 +146,7 @@ function AuthCallbackContent() {
 
           await syncServerSession(session)
 
-          router.replace(userRecord.access_status === "active" || userRecord.role === "admin" ? "/planner" : "/no-access")
+          router.replace(userRecord.role === "admin" ? "/admin" : userRecord.access_status === "active" ? "/planner" : "/no-access")
           return
         }
 
@@ -176,7 +176,7 @@ function AuthCallbackContent() {
 
               await syncServerSession(session)
 
-              router.replace(userRecord.access_status === "active" || userRecord.role === "admin" ? "/planner" : "/no-access")
+              router.replace(userRecord.role === "admin" ? "/admin" : userRecord.access_status === "active" ? "/planner" : "/no-access")
             }
           }
         })

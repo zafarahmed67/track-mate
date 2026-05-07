@@ -118,7 +118,7 @@ const EMPTY_FORM: StopFormData = {
   road_suitability: "",
   max_rig_length: "",
   cost_band: "",
-  verification_status: "unverified",
+  verification_status: "AAO Verified",
   affiliate_partner: "",
   partner_type: "",
   affiliate_url: "",
@@ -372,9 +372,8 @@ export default function AdminStopsPage() {
   }
 
   const verificationColor: Record<string, string> = {
-    verified: "bg-green-100 text-green-800",
+    "AAO Verified": "bg-emerald-100 text-emerald-800",
     unverified: "bg-yellow-100 text-yellow-800",
-    custom: "bg-blue-100 text-blue-800",
   }
 
   return (
@@ -728,7 +727,7 @@ export default function AdminStopsPage() {
 
       {/* ── Add / Edit Sheet ──────────────────────────────────────── */}
       <Sheet open={sheetOpen} onOpenChange={setSheetOpen}>
-        <SheetContent className="w-full sm:max-w-xl overflow-y-auto">
+        <SheetContent className="w-full sm:max-w-xl overflow-y-auto px-6 py-6">
           <SheetHeader>
             <SheetTitle>{editingId ? "Edit Stop" : "Add Stop"}</SheetTitle>
           </SheetHeader>
@@ -887,12 +886,11 @@ export default function AdminStopsPage() {
                 </div>
                 <div className="space-y-2">
                   <Label>Verification Status</Label>
-                  <Select value={form.verification_status ?? "unverified"} onValueChange={(v) => setField("verification_status", v)}>
+                  <Select value={form.verification_status ?? "AAO Verified"} onValueChange={(v) => setField("verification_status", v)}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="verified">Verified</SelectItem>
+                      <SelectItem value="AAO Verified">AAO Verified</SelectItem>
                       <SelectItem value="unverified">Unverified</SelectItem>
-                      <SelectItem value="custom">Custom</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
