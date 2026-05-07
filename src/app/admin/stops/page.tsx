@@ -727,8 +727,8 @@ export default function AdminStopsPage() {
 
       {/* ── Add / Edit Sheet ──────────────────────────────────────── */}
       <Sheet open={sheetOpen} onOpenChange={setSheetOpen}>
-        <SheetContent className="w-full sm:max-w-xl overflow-y-auto px-6 py-6">
-          <SheetHeader>
+        <SheetContent className="w-full sm:max-w-xl overflow-y-auto p-6 sm:p-8">
+          <SheetHeader className="pr-10 pt-2">
             <SheetTitle>{editingId ? "Edit Stop" : "Add Stop"}</SheetTitle>
           </SheetHeader>
 
