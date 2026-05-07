@@ -7,6 +7,8 @@ import { getCorridorsFromStops, calculateDistance as calcDistance } from "@/lib/
 import {
   findNearby as findNearbyUnverified,
   upsertMany as upsertUnverified,
+  inferAustralianState,
+  inferRegion,
 } from "@/lib/unverifiedStopsCache"
 import { logPlacesCall } from "@/lib/placesApiLog"
 
@@ -568,6 +570,8 @@ export async function POST(req: NextRequest) {
               location_name: stop.name,
               latitude: lat,
               longitude: lng,
+              state: inferAustralianState(stop.address || null),
+              region: inferRegion(stop.address || null),
               address: stop.address || null,
               place_type: `google_${stop.place_type}`,
               source: "google_places",
@@ -580,7 +584,7 @@ export async function POST(req: NextRequest) {
           const { data: cached, error: cacheErr } = await supabaseAdmin
             .from("unverified_stops")
             .upsert(cacheRows, { onConflict: "place_id" })
-            .select("id, place_id, latitude, longitude")
+            .select("id, place_id, latitude, longitude, state")
 
           if (cacheErr) {
             console.error("❌ Error upserting unverified_stops:", cacheErr)
@@ -603,6 +607,7 @@ export async function POST(req: NextRequest) {
                 trip_id: tripId,
                 stop_id: null,
                 unverified_stop_id: row.id,
+                state: row.state ?? null,
                 source_type: "unverified",
                 day_index: dayIndex,
                 distance_from_start_km: progressDistance,

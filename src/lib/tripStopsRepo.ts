@@ -3,6 +3,7 @@ import { supabaseAdmin } from "@/config/supabase";
 export interface DayStopOption {
   id: string;
   name: string;
+  state?: string | null;
   latitude: number;
   longitude: number;
   distance_from_start_km: number | null;
@@ -17,7 +18,7 @@ export interface StopsByDay {
   [dayKey: string]: DayStopOption[];
 }
 
-type StopJoin = { id: string; location_name: string; latitude: number; longitude: number };
+type StopJoin = { id: string; location_name: string; state: string | null; latitude: number; longitude: number };
 interface TripCandidateRow {
   id: string;
   trip_id: string;
@@ -50,8 +51,8 @@ export async function getTripStopsByDay(
     .from("trip_candidate_stops")
     .select(
       `id, trip_id, stop_id, unverified_stop_id, source_type, day_index, day_order, is_selected, distance_from_start_km,
-       stops:stops(id, location_name, latitude, longitude),
-       unverified_stops:unverified_stops(id, location_name, latitude, longitude)`,
+        stops:stops(id, location_name, state, latitude, longitude),
+        unverified_stops:unverified_stops(id, location_name, state, latitude, longitude)`,
     )
     .eq("trip_id", tripId)
     .not("day_index", "is", null)
@@ -79,6 +80,7 @@ export async function getTripStopsByDay(
     byDay[dayKey].push({
       id: stopRef.id,
       name: stopRef.location_name,
+      state: stopRef.state,
       latitude: Number(stopRef.latitude),
       longitude: Number(stopRef.longitude),
       distance_from_start_km: raw.distance_from_start_km,

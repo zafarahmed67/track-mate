@@ -1,5 +1,6 @@
 import { supabaseAdmin } from "@/config/supabase"
 import { NextRequest, NextResponse } from "next/server"
+import { inferAustralianState, inferRegion } from "@/lib/unverifiedStopsCache"
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const normalizeStopId = (value: string): string => value.replace(/^custom-/, "")
@@ -29,7 +30,7 @@ export async function GET(req: NextRequest) {
     const { data, error } = await supabaseAdmin
       .from("trip_candidate_stops")
       .select(
-        "id, day_index, day_order, is_selected, distance_from_start_km, unverified_stops:unverified_stops(id, place_id, location_name, latitude, longitude, address, place_type)",
+        "id, day_index, day_order, is_selected, distance_from_start_km, state, unverified_stops:unverified_stops(id, place_id, location_name, latitude, longitude, state, address, place_type)",
       )
       .eq("trip_id", trip_id)
       .eq("source_type", "unverified")
@@ -50,6 +51,7 @@ export async function GET(req: NextRequest) {
               id: string
               place_id: string
               location_name: string
+              state: string | null
               latitude: number
               longitude: number
               address: string | null
@@ -59,6 +61,7 @@ export async function GET(req: NextRequest) {
               id: string
               place_id: string
               location_name: string
+              state: string | null
               latitude: number
               longitude: number
               address: string | null
@@ -71,6 +74,7 @@ export async function GET(req: NextRequest) {
           id: us.id,
           trip_id,
           location_name: us.location_name,
+          state: us.state,
           latitude: String(us.latitude),
           longitude: String(us.longitude),
           address: us.address,
@@ -140,6 +144,9 @@ export async function POST(req: NextRequest) {
 
     const lat = Number(latitude)
     const lng = Number(longitude)
+    const normalizedAddress = address ?? null
+    const inferredState = inferAustralianState(normalizedAddress)
+    const inferredRegion = inferRegion(normalizedAddress)
     const stablePlaceId =
       typeof place_id === "string" && place_id.length > 0
         ? place_id
@@ -154,14 +161,16 @@ export async function POST(req: NextRequest) {
           location_name,
           latitude: lat,
           longitude: lng,
-          address: address ?? null,
+          state: inferredState,
+          region: inferredRegion,
+          address: normalizedAddress,
           place_type: place_type ?? null,
           source: typeof place_id === "string" ? "google_places" : "user_added",
           first_seen_trip_id: trip_id,
         },
         { onConflict: "place_id" },
       )
-      .select("id, place_id, location_name, latitude, longitude, address, place_type")
+      .select("id, place_id, location_name, latitude, longitude, state, address, place_type")
       .single()
 
     if (upsertError || !cached) {
@@ -180,6 +189,7 @@ export async function POST(req: NextRequest) {
           trip_id,
           stop_id: null,
           unverified_stop_id: cached.id,
+          state: cached.state ?? null,
           source_type: "unverified",
           day_index: typeof day_index === "number" ? day_index : 0,
           day_order: 1,
@@ -202,6 +212,7 @@ export async function POST(req: NextRequest) {
         id: cached.id,
         trip_id,
         location_name: cached.location_name,
+        state: cached.state,
         latitude: String(cached.latitude),
         longitude: String(cached.longitude),
         address: cached.address,

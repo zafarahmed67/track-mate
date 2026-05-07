@@ -448,6 +448,7 @@ export async function organizeStopsByDay(
       trip_id: tripId,
       stop_id: null,
       unverified_stop_id: row.id,
+      state: row.state,
       source_type: "unverified",
     }))
     await supabaseAdmin

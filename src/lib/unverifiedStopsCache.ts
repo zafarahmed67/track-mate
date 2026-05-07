@@ -22,10 +22,40 @@ export interface PlacesNearbyResult {
   place_id?: string;
   name?: string;
   vicinity?: string;
+  formatted_address?: string;
   geometry?: { location?: { lat?: number; lng?: number } };
   types?: string[];
   rating?: number;
   user_ratings_total?: number;
+}
+
+const AU_STATE_PATTERNS: Array<{ state: string; pattern: RegExp }> = [
+  { state: "NSW", pattern: /\b(NSW|New South Wales)\b/i },
+  { state: "VIC", pattern: /\b(VIC|Victoria)\b/i },
+  { state: "QLD", pattern: /\b(QLD|Queensland)\b/i },
+  { state: "SA", pattern: /\b(SA|South Australia)\b/i },
+  { state: "WA", pattern: /\b(WA|Western Australia)\b/i },
+  { state: "TAS", pattern: /\b(TAS|Tasmania)\b/i },
+  { state: "ACT", pattern: /\b(ACT|Australian Capital Territory)\b/i },
+  { state: "NT", pattern: /\b(NT|Northern Territory)\b/i },
+];
+
+export function inferAustralianState(address: string | null): string | null {
+  if (!address) return null;
+  for (const { state, pattern } of AU_STATE_PATTERNS) {
+    if (pattern.test(address)) return state;
+  }
+  return null;
+}
+
+export function inferRegion(address: string | null): string | null {
+  if (!address) return null;
+  const parts = address
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (parts.length < 2) return null;
+  return parts[0] ?? null;
 }
 
 /**
@@ -113,12 +143,15 @@ export async function upsertMany(
       if (!placeId || !name) return null;
       if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
       if (applyExclusion && NAME_EXCLUDE.test(name)) return null;
+      const address = p.vicinity ?? p.formatted_address ?? null;
       return {
         place_id: placeId,
         location_name: name,
         latitude: lat,
         longitude: lng,
-        address: p.vicinity ?? null,
+        state: inferAustralianState(address),
+        region: inferRegion(address),
+        address,
         place_type: opts.placeType ?? p.types?.[0] ?? null,
         google_types: p.types ?? null,
         rating: typeof p.rating === "number" ? p.rating : null,

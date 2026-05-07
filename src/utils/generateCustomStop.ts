@@ -34,6 +34,7 @@ interface Candidate {
   unverifiedStopId: string
   placeId: string
   name: string
+  state: string | null
   latitude: number
   longitude: number
   distanceFromStartKm: number
@@ -243,6 +244,7 @@ export async function generateCustomStop(
           longitude: row.longitude,
           distanceFromStartKm: Math.round(routeDistanceFromStartKm * 10) / 10,
           lateralKm,
+          state: row.state,
         })
       }
     }
@@ -402,6 +404,7 @@ export async function generateCustomStop(
       trip_id: tripId,
       stop_id: null,
       unverified_stop_id: c.unverifiedStopId,
+      state: c.state,
       source_type: "unverified",
       day_index: filledBuckets[idx],
       day_order: 1,
