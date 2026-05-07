@@ -56,7 +56,8 @@ export default function AdminDashboard() {
     const user = getStoredUser()
     console.log("AdminDashboard - current user:", user)
     if (!user) {
-      // router.replace("/login")
+      localStorage.clear()
+      router.replace("/login")
       return
     }
     // Check if user has admin role
@@ -72,6 +73,15 @@ export default function AdminDashboard() {
     setLoading(true)
     try {
       const res = await fetch("/api/admin/stats")
+      if (res.status === 401) {
+        localStorage.clear()
+        router.replace("/login")
+        return
+      }
+      if (res.status === 403) {
+        router.replace("/planner")
+        return
+      }
       const data = await res.json()
       if (data.success) setStats(data)
     } finally {
